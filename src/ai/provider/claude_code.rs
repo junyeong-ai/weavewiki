@@ -252,6 +252,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires claude CLI installed"]
     async fn test_health_check() {
         let provider = ClaudeCodeProvider::new(ProviderConfig::default());
         let result = provider.health_check().await;
