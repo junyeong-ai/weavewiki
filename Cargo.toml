@@ -1,0 +1,88 @@
+[package]
+name = "weavewiki"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "AI-driven wiki documentation generator for codebases"
+license = "MIT"
+repository = "https://github.com/junyeong-ai/weavewiki"
+keywords = ["cli", "wiki", "documentation", "ai", "codebase"]
+categories = ["command-line-utilities", "development-tools"]
+
+[features]
+default = []
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.48", features = ["full", "process"] }
+async-trait = "0.1"
+futures = "0.3"
+backon = { version = "1.6", features = ["tokio-sleep"] }
+
+# HTTP Client (for LLM providers)
+reqwest = { version = "0.12", features = ["json"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+console = "0.16"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Storage
+rusqlite = { version = "0.37", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.31"
+dashmap = "6.1"
+
+# AST Parsing
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-bash = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-kotlin-sg = "0.4"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+ignore = "0.4"
+glob = "0.3"
+regex = "1"
+sha2 = "0.10"
+rand = "0.9"
+crc32fast = "1.5"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Security
+secrecy = "0.10"
+url = "2.5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Configuration
+directories = "6"
+toml = { version = "0.9.8", features = ["preserve_order"] }
+figment = { version = "0.10.19", features = ["toml", "env"] }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1.9"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

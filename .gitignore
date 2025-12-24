@@ -1,0 +1,30 @@
+# AI/Tool Configuration
+.claude/
+.serena/
+.specify/
+specs/
+
+# Rust
+target/
+*.rs.bk
+*.rlib
+*.prof*
+
+# TypeScript/Node.js
+node_modules/
+dist/
+build/
+*.log
+.env*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+backups/
