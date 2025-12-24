@@ -14,8 +14,39 @@
 
 - **100% Coverage** — Every source file explicitly documented
 - **Fact-Based** — Only observable facts from code, no guessing
-- **Multi-Agent** — 5-stage AI pipeline for deep analysis
+- **Multi-Agent** — 6-phase AI pipeline for deep analysis
 - **Resumable** — Stop anytime and continue where you left off
+
+---
+
+## Core Technology
+
+### 6-Phase Multi-Agent Pipeline
+
+```mermaid
+flowchart LR
+    P1[Characterization<br/>7 agents] --> P2[Bottom-Up<br/>Leaf-First]
+    P2 --> P3[Top-Down<br/>4 agents]
+    P3 --> P4[Consolidation<br/>AI Synthesis]
+    P4 --> P5[Refinement<br/>Quality Loop]
+    P5 --> OUT[Wiki Output]
+
+    style P1 fill:#e3f2fd
+    style P2 fill:#fff3e0
+    style P3 fill:#e8f5e9
+    style P4 fill:#fce4ec
+    style P5 fill:#f3e5f5
+```
+
+| Core Algorithm | Description |
+|----------------|-------------|
+| **Multi-Turn Characterization** | 7 agents across 3 turns build project profile |
+| **Deep Research** | 3-4 iteration deep analysis for Core/Important files |
+| **Leaf-First Processing** | Hierarchical context building from simple to complex |
+| **TALE Budget Management** | Dynamic token reallocation for predictable costs |
+| **5-Dimension Quality Score** | Coverage, completeness, accuracy, diagrams, clarity |
+
+> Detailed architecture: **[ARCHITECTURE.en.md](ARCHITECTURE.en.md)**
 
 ---
 

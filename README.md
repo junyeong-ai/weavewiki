@@ -14,8 +14,39 @@
 
 - **100% 커버리지** — 모든 소스 파일을 명시적으로 문서화
 - **사실 기반** — 코드에서 관찰 가능한 사실만 기록
-- **다중 에이전트** — 5단계 AI 파이프라인으로 깊이 있는 분석
+- **다중 에이전트** — 6단계 AI 파이프라인으로 깊이 있는 분석
 - **중단 복구** — 언제든 중단하고 이어서 작업 가능
+
+---
+
+## 핵심 기술
+
+### 6-Phase 멀티 에이전트 파이프라인
+
+```mermaid
+flowchart LR
+    P1[Characterization<br/>7 agents] --> P2[Bottom-Up<br/>Leaf-First]
+    P2 --> P3[Top-Down<br/>4 agents]
+    P3 --> P4[Consolidation<br/>AI Synthesis]
+    P4 --> P5[Refinement<br/>Quality Loop]
+    P5 --> OUT[Wiki Output]
+
+    style P1 fill:#e3f2fd
+    style P2 fill:#fff3e0
+    style P3 fill:#e8f5e9
+    style P4 fill:#fce4ec
+    style P5 fill:#f3e5f5
+```
+
+| 핵심 알고리즘 | 설명 |
+|--------------|------|
+| **멀티턴 Characterization** | 7개 에이전트가 3턴에 걸쳐 프로젝트 프로필 구축 |
+| **Deep Research** | Core/Important 파일에 대해 3-4회 반복 심층 분석 |
+| **Leaf-First 처리** | 단순→복잡 순서로 계층적 컨텍스트 구축 |
+| **TALE 예산 관리** | 동적 토큰 재할당으로 예측 가능한 비용 제어 |
+| **5차원 품질 점수** | 커버리지, 완성도, 정확도, 다이어그램, 명확도 |
+
+> 상세 아키텍처: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ---
 
