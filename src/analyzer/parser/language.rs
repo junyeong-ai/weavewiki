@@ -63,54 +63,144 @@ impl Language {
             Language::Rust => lang_meta!("Rust", "rust", ["rs"], ["rust"], true),
             Language::Go => lang_meta!("Go", "go", ["go"], ["go", "golang"], true),
             Language::C => lang_meta!("C", "c", ["c", "h"], ["c"], true),
-            Language::Cpp => lang_meta!("C++", "cpp", ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++"], ["cpp", "c++", "cxx"], true),
+            Language::Cpp => lang_meta!(
+                "C++",
+                "cpp",
+                ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++"],
+                ["cpp", "c++", "cxx"],
+                true
+            ),
             Language::Zig => lang_meta!("Zig", "zig", ["zig"], ["zig"], false),
             Language::Nim => lang_meta!("Nim", "nim", ["nim"], ["nim"], false),
 
             // JVM Languages
             Language::Java => lang_meta!("Java", "java", ["java"], ["java"], true),
-            Language::Kotlin => lang_meta!("Kotlin", "kotlin", ["kt", "kts"], ["kotlin", "kt"], true),
+            Language::Kotlin => {
+                lang_meta!("Kotlin", "kotlin", ["kt", "kts"], ["kotlin", "kt"], true)
+            }
             Language::Scala => lang_meta!("Scala", "scala", ["scala", "sc"], ["scala"], false),
-            Language::Groovy => lang_meta!("Groovy", "groovy", ["groovy", "gvy", "gy", "gsh"], ["groovy"], false),
-            Language::Clojure => lang_meta!("Clojure", "clojure", ["clj", "cljs", "cljc", "edn"], ["clojure", "clj"], false),
+            Language::Groovy => lang_meta!(
+                "Groovy",
+                "groovy",
+                ["groovy", "gvy", "gy", "gsh"],
+                ["groovy"],
+                false
+            ),
+            Language::Clojure => lang_meta!(
+                "Clojure",
+                "clojure",
+                ["clj", "cljs", "cljc", "edn"],
+                ["clojure", "clj"],
+                false
+            ),
 
             // Web Languages
-            Language::TypeScript => lang_meta!("TypeScript", "typescript", ["ts", "mts", "cts"], ["typescript", "ts"], true),
-            Language::JavaScript => lang_meta!("JavaScript", "javascript", ["js", "mjs", "cjs"], ["javascript", "js"], true),
+            Language::TypeScript => lang_meta!(
+                "TypeScript",
+                "typescript",
+                ["ts", "mts", "cts"],
+                ["typescript", "ts"],
+                true
+            ),
+            Language::JavaScript => lang_meta!(
+                "JavaScript",
+                "javascript",
+                ["js", "mjs", "cjs"],
+                ["javascript", "js"],
+                true
+            ),
             Language::Tsx => lang_meta!("TSX", "tsx", ["tsx"], ["tsx"], true),
             Language::Jsx => lang_meta!("JSX", "jsx", ["jsx"], ["jsx"], true),
             Language::Html => lang_meta!("HTML", "html", ["html", "htm"], ["html"], false),
             Language::Css => lang_meta!("CSS", "css", ["css"], ["css"], false),
-            Language::Scss => lang_meta!("SCSS", "scss", ["scss", "sass", "less"], ["scss", "sass"], false),
+            Language::Scss => lang_meta!(
+                "SCSS",
+                "scss",
+                ["scss", "sass", "less"],
+                ["scss", "sass"],
+                false
+            ),
             Language::Vue => lang_meta!("Vue", "vue", ["vue"], ["vue"], false),
             Language::Svelte => lang_meta!("Svelte", "svelte", ["svelte"], ["svelte"], false),
 
             // Scripting Languages
-            Language::Python => lang_meta!("Python", "python", ["py", "pyi", "pyw"], ["python", "py"], true),
-            Language::Ruby => lang_meta!("Ruby", "ruby", ["rb", "rake", "gemspec"], ["ruby", "rb"], true),
-            Language::Php => lang_meta!("PHP", "php", ["php", "phtml", "php3", "php4", "php5", "phps"], ["php"], false),
+            Language::Python => lang_meta!(
+                "Python",
+                "python",
+                ["py", "pyi", "pyw"],
+                ["python", "py"],
+                true
+            ),
+            Language::Ruby => lang_meta!(
+                "Ruby",
+                "ruby",
+                ["rb", "rake", "gemspec"],
+                ["ruby", "rb"],
+                true
+            ),
+            Language::Php => lang_meta!(
+                "PHP",
+                "php",
+                ["php", "phtml", "php3", "php4", "php5", "phps"],
+                ["php"],
+                false
+            ),
             Language::Perl => lang_meta!("Perl", "perl", ["pl", "pm"], ["perl", "pl"], false),
             Language::Lua => lang_meta!("Lua", "lua", ["lua"], ["lua"], false),
             Language::R => lang_meta!("R", "r", ["r"], ["r"], false),
 
             // Shell
-            Language::Bash => lang_meta!("Bash", "bash", ["sh", "bash", "zsh", "fish"], ["bash", "sh", "shell"], true),
-            Language::PowerShell => lang_meta!("PowerShell", "powershell", ["ps1", "psm1", "psd1"], ["powershell", "ps1"], false),
+            Language::Bash => lang_meta!(
+                "Bash",
+                "bash",
+                ["sh", "bash", "zsh", "fish"],
+                ["bash", "sh", "shell"],
+                true
+            ),
+            Language::PowerShell => lang_meta!(
+                "PowerShell",
+                "powershell",
+                ["ps1", "psm1", "psd1"],
+                ["powershell", "ps1"],
+                false
+            ),
 
             // Mobile
             Language::Swift => lang_meta!("Swift", "swift", ["swift"], ["swift"], false),
-            Language::ObjectiveC => lang_meta!("Objective-C", "objectivec", ["m", "mm"], ["objectivec", "objc"], false),
+            Language::ObjectiveC => lang_meta!(
+                "Objective-C",
+                "objectivec",
+                ["m", "mm"],
+                ["objectivec", "objc"],
+                false
+            ),
             Language::Dart => lang_meta!("Dart", "dart", ["dart"], ["dart"], false),
 
             // .NET
             Language::CSharp => lang_meta!("C#", "csharp", ["cs"], ["csharp", "c#", "cs"], false),
-            Language::FSharp => lang_meta!("F#", "fsharp", ["fs", "fsx", "fsi"], ["fsharp", "f#", "fs"], false),
+            Language::FSharp => lang_meta!(
+                "F#",
+                "fsharp",
+                ["fs", "fsx", "fsi"],
+                ["fsharp", "f#", "fs"],
+                false
+            ),
             Language::Vb => lang_meta!("VB.NET", "vb", ["vb"], ["vb", "vb.net"], false),
 
             // Functional
-            Language::Elixir => lang_meta!("Elixir", "elixir", ["ex", "exs"], ["elixir", "ex"], false),
-            Language::Erlang => lang_meta!("Erlang", "erlang", ["erl", "hrl"], ["erlang", "erl"], false),
-            Language::Haskell => lang_meta!("Haskell", "haskell", ["hs", "lhs"], ["haskell", "hs"], false),
+            Language::Elixir => {
+                lang_meta!("Elixir", "elixir", ["ex", "exs"], ["elixir", "ex"], false)
+            }
+            Language::Erlang => {
+                lang_meta!("Erlang", "erlang", ["erl", "hrl"], ["erlang", "erl"], false)
+            }
+            Language::Haskell => lang_meta!(
+                "Haskell",
+                "haskell",
+                ["hs", "lhs"],
+                ["haskell", "hs"],
+                false
+            ),
             Language::OCaml => lang_meta!("OCaml", "ocaml", ["ml", "mli"], ["ocaml", "ml"], false),
             Language::Crystal => lang_meta!("Crystal", "crystal", ["cr"], ["crystal", "cr"], false),
             Language::Julia => lang_meta!("Julia", "julia", ["jl"], ["julia", "jl"], false),
@@ -120,16 +210,50 @@ impl Language {
             Language::Yaml => lang_meta!("YAML", "yaml", ["yaml", "yml"], ["yaml", "yml"], false),
             Language::Json => lang_meta!("JSON", "json", ["json", "jsonc"], ["json"], false),
             Language::Toml => lang_meta!("TOML", "toml", ["toml"], ["toml"], false),
-            Language::Xml => lang_meta!("XML", "xml", ["xml", "xsd", "xsl", "xslt"], ["xml"], false),
-            Language::Markdown => lang_meta!("Markdown", "markdown", ["md", "markdown"], ["markdown", "md"], false),
+            Language::Xml => {
+                lang_meta!("XML", "xml", ["xml", "xsd", "xsl", "xslt"], ["xml"], false)
+            }
+            Language::Markdown => lang_meta!(
+                "Markdown",
+                "markdown",
+                ["md", "markdown"],
+                ["markdown", "md"],
+                false
+            ),
             Language::Ini => lang_meta!("INI", "ini", ["ini", "cfg"], ["ini", "cfg"], false),
 
             // Other
-            Language::Makefile => lang_meta!("Makefile", "makefile", [], ["makefile", "make"], false),
-            Language::Dockerfile => lang_meta!("Dockerfile", "dockerfile", [], ["dockerfile", "docker"], false),
-            Language::Proto => lang_meta!("Protocol Buffers", "protobuf", ["proto"], ["proto", "protobuf"], false),
-            Language::GraphQL => lang_meta!("GraphQL", "graphql", ["graphql", "gql"], ["graphql", "gql"], false),
-            Language::Wasm => lang_meta!("WebAssembly", "wasm", ["wat", "wast"], ["wasm", "webassembly"], false),
+            Language::Makefile => {
+                lang_meta!("Makefile", "makefile", [], ["makefile", "make"], false)
+            }
+            Language::Dockerfile => lang_meta!(
+                "Dockerfile",
+                "dockerfile",
+                [],
+                ["dockerfile", "docker"],
+                false
+            ),
+            Language::Proto => lang_meta!(
+                "Protocol Buffers",
+                "protobuf",
+                ["proto"],
+                ["proto", "protobuf"],
+                false
+            ),
+            Language::GraphQL => lang_meta!(
+                "GraphQL",
+                "graphql",
+                ["graphql", "gql"],
+                ["graphql", "gql"],
+                false
+            ),
+            Language::Wasm => lang_meta!(
+                "WebAssembly",
+                "wasm",
+                ["wat", "wast"],
+                ["wasm", "webassembly"],
+                false
+            ),
 
             Language::Unknown => lang_meta!("Unknown", "text", [], ["unknown", "text", ""], false),
         }
@@ -291,20 +415,58 @@ impl Language {
     /// Get all language variants for iteration
     fn all_variants() -> &'static [Language] {
         &[
-            Language::Rust, Language::Go, Language::C, Language::Cpp,
-            Language::Zig, Language::Nim, Language::Java, Language::Kotlin,
-            Language::Scala, Language::Groovy, Language::Clojure,
-            Language::TypeScript, Language::JavaScript, Language::Tsx,
-            Language::Jsx, Language::Html, Language::Css, Language::Scss,
-            Language::Vue, Language::Svelte, Language::Python, Language::Ruby,
-            Language::Php, Language::Perl, Language::Lua, Language::R,
-            Language::Bash, Language::PowerShell, Language::Swift,
-            Language::ObjectiveC, Language::Dart, Language::CSharp,
-            Language::FSharp, Language::Vb, Language::Elixir, Language::Erlang,
-            Language::Haskell, Language::OCaml, Language::Crystal, Language::Julia,
-            Language::Sql, Language::Yaml, Language::Json, Language::Toml,
-            Language::Xml, Language::Markdown, Language::Ini, Language::Makefile,
-            Language::Dockerfile, Language::Proto, Language::GraphQL, Language::Wasm,
+            Language::Rust,
+            Language::Go,
+            Language::C,
+            Language::Cpp,
+            Language::Zig,
+            Language::Nim,
+            Language::Java,
+            Language::Kotlin,
+            Language::Scala,
+            Language::Groovy,
+            Language::Clojure,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Tsx,
+            Language::Jsx,
+            Language::Html,
+            Language::Css,
+            Language::Scss,
+            Language::Vue,
+            Language::Svelte,
+            Language::Python,
+            Language::Ruby,
+            Language::Php,
+            Language::Perl,
+            Language::Lua,
+            Language::R,
+            Language::Bash,
+            Language::PowerShell,
+            Language::Swift,
+            Language::ObjectiveC,
+            Language::Dart,
+            Language::CSharp,
+            Language::FSharp,
+            Language::Vb,
+            Language::Elixir,
+            Language::Erlang,
+            Language::Haskell,
+            Language::OCaml,
+            Language::Crystal,
+            Language::Julia,
+            Language::Sql,
+            Language::Yaml,
+            Language::Json,
+            Language::Toml,
+            Language::Xml,
+            Language::Markdown,
+            Language::Ini,
+            Language::Makefile,
+            Language::Dockerfile,
+            Language::Proto,
+            Language::GraphQL,
+            Language::Wasm,
         ]
     }
 }
@@ -500,8 +662,16 @@ mod tests {
         // Ensure all variants have valid metadata
         for lang in Language::all_variants() {
             let meta = lang.meta();
-            assert!(!meta.display_name.is_empty(), "Empty display name for {:?}", lang);
-            assert!(!meta.highlight_str.is_empty(), "Empty highlight_str for {:?}", lang);
+            assert!(
+                !meta.display_name.is_empty(),
+                "Empty display name for {:?}",
+                lang
+            );
+            assert!(
+                !meta.highlight_str.is_empty(),
+                "Empty highlight_str for {:?}",
+                lang
+            );
         }
     }
 }

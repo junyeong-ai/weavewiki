@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::types::{IssueSeverity, Result, ValidationError, ValidationErrorKind, VerificationReport, WeaveError};
+use crate::types::{
+    IssueSeverity, Result, ValidationError, ValidationErrorKind, VerificationReport, WeaveError,
+};
 
 pub struct Reporter;
 
@@ -10,10 +12,12 @@ impl Reporter {
         report: &VerificationReport,
         output_path: P,
     ) -> Result<()> {
-        let json = serde_json::to_string_pretty(report)
-            .map_err(|e| WeaveError::Validation(
-                ValidationError::new(ValidationErrorKind::Format, format!("Failed to serialize report: {}", e))
-            ))?;
+        let json = serde_json::to_string_pretty(report).map_err(|e| {
+            WeaveError::Validation(ValidationError::new(
+                ValidationErrorKind::Format,
+                format!("Failed to serialize report: {}", e),
+            ))
+        })?;
 
         fs::write(output_path, json)?;
 
