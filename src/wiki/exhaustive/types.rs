@@ -136,6 +136,10 @@ pub struct PipelineCheckpoint {
     #[serde(default)]
     pub domain_insights_json: Option<String>,
 
+    /// Documentation blueprint from structure discovery (Phase 5.5)
+    #[serde(default)]
+    pub documentation_blueprint_json: Option<String>,
+
     /// Last completed phase (1-6)
     pub last_completed_phase: u8,
 
@@ -163,6 +167,7 @@ impl PipelineCheckpoint {
             file_insights_json: None,
             project_insights_json: None,
             domain_insights_json: None,
+            documentation_blueprint_json: None,
             last_completed_phase: 0,
             checkpoint_at: chrono::Utc::now().to_rfc3339(),
         }
@@ -185,6 +190,7 @@ impl PipelineCheckpoint {
         self.file_insights_json.hash(&mut hasher);
         self.project_insights_json.hash(&mut hasher);
         self.domain_insights_json.hash(&mut hasher);
+        self.documentation_blueprint_json.hash(&mut hasher);
         self.last_completed_phase.hash(&mut hasher);
         self.checkpoint_at.hash(&mut hasher);
 

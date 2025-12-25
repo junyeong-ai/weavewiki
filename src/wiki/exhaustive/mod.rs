@@ -31,6 +31,7 @@
 mod llms_txt;
 mod mermaid;
 mod patterns;
+pub mod session_context;
 mod types;
 
 // Core Infrastructure
@@ -40,6 +41,7 @@ pub mod checkpoint;
 pub mod bottom_up;
 pub mod characterization;
 pub mod consolidation;
+pub mod documentation;
 pub mod refinement;
 pub mod research;
 pub mod top_down;
@@ -49,6 +51,7 @@ pub use checkpoint::{CheckpointContext, CheckpointManager, PipelinePhase};
 pub use llms_txt::LlmsTxtGenerator;
 pub use mermaid::{MermaidValidation, MermaidValidator};
 pub use patterns::PatternExtractor;
+pub use session_context::{SessionContext, TierAntiPatterns};
 pub use types::{
     CHECKPOINT_VERSION, CheckpointError, Complexity, DocSession, Importance, PipelineCheckpoint,
     SessionStatus, ValueCategory,
@@ -296,6 +299,7 @@ impl MultiAgentPipeline {
                     file_insights_json: None, // Loaded on-demand from file_analysis table
                     project_insights_json: None, // Loaded on-demand from module_summaries
                     domain_insights_json: None, // Loaded on-demand from domain_summaries
+                    documentation_blueprint_json: None, // Loaded on-demand if exists
                     last_completed_phase: state.last_completed_phase,
                     checkpoint_at: self
                         .db
@@ -568,6 +572,35 @@ impl MultiAgentPipeline {
                 })?
         };
 
+        // ===== PHASE 5.5: Documentation Structure Discovery =====
+        let doc_blueprint = if checkpoint.documentation_blueprint_json.is_none() {
+            info!("Phase 5.5: Discovering optimal documentation structure");
+            let structure_agent =
+                documentation::DocumentationStructureAgent::new(self.provider.clone());
+            let blueprint = structure_agent.discover(&profile, &domain_insights).await?;
+
+            checkpoint.documentation_blueprint_json = Some(serde_json::to_string(&blueprint)?);
+            checkpoint_mgr.save_checkpoint(&checkpoint)?;
+
+            info!(
+                "Documentation blueprint created: {} estimated pages, depth {}",
+                blueprint.estimated_pages, blueprint.hierarchy_depth
+            );
+
+            blueprint
+        } else {
+            info!("Phase 5.5: Skipped (resuming from checkpoint)");
+            checkpoint
+                .documentation_blueprint_json
+                .as_ref()
+                .and_then(|json| serde_json::from_str(json).ok())
+                .ok_or_else(|| {
+                    crate::types::WeaveError::Session(
+                        "No documentation blueprint in checkpoint".to_string(),
+                    )
+                })?
+        };
+
         // ===== PHASE 6: Refinement & Documentation =====
         info!("Phase 6: Refinement and documentation generation");
         let mut adjusted_config = mode_config.clone();
@@ -578,9 +611,45 @@ impl MultiAgentPipeline {
             .with_checkpoint(self.db.clone(), self.session_id.clone());
         let refinement_insight = refinement.run(domain_insights).await?;
 
-        // Generate final documentation
+        // Load project_insights from checkpoint for hierarchical generator
+        let project_insights_for_gen: Vec<top_down::ProjectInsight> = checkpoint
+            .project_insights_json
+            .as_ref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+
+        // Generate hierarchical documentation using blueprint
+        info!("Generating hierarchical documentation from blueprint");
+        let hierarchical_gen =
+            documentation::HierarchicalDocGenerator::new(documentation::GeneratorConfig::default());
+        let hierarchical_output = hierarchical_gen.generate(
+            &doc_blueprint,
+            &profile,
+            &refinement_insight.domain_insights,
+            &project_insights_for_gen,
+        )?;
+
+        // Write all generated files to disk
+        let mut total_files_written = 0;
+        for (path, content) in &hierarchical_output.files {
+            let file_path = self.output_path.join(path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&file_path, content)?;
+            total_files_written += 1;
+        }
+
+        info!(
+            "Generated {} hierarchical documentation files ({} pages, {} words)",
+            total_files_written,
+            hierarchical_output.stats.total_pages,
+            hierarchical_output.stats.total_words
+        );
+
+        // Also generate legacy flat documentation for backward compatibility
         let doc_gen = refinement::doc_generator::DocGenerator::new(&self.output_path);
-        let generated_files = doc_gen
+        let _generated_files = doc_gen
             .generate(&refinement_insight.domain_insights)
             .await?;
 
@@ -589,6 +658,46 @@ impl MultiAgentPipeline {
             .last()
             .map(|s| s.overall())
             .unwrap_or(0.0);
+
+        // Generate architecture documentation from top-down insights
+        info!("Generating architecture documentation from top-down insights");
+        use refinement::architecture_docs::ArchitectureDocGenerator;
+
+        let arch_md =
+            ArchitectureDocGenerator::generate_architecture_md(&profile, &project_insights_for_gen);
+        let arch_path = self.output_path.join("architecture.md");
+        if let Err(e) = std::fs::write(&arch_path, arch_md) {
+            tracing::warn!("Failed to write architecture.md: {}", e);
+        } else {
+            info!("Generated architecture.md at {}", arch_path.display());
+        }
+
+        let risks_md =
+            ArchitectureDocGenerator::generate_risks_md(&profile, &project_insights_for_gen);
+        let risks_path = self.output_path.join("risks.md");
+        if let Err(e) = std::fs::write(&risks_path, risks_md) {
+            tracing::warn!("Failed to write risks.md: {}", e);
+        } else {
+            info!("Generated risks.md at {}", risks_path.display());
+        }
+
+        let flows_md =
+            ArchitectureDocGenerator::generate_flows_md(&profile, &project_insights_for_gen);
+        let flows_path = self.output_path.join("flows.md");
+        if let Err(e) = std::fs::write(&flows_path, flows_md) {
+            tracing::warn!("Failed to write flows.md: {}", e);
+        } else {
+            info!("Generated flows.md at {}", flows_path.display());
+        }
+
+        let terminology_md =
+            ArchitectureDocGenerator::generate_terminology_md(&profile, &project_insights_for_gen);
+        let terminology_path = self.output_path.join("terminology.md");
+        if let Err(e) = std::fs::write(&terminology_path, terminology_md) {
+            tracing::warn!("Failed to write terminology.md: {}", e);
+        } else {
+            info!("Generated terminology.md at {}", terminology_path.display());
+        }
 
         // Load file_insights from checkpoint for additional generators
         let file_insights_for_extra: Vec<bottom_up::FileInsight> = checkpoint
@@ -663,7 +772,7 @@ impl MultiAgentPipeline {
             "Multi-Agent Pipeline: Complete (score={:.1}%, target={:.1}%, pages={}, tokens={})",
             final_score * 100.0,
             quality_target * 100.0,
-            generated_files.len(),
+            hierarchical_output.stats.total_pages,
             budget_stats.consumed
         );
         info!("Budget: {}", budget_stats.summary());
@@ -677,7 +786,7 @@ impl MultiAgentPipeline {
             quality_target,
             target_met: refinement_insight.target_met,
             refinement_turns: refinement_insight.turns_used,
-            pages_generated: generated_files.len(),
+            pages_generated: hierarchical_output.stats.total_pages,
             files_analyzed: file_count,
             output_path: self.output_path.to_string_lossy().to_string(),
             duration_secs: duration.as_secs(),
