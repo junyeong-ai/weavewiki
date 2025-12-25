@@ -535,14 +535,6 @@ impl From<BudgetError> for WeaveError {
             BudgetError::InvalidPhase { phase } => {
                 WeaveError::Config(format!("Invalid phase number: {} (valid: 0-4)", phase))
             }
-            BudgetError::ReservationFailed {
-                phase,
-                requested,
-                available,
-            } => WeaveError::Config(format!(
-                "Budget reservation failed for phase {}: requested {}, available {}",
-                phase, requested, available
-            )),
         }
     }
 }

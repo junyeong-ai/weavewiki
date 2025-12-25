@@ -12,7 +12,6 @@
 mod diagram;
 mod json_repair;
 mod response;
-mod scoring;
 
 pub use diagram::{
     DiagramError, DiagramValidation, DiagramValidator, DiagramWarning, is_valid_mermaid,
@@ -20,7 +19,6 @@ pub use diagram::{
 };
 pub use json_repair::{JsonRepairer, extract_json_from_response, extract_json_with_repair_status};
 pub use response::{IssueSeverity, ResponseValidator, ValidationIssue, ValidationResult};
-pub use scoring::{ConfidenceScorer, QualityMetrics, ScoringConfig};
 
 use crate::types::Result;
 use serde_json::Value;
@@ -29,7 +27,6 @@ use serde_json::Value;
 pub struct ValidationPipeline {
     repairer: JsonRepairer,
     validator: ResponseValidator,
-    scorer: ConfidenceScorer,
 }
 
 impl Default for ValidationPipeline {
@@ -43,14 +40,7 @@ impl ValidationPipeline {
         Self {
             repairer: JsonRepairer::new(),
             validator: ResponseValidator::new(),
-            scorer: ConfidenceScorer::new(),
         }
-    }
-
-    /// Configure scoring parameters
-    pub fn with_scoring(mut self, config: ScoringConfig) -> Self {
-        self.scorer = ConfidenceScorer::with_config(config);
-        self
     }
 
     /// Process raw LLM response through full validation pipeline
@@ -58,8 +48,7 @@ impl ValidationPipeline {
     /// Steps:
     /// 1. Attempt JSON repair if malformed
     /// 2. Validate structure and required fields
-    /// 3. Calculate confidence scores with penalties
-    /// 4. Return validated and scored response
+    /// 3. Return validated response
     pub fn process(&self, raw_response: &str) -> Result<ProcessedResponse> {
         // Step 1: Parse/repair JSON
         let (value, was_repaired) = self.repairer.parse_or_repair(raw_response)?;
@@ -67,14 +56,10 @@ impl ValidationPipeline {
         // Step 2: Validate structure
         let validation = self.validator.validate_batch_response(&value);
 
-        // Step 3: Calculate scores
-        let quality = self.scorer.calculate_quality(&value);
-
         Ok(ProcessedResponse {
             value,
             was_repaired,
             validation,
-            quality,
         })
     }
 
@@ -93,8 +78,6 @@ pub struct ProcessedResponse {
     pub was_repaired: bool,
     /// Validation result with issues
     pub validation: ValidationResult,
-    /// Quality metrics
-    pub quality: QualityMetrics,
 }
 
 impl ProcessedResponse {
@@ -103,21 +86,12 @@ impl ProcessedResponse {
         self.validation.is_acceptable()
     }
 
-    /// Get overall confidence score
-    pub fn confidence(&self) -> f32 {
-        self.quality.overall_confidence
-    }
-
     /// Get list of all issues (validation + quality)
     pub fn all_issues(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
         for issue in &self.validation.issues {
             issues.push(format!("[{}] {}", issue.severity, issue.message));
-        }
-
-        for warning in &self.quality.warnings {
-            issues.push(format!("[QUALITY] {}", warning));
         }
 
         issues

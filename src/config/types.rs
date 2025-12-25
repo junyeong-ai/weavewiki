@@ -277,136 +277,43 @@ impl Default for ModeConfig {
 /// - **Fast**: Quick analysis for CI/CD, smaller context, minimal refinement
 /// - **Standard**: Balanced analysis, moderate context, adequate refinement
 /// - **Deep**: Thorough analysis, maximum context, extensive refinement
-///
-/// ## Scale Characteristics
-/// - **Small** (<50 files): Lower concurrency, faster completion
-/// - **Medium** (50-200): Balanced settings
-/// - **Large** (200-500): Higher concurrency, more refinement
-/// - **Enterprise** (500+): Maximum parallelism, highest quality targets
 pub fn get_mode_config(mode: AnalysisMode, scale: ProjectScale) -> ModeConfig {
-    match (mode, scale) {
-        // =====================================================================
-        // Fast Mode - Optimized for speed, CI/CD pipelines
-        // =====================================================================
-        (AnalysisMode::Fast, ProjectScale::Small) => ModeConfig {
-            char_turn3_enabled: false,
-            char_refinement_rounds: 0,
-            bottom_up_batch_size: 15,
-            bottom_up_max_file_chars: 8000,
-            bottom_up_concurrency: 2,
-            top_down_max_agents: 1,
-            refinement_max_turns: 1,
-            refinement_quality_target: 0.60,
-        },
-        (AnalysisMode::Fast, ProjectScale::Medium) => ModeConfig {
-            char_turn3_enabled: false,
-            char_refinement_rounds: 0,
-            bottom_up_batch_size: 15,
-            bottom_up_max_file_chars: 8000,
-            bottom_up_concurrency: 3,
-            top_down_max_agents: 2,
-            refinement_max_turns: 2,
-            refinement_quality_target: 0.60,
-        },
-        (AnalysisMode::Fast, ProjectScale::Large) => ModeConfig {
-            char_turn3_enabled: false,
-            char_refinement_rounds: 0,
-            bottom_up_batch_size: 20,
-            bottom_up_max_file_chars: 8000,
-            bottom_up_concurrency: 4,
-            top_down_max_agents: 2,
-            refinement_max_turns: 2,
-            refinement_quality_target: 0.65,
-        },
-        (AnalysisMode::Fast, ProjectScale::Enterprise) => ModeConfig {
-            char_turn3_enabled: false,
-            char_refinement_rounds: 0,
-            bottom_up_batch_size: 25,
-            bottom_up_max_file_chars: 6000,
-            bottom_up_concurrency: 6,
-            top_down_max_agents: 3,
-            refinement_max_turns: 2,
-            refinement_quality_target: 0.65,
-        },
+    let scale_idx = scale as usize;
+    let is_deep = mode == AnalysisMode::Deep;
+    let is_fast = mode == AnalysisMode::Fast;
 
-        // =====================================================================
-        // Standard Mode - Balanced quality and performance
-        // =====================================================================
-        (AnalysisMode::Standard, ProjectScale::Small) => ModeConfig {
-            char_turn3_enabled: false,
-            char_refinement_rounds: 0,
-            bottom_up_batch_size: 10,
-            bottom_up_max_file_chars: 10000,
-            bottom_up_concurrency: 3,
-            top_down_max_agents: 3,
-            refinement_max_turns: 3,
-            refinement_quality_target: 0.75,
-        },
-        (AnalysisMode::Standard, ProjectScale::Medium) => ModeConfig::default(),
-        (AnalysisMode::Standard, ProjectScale::Large) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 1, // One refinement round
-            bottom_up_batch_size: 12,
-            bottom_up_max_file_chars: 10000,
-            bottom_up_concurrency: 5,
-            top_down_max_agents: 4,
-            refinement_max_turns: 4,
-            refinement_quality_target: 0.85,
-        },
-        (AnalysisMode::Standard, ProjectScale::Enterprise) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 1, // One refinement round
-            bottom_up_batch_size: 15,
-            bottom_up_max_file_chars: 10000,
-            bottom_up_concurrency: 6,
-            top_down_max_agents: 4,
-            refinement_max_turns: 5,
-            refinement_quality_target: 0.90,
-        },
+    let (base_batch, base_conc, base_agents, base_turns, base_quality) = match mode {
+        AnalysisMode::Fast => (15, 2, 1, 1, 0.60),
+        AnalysisMode::Standard => (10, 3, 3, 3, 0.75),
+        AnalysisMode::Deep => (8, 4, 4, 4, 0.85),
+    };
 
-        // =====================================================================
-        // Deep Mode - Maximum quality, release documentation
-        // =====================================================================
-        (AnalysisMode::Deep, ProjectScale::Small) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 1, // One refinement round
-            bottom_up_batch_size: 8,
-            bottom_up_max_file_chars: 16000, // Increased for Deep Research
-            bottom_up_concurrency: 4,
-            top_down_max_agents: 4,
-            refinement_max_turns: 4,
-            refinement_quality_target: 0.85,
+    let scale_mult = [1.0_f32, 1.0, 1.2, 1.5][scale_idx];
+    let conc_add = [0_usize, 1, 2, 4][scale_idx];
+    let turn_add = [0_usize, 1, 2, 4][scale_idx];
+    let quality_add = [0.0_f32, 0.05, 0.10, 0.15][scale_idx];
+
+    ModeConfig {
+        char_turn3_enabled: !is_fast && scale_idx >= 2,
+        char_refinement_rounds: if is_deep && scale_idx >= 2 {
+            2
+        } else if !is_fast && scale_idx >= 2 {
+            1
+        } else {
+            0
         },
-        (AnalysisMode::Deep, ProjectScale::Medium) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 1, // One refinement round
-            bottom_up_batch_size: 8,
-            bottom_up_max_file_chars: 16000, // Increased for Deep Research
-            bottom_up_concurrency: 5,
-            top_down_max_agents: 4,
-            refinement_max_turns: 5,
-            refinement_quality_target: 0.90,
+        bottom_up_batch_size: ((base_batch as f32 * scale_mult) as usize).clamp(8, 25),
+        bottom_up_max_file_chars: if is_deep {
+            16000 - scale_idx * 1000
+        } else if is_fast {
+            8000 - scale_idx * 500
+        } else {
+            10000
         },
-        (AnalysisMode::Deep, ProjectScale::Large) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 2, // Two refinement rounds
-            bottom_up_batch_size: 10,
-            bottom_up_max_file_chars: 14000, // Increased for Deep Research
-            bottom_up_concurrency: 6,
-            top_down_max_agents: 4,
-            refinement_max_turns: 6,
-            refinement_quality_target: 0.92,
-        },
-        (AnalysisMode::Deep, ProjectScale::Enterprise) => ModeConfig {
-            char_turn3_enabled: true,
-            char_refinement_rounds: 2, // Two refinement rounds
-            bottom_up_batch_size: 12,
-            bottom_up_max_file_chars: 12000, // Increased for Deep Research
-            bottom_up_concurrency: 8,
-            top_down_max_agents: 4,
-            refinement_max_turns: 8,
-            refinement_quality_target: 0.95,
-        },
+        bottom_up_concurrency: (base_conc + conc_add).clamp(2, 8),
+        top_down_max_agents: base_agents.min(4),
+        refinement_max_turns: (base_turns + turn_add).clamp(1, 8),
+        refinement_quality_target: (base_quality + quality_add).clamp(0.60, 0.95),
     }
 }
 

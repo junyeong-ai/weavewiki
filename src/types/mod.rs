@@ -1,5 +1,4 @@
 pub mod claim;
-pub mod convention;
 pub mod domain;
 pub mod edge;
 pub mod error;
@@ -8,7 +7,6 @@ pub mod project;
 pub mod utils;
 
 pub use claim::*;
-pub use convention::*;
 pub use domain::DomainTerm;
 pub use edge::*;
 pub use error::{
