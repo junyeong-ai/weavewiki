@@ -3,6 +3,7 @@
 //! Quality scoring and documentation generation.
 //! Focused on quality assessment of domain insights.
 
+pub mod architecture_docs;
 pub mod doc_generator;
 pub mod quality_scorer;
 

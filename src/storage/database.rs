@@ -968,6 +968,42 @@ impl Database {
         Ok(deps)
     }
 
+    /// Get files that depend on this file (reverse dependency lookup).
+    pub fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
+        let file_id = format!("file:{}", file_path);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            r#"SELECT source_id FROM edges
+               WHERE target_id = ?1 AND edge_type = 'depends_on' AND tier = 'fact'
+               ORDER BY source_id"#,
+        )?;
+
+        let dependents = stmt
+            .query_map(params![file_id], |row| row.get(0))?
+            .filter_map(|r| log_filter_error(r, "reading file dependent"))
+            .collect();
+
+        Ok(dependents)
+    }
+
+    /// Get trait/interface implementations for a file.
+    pub fn get_file_implements(&self, file_path: &str) -> Result<Vec<String>> {
+        let file_id = format!("file:{}", file_path);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            r#"SELECT target_id FROM edges
+               WHERE source_id = ?1 AND edge_type = 'implements' AND tier = 'fact'
+               ORDER BY target_id"#,
+        )?;
+
+        let implements = stmt
+            .query_map(params![file_id], |row| row.get(0))?
+            .filter_map(|r| log_filter_error(r, "reading file implements"))
+            .collect();
+
+        Ok(implements)
+    }
+
     // =========================================================================
     // Checkpoint State Loading
     // =========================================================================
@@ -1051,6 +1087,14 @@ impl Database {
             |row| row.get(0),
         );
         Ok(result.unwrap_or(None))
+    }
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        if let Ok(conn) = self.pool.get() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
     }
 }
 
