@@ -10,26 +10,48 @@ Rust CLI for AI-driven codebase documentation. 6-phase multi-agent pipeline, SQL
 src/
 ├── main.rs                    # CLI entry, command dispatch
 ├── lib.rs                     # Module exports
+├── constants.rs               # Centralized constants (budget, thresholds)
 ├── config/                    # AnalysisMode, ProjectScale, ModeConfig
 ├── ai/
 │   ├── provider/
 │   │   ├── mod.rs             # LlmProvider trait, LlmResponse
 │   │   ├── claude_code.rs     # Default provider (subprocess)
 │   │   ├── openai.rs          # HTTP API
-│   │   ├── ollama.rs          # Local models
-│   │   └── chain.rs           # Fallback chain
+│   │   ├── chain.rs           # Fallback chain with retry
+│   │   └── circuit_breaker.rs # Circuit breaker pattern
+│   ├── validation/            # Response validation
+│   │   ├── json_repair.rs     # JSON repair attempts
+│   │   ├── response.rs        # Schema validation
+│   │   └── diagram.rs         # Mermaid validation
 │   ├── budget.rs              # Token budget per phase (TALE)
-│   └── prompt/mod.rs          # PromptBuilder
+│   ├── metrics.rs             # Usage metrics collection
+│   ├── preflight.rs           # Pre-flight validation
+│   ├── timeout.rs             # Timeout management
+│   └── tokenizer.rs           # Token counting
 ├── wiki/exhaustive/
 │   ├── mod.rs                 # MultiAgentPipeline orchestrator
 │   ├── checkpoint.rs          # CheckpointManager, PipelinePhase
+│   ├── session_context.rs     # Session context for prompts
 │   ├── characterization/      # Phase 1: 7 agents (Turn 1-3)
 │   ├── bottom_up/             # Phase 2-3: File analysis (Tier-based)
 │   ├── top_down/              # Phase 4: Architecture agents
 │   ├── consolidation/         # Phase 5: Domain grouping
-│   └── refinement/            # Phase 6: Quality iteration
-├── analyzer/parser/           # Tree-sitter (11 languages)
-└── storage/database.rs        # SQLite WAL, r2d2 pool
+│   ├── refinement/            # Phase 6: Quality iteration
+│   ├── research/              # Deep Research implementation
+│   ├── documentation/         # Doc blueprint generation
+│   ├── patterns.rs            # Code pattern extraction
+│   ├── mermaid.rs             # Mermaid diagram utilities
+│   └── llms_txt.rs            # llms.txt generation
+├── analyzer/
+│   ├── parser/                # Tree-sitter (11 languages)
+│   ├── scanner/               # File scanning with gitignore
+│   └── structure.rs           # Code structure analysis
+├── storage/database.rs        # SQLite WAL, r2d2 pool
+├── types/
+│   ├── error.rs               # WeaveError, ErrorCategory
+│   └── ...                    # Domain types
+├── cli/                       # CLI commands (init, generate, query, etc.)
+└── verifier/                  # Knowledge base verification
 ```
 
 ---
@@ -123,13 +145,13 @@ enum ProcessingTier {
 ## Token Budget Allocation
 
 ```rust
-// ai/budget.rs - TALE algorithm
+// constants.rs - TALE algorithm (single source of truth)
 PhaseAllocations {
-    characterization: 10%,
-    bottom_up: 50%,
-    top_down: 15%,
-    consolidation: 10%,
-    refinement: 15%,
+    characterization: 5%,   // 7 agents project profiling
+    bottom_up: 50%,         // All file analysis (largest portion)
+    top_down: 10%,          // 4 agents project-level analysis
+    consolidation: 20%,     // Per-domain AI synthesis
+    refinement: 15%,        // Quality improvement passes
 }
 // Dynamic reallocation when phase completes early
 ```
@@ -150,7 +172,7 @@ agent_insights (session_id, agent_name, turn, output_json)
 ## Error Categories
 
 ```rust
-// provider/error.rs
+// types/error.rs - ErrorCategory enum
 RateLimit    → Retry with exponential backoff
 TokenLimit   → Reduce context or fallback provider
 Auth         → Fail fast
@@ -164,11 +186,11 @@ ParseError   → JSON repair attempt (ai/validation/)
 
 | Location | Constant | Value |
 |----------|----------|-------|
-| `budget.rs` | DEFAULT_BUDGET | 1,000,000 tokens |
-| `budget.rs` | WARNING_THRESHOLD | 75% |
-| `budget.rs` | CRITICAL_THRESHOLD | 90% |
-| `bottom_up/prompts.rs` | MAX_CHILD_CONTEXT_TOKENS | 2000 |
-| `circuit_breaker.rs` | FAILURE_THRESHOLD | 5 |
+| `constants.rs` | DEFAULT_BUDGET | 1,000,000 tokens |
+| `constants.rs` | WARNING_THRESHOLD | 75% |
+| `constants.rs` | CRITICAL_THRESHOLD | 90% |
+| `constants.rs` | MAX_CHILD_CONTEXT_TOKENS | 2000 |
+| `constants.rs` | FAILURE_THRESHOLD | 5 |
 
 ---
 
@@ -195,7 +217,7 @@ sqlite3 .weavewiki/weavewiki.db "SELECT * FROM doc_sessions"
 ## Test Commands
 
 ```bash
-cargo test                    # 206 tests
+cargo test                    # 267 tests
 cargo clippy -- -D warnings   # Lint
 cargo fmt --check             # Format check
 cargo build --release         # Release build

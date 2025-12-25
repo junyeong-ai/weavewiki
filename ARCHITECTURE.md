@@ -417,19 +417,129 @@ fn score_purpose_clarity(purpose: &str) -> f32 {
 
 ---
 
-## 6. 체크포인트 & 재개
+## 6. 문서 생성 프로세스
 
-### 체크포인트 데이터 구조
+문서 생성은 **Phase 5.5**와 **Phase 6**에서 수행됩니다.
+
+### Phase 5.5: 문서 구조 발견
+
+AI가 프로젝트에 최적화된 문서 구조를 동적으로 결정합니다:
+
+```mermaid
+flowchart LR
+    subgraph Input["입력"]
+        PP[ProjectProfile]
+        DI[DomainInsight[]]
+    end
+
+    subgraph Agent["DocumentationStructureAgent"]
+        DS[구조 발견]
+    end
+
+    subgraph Output["출력"]
+        BP[DocumentationBlueprint]
+    end
+
+    PP --> DS
+    DI --> DS
+    DS --> BP
+
+    style Agent fill:#e8f5e9
+```
+
+**DocumentationBlueprint 결정 요소:**
+
+| 프로젝트 규모 | 계층 깊이 | 기본 섹션 | 예상 페이지 |
+|--------------|:--------:|----------|:-----------:|
+| **Small** | 1 | Getting Started, Architecture | 10-20 |
+| **Medium** | 2 | + Development, API Reference | 30-50 |
+| **Large** | 3 | + Deployment, Troubleshooting | 60-100 |
+| **Enterprise** | 4 | + Security, Operations, Governance | 100+ |
+
+### Phase 6: 문서 생성
+
+4개의 병렬 생성기가 다양한 형식의 문서를 생성합니다:
+
+```mermaid
+flowchart TB
+    subgraph Input["입력 데이터"]
+        BP[DocumentationBlueprint]
+        PP[ProjectProfile]
+        DI[DomainInsight[]]
+        PI[ProjectInsight[]]
+        FI[FileInsight[]]
+    end
+
+    subgraph Generators["문서 생성기"]
+        HG[HierarchicalDocGenerator]
+        AG[ArchitectureDocGenerator]
+        LG[LlmsTxtGenerator]
+        PG[PatternExtractor]
+    end
+
+    subgraph Output["출력 파일"]
+        H1[계층적 문서]
+        H2[아키텍처 문서]
+        H3[llms.txt]
+        H4[patterns.md / constitution.md]
+    end
+
+    BP --> HG
+    PP --> HG
+    DI --> HG
+    PI --> AG
+    FI --> LG
+    FI --> PG
+
+    HG --> H1
+    AG --> H2
+    LG --> H3
+    PG --> H4
+
+    style HG fill:#e3f2fd
+    style AG fill:#fff3e0
+    style LG fill:#e8f5e9
+    style PG fill:#fce4ec
+```
+
+### 생성기별 역할
+
+| 생성기 | 입력 | 출력 파일 | 역할 |
+|--------|------|----------|------|
+| **HierarchicalDocGenerator** | Blueprint, Profile, DomainInsight | index.md, getting-started/, architecture/, development/, domains/ | 계층적 문서 구조 생성 |
+| **ArchitectureDocGenerator** | Profile, ProjectInsight | architecture.md, risks.md, flows.md, terminology.md | 아키텍처 분석 문서 |
+| **LlmsTxtGenerator** | DocSession, FileInsight | llms.txt | AI 에이전트용 컨텍스트 |
+| **PatternExtractor** | FileInsight | patterns.md, constitution.md | 코드 패턴 및 컨벤션 |
+| **DocGenerator** | DomainInsight | domains/*.md, _coverage.md | 레거시 플랫 문서 |
+
+### 도메인 문서 구조 타입
+
+도메인 크기에 따라 3가지 구조 중 하나가 선택됩니다:
+
+```rust
+enum DomainDocStructure {
+    SinglePage,       // < 5 파일: 단일 페이지
+    IndexWithPages,   // 5-20 파일: 인덱스 + 서브페이지
+    FullHierarchy,    // > 20 파일: 전체 계층 구조
+}
+```
+
+---
+
+## 7. 체크포인트 & 재개
+
+### 체크포인트 데이터 구조 (Phase 5.5 포함)
 
 ```rust
 struct PipelineCheckpoint {
     version: u8,                    // 스키마 버전
     checksum: u32,                  // CRC32 검증
     files: Vec<String>,
-    project_profile_json: Option<String>,     // Phase 1
-    file_insights_json: Option<String>,       // Phase 3
-    project_insights_json: Option<String>,    // Phase 4
-    domain_insights_json: Option<String>,     // Phase 5
+    project_profile_json: Option<String>,           // Phase 1
+    file_insights_json: Option<String>,             // Phase 3
+    project_insights_json: Option<String>,          // Phase 4
+    domain_insights_json: Option<String>,           // Phase 5
+    documentation_blueprint_json: Option<String>,   // Phase 5.5
     last_completed_phase: u8,       // 1-6
     checkpoint_at: String,
 }
@@ -448,7 +558,7 @@ struct PipelineCheckpoint {
 
 ---
 
-## 7. 동시성 아키텍처
+## 8. 동시성 아키텍처
 
 ### 병렬 실행 지점
 
@@ -477,22 +587,64 @@ struct PipelineCheckpoint {
 
 ---
 
-## 8. 출력 구조
+## 9. 출력 구조
+
+### 전체 파일 구조
 
 ```
 .weavewiki/wiki/
-├── index.md              # 프로젝트 개요 (ProjectProfile에서)
-├── llms.txt              # AI 에이전트 컨텍스트 파일
-├── patterns.md           # 발견된 코드 패턴
-├── constitution.md       # 코딩 컨벤션
-├── _coverage.md          # 품질 메트릭 리포트
-└── domains/              # 도메인별 문서
-    ├── core/
-    │   ├── index.md      # 도메인 합성
-    │   └── *.md          # 개별 파일 문서
-    ├── api/
-    └── storage/
+├── index.md                    # 프로젝트 개요
+├── llms.txt                    # AI 에이전트 컨텍스트
+├── patterns.md                 # 발견된 코드 패턴
+├── constitution.md             # 코딩 컨벤션
+├── _coverage.md                # 품질 메트릭 리포트
+│
+├── architecture.md             # 아키텍처 분석 (Top-Down)
+├── risks.md                    # 리스크 분석 (Top-Down)
+├── flows.md                    # 데이터/비즈니스 흐름 (Top-Down)
+├── terminology.md              # 도메인 용어 사전
+│
+├── getting-started/            # 시작 가이드 (Blueprint 기반)
+│   ├── index.md
+│   ├── installation.md
+│   ├── configuration.md
+│   └── quick-start.md
+│
+├── architecture/               # 아키텍처 섹션 (Blueprint 기반)
+│   ├── index.md
+│   ├── data-flow.md
+│   └── patterns.md
+│
+├── development/                # 개발 가이드 (Blueprint 기반)
+│   ├── index.md
+│   ├── setup.md
+│   └── contributing.md
+│
+└── domains/                    # 도메인별 문서
+    ├── index.md                # 도메인 목록
+    ├── {domain_name}/          # 도메인별 디렉토리
+    │   ├── index.md            # 도메인 합성 (AI)
+    │   └── *.md                # 서브페이지 (규모에 따라)
+    └── ...
 ```
+
+### 파일별 생성 소스
+
+| 파일 | 생성기 | 데이터 소스 |
+|------|--------|------------|
+| `index.md` | HierarchicalDocGenerator | ProjectProfile, DomainInsight |
+| `llms.txt` | LlmsTxtGenerator | DocSession, FileInsight |
+| `patterns.md` | PatternExtractor | FileInsight (25+ 패턴 감지) |
+| `constitution.md` | PatternExtractor | FileInsight (컨벤션 추론) |
+| `_coverage.md` | DocGenerator | QualityScore, DomainInsight |
+| `architecture.md` | ArchitectureDocGenerator | ProjectInsight (architecture agent) |
+| `risks.md` | ArchitectureDocGenerator | ProjectInsight (risk agent) |
+| `flows.md` | ArchitectureDocGenerator | ProjectInsight (flow agent) |
+| `terminology.md` | ArchitectureDocGenerator | ProjectInsight (domain agent) |
+| `getting-started/*` | HierarchicalDocGenerator | DocumentationBlueprint |
+| `architecture/*` | HierarchicalDocGenerator | DocumentationBlueprint, ProjectInsight |
+| `development/*` | HierarchicalDocGenerator | DocumentationBlueprint |
+| `domains/*` | HierarchicalDocGenerator + DocGenerator | DomainInsight, FileInsight |
 
 ---
 
@@ -506,6 +658,7 @@ struct PipelineCheckpoint {
 | **TALE 예산** | 동적 재할당을 통한 예측 가능한 비용 |
 | **품질 점수** | 5차원 가중치 평가 |
 | **통합** | 연결이 아닌 AI 합성 |
-| **재개** | 모든 단계 경계에서 체크포인트 |
+| **문서 생성** | Blueprint 기반 계층적 문서 + 4개 병렬 생성기 |
+| **재개** | 모든 단계 경계에서 체크포인트 (Phase 5.5 포함) |
 
 이 아키텍처는 **예측 가능한 토큰 예산** 내에서 **품질 목표**를 유지하면서 **100% 파일 커버리지**를 보장합니다.

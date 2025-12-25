@@ -417,19 +417,129 @@ Automatically identifies:
 
 ---
 
-## 6. Checkpoint & Resume
+## 6. Documentation Generation Process
 
-### Checkpoint Data Structure
+Documentation generation is performed in **Phase 5.5** and **Phase 6**.
+
+### Phase 5.5: Documentation Structure Discovery
+
+AI dynamically determines the optimal documentation structure for the project:
+
+```mermaid
+flowchart LR
+    subgraph Input["Input"]
+        PP[ProjectProfile]
+        DI[DomainInsight[]]
+    end
+
+    subgraph Agent["DocumentationStructureAgent"]
+        DS[Structure Discovery]
+    end
+
+    subgraph Output["Output"]
+        BP[DocumentationBlueprint]
+    end
+
+    PP --> DS
+    DI --> DS
+    DS --> BP
+
+    style Agent fill:#e8f5e9
+```
+
+**DocumentationBlueprint Decision Factors:**
+
+| Project Scale | Hierarchy Depth | Base Sections | Est. Pages |
+|--------------|:---------------:|---------------|:----------:|
+| **Small** | 1 | Getting Started, Architecture | 10-20 |
+| **Medium** | 2 | + Development, API Reference | 30-50 |
+| **Large** | 3 | + Deployment, Troubleshooting | 60-100 |
+| **Enterprise** | 4 | + Security, Operations, Governance | 100+ |
+
+### Phase 6: Document Generation
+
+4 parallel generators produce various document formats:
+
+```mermaid
+flowchart TB
+    subgraph Input["Input Data"]
+        BP[DocumentationBlueprint]
+        PP[ProjectProfile]
+        DI[DomainInsight[]]
+        PI[ProjectInsight[]]
+        FI[FileInsight[]]
+    end
+
+    subgraph Generators["Document Generators"]
+        HG[HierarchicalDocGenerator]
+        AG[ArchitectureDocGenerator]
+        LG[LlmsTxtGenerator]
+        PG[PatternExtractor]
+    end
+
+    subgraph Output["Output Files"]
+        H1[Hierarchical Docs]
+        H2[Architecture Docs]
+        H3[llms.txt]
+        H4[patterns.md / constitution.md]
+    end
+
+    BP --> HG
+    PP --> HG
+    DI --> HG
+    PI --> AG
+    FI --> LG
+    FI --> PG
+
+    HG --> H1
+    AG --> H2
+    LG --> H3
+    PG --> H4
+
+    style HG fill:#e3f2fd
+    style AG fill:#fff3e0
+    style LG fill:#e8f5e9
+    style PG fill:#fce4ec
+```
+
+### Generator Roles
+
+| Generator | Input | Output Files | Role |
+|-----------|-------|--------------|------|
+| **HierarchicalDocGenerator** | Blueprint, Profile, DomainInsight | index.md, getting-started/, architecture/, development/, domains/ | Hierarchical doc structure |
+| **ArchitectureDocGenerator** | Profile, ProjectInsight | architecture.md, risks.md, flows.md, terminology.md | Architecture analysis docs |
+| **LlmsTxtGenerator** | DocSession, FileInsight | llms.txt | AI agent context |
+| **PatternExtractor** | FileInsight | patterns.md, constitution.md | Code patterns & conventions |
+| **DocGenerator** | DomainInsight | domains/*.md, _coverage.md | Legacy flat docs |
+
+### Domain Document Structure Types
+
+One of 3 structures is selected based on domain size:
+
+```rust
+enum DomainDocStructure {
+    SinglePage,       // < 5 files: single page
+    IndexWithPages,   // 5-20 files: index + subpages
+    FullHierarchy,    // > 20 files: full hierarchy
+}
+```
+
+---
+
+## 7. Checkpoint & Resume
+
+### Checkpoint Data Structure (Including Phase 5.5)
 
 ```rust
 struct PipelineCheckpoint {
     version: u8,                    // Schema version
     checksum: u32,                  // CRC32 validation
     files: Vec<String>,
-    project_profile_json: Option<String>,     // Phase 1
-    file_insights_json: Option<String>,       // Phase 3
-    project_insights_json: Option<String>,    // Phase 4
-    domain_insights_json: Option<String>,     // Phase 5
+    project_profile_json: Option<String>,           // Phase 1
+    file_insights_json: Option<String>,             // Phase 3
+    project_insights_json: Option<String>,          // Phase 4
+    domain_insights_json: Option<String>,           // Phase 5
+    documentation_blueprint_json: Option<String>,   // Phase 5.5
     last_completed_phase: u8,       // 1-6
     checkpoint_at: String,
 }
@@ -448,7 +558,7 @@ This enables:
 
 ---
 
-## 7. Concurrency Architecture
+## 8. Concurrency Architecture
 
 ### Parallel Execution Points
 
@@ -477,22 +587,64 @@ Domain-Level Parallelism:
 
 ---
 
-## 8. Output Structure
+## 9. Output Structure
+
+### Complete File Structure
 
 ```
 .weavewiki/wiki/
-├── index.md              # Project overview (from ProjectProfile)
-├── llms.txt              # AI agent context file
-├── patterns.md           # Discovered code patterns
-├── constitution.md       # Coding conventions
-├── _coverage.md          # Quality metrics report
-└── domains/              # Domain-specific documentation
-    ├── core/
-    │   ├── index.md      # Domain synthesis
-    │   └── *.md          # Individual file docs
-    ├── api/
-    └── storage/
+├── index.md                    # Project overview
+├── llms.txt                    # AI agent context
+├── patterns.md                 # Discovered code patterns
+├── constitution.md             # Coding conventions
+├── _coverage.md                # Quality metrics report
+│
+├── architecture.md             # Architecture analysis (Top-Down)
+├── risks.md                    # Risk analysis (Top-Down)
+├── flows.md                    # Data/business flows (Top-Down)
+├── terminology.md              # Domain glossary
+│
+├── getting-started/            # Getting started guide (Blueprint-based)
+│   ├── index.md
+│   ├── installation.md
+│   ├── configuration.md
+│   └── quick-start.md
+│
+├── architecture/               # Architecture section (Blueprint-based)
+│   ├── index.md
+│   ├── data-flow.md
+│   └── patterns.md
+│
+├── development/                # Development guide (Blueprint-based)
+│   ├── index.md
+│   ├── setup.md
+│   └── contributing.md
+│
+└── domains/                    # Domain-specific docs
+    ├── index.md                # Domain list
+    ├── {domain_name}/          # Per-domain directory
+    │   ├── index.md            # Domain synthesis (AI)
+    │   └── *.md                # Subpages (based on scale)
+    └── ...
 ```
+
+### File Generation Sources
+
+| File | Generator | Data Source |
+|------|-----------|-------------|
+| `index.md` | HierarchicalDocGenerator | ProjectProfile, DomainInsight |
+| `llms.txt` | LlmsTxtGenerator | DocSession, FileInsight |
+| `patterns.md` | PatternExtractor | FileInsight (25+ patterns) |
+| `constitution.md` | PatternExtractor | FileInsight (convention inference) |
+| `_coverage.md` | DocGenerator | QualityScore, DomainInsight |
+| `architecture.md` | ArchitectureDocGenerator | ProjectInsight (architecture agent) |
+| `risks.md` | ArchitectureDocGenerator | ProjectInsight (risk agent) |
+| `flows.md` | ArchitectureDocGenerator | ProjectInsight (flow agent) |
+| `terminology.md` | ArchitectureDocGenerator | ProjectInsight (domain agent) |
+| `getting-started/*` | HierarchicalDocGenerator | DocumentationBlueprint |
+| `architecture/*` | HierarchicalDocGenerator | DocumentationBlueprint, ProjectInsight |
+| `development/*` | HierarchicalDocGenerator | DocumentationBlueprint |
+| `domains/*` | HierarchicalDocGenerator + DocGenerator | DomainInsight, FileInsight |
 
 ---
 
@@ -506,6 +658,7 @@ Domain-Level Parallelism:
 | **TALE Budget** | Predictable cost with dynamic reallocation |
 | **Quality Scoring** | 5-dimension weighted assessment |
 | **Consolidation** | AI synthesis, not concatenation |
-| **Resume** | Checkpoint at every phase boundary |
+| **Doc Generation** | Blueprint-based hierarchical docs + 4 parallel generators |
+| **Resume** | Checkpoint at every phase boundary (including Phase 5.5) |
 
 This architecture ensures **100% file coverage** while maintaining **quality targets** within **predictable token budgets**.
