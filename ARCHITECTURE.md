@@ -429,7 +429,7 @@ AI가 프로젝트에 최적화된 문서 구조를 동적으로 결정합니다
 flowchart LR
     subgraph Input["입력"]
         PP[ProjectProfile]
-        DI[DomainInsight[]]
+        DI["DomainInsight[]"]
     end
 
     subgraph Agent["DocumentationStructureAgent"]
@@ -465,9 +465,9 @@ flowchart TB
     subgraph Input["입력 데이터"]
         BP[DocumentationBlueprint]
         PP[ProjectProfile]
-        DI[DomainInsight[]]
-        PI[ProjectInsight[]]
-        FI[FileInsight[]]
+        DI["DomainInsight[]"]
+        PI["ProjectInsight[]"]
+        FI["FileInsight[]"]
     end
 
     subgraph Generators["문서 생성기"]

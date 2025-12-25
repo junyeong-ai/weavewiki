@@ -429,7 +429,7 @@ AI dynamically determines the optimal documentation structure for the project:
 flowchart LR
     subgraph Input["Input"]
         PP[ProjectProfile]
-        DI[DomainInsight[]]
+        DI["DomainInsight[]"]
     end
 
     subgraph Agent["DocumentationStructureAgent"]
@@ -465,9 +465,9 @@ flowchart TB
     subgraph Input["Input Data"]
         BP[DocumentationBlueprint]
         PP[ProjectProfile]
-        DI[DomainInsight[]]
-        PI[ProjectInsight[]]
-        FI[FileInsight[]]
+        DI["DomainInsight[]"]
+        PI["ProjectInsight[]"]
+        FI["FileInsight[]"]
     end
 
     subgraph Generators["Document Generators"]
