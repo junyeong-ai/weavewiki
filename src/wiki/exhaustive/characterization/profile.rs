@@ -2,7 +2,7 @@
 
 use crate::config::{AnalysisMode, ProjectScale};
 use crate::types::DomainTerm;
-use crate::wiki::exhaustive::types::{Importance, ValueCategory};
+use crate::wiki::exhaustive::types::Importance;
 use serde::{Deserialize, Serialize};
 
 /// Unified project profile synthesized from all characterization agents
@@ -43,8 +43,6 @@ pub struct ProjectProfile {
     // === Analysis Guidance ===
     /// Key areas for focused analysis
     pub key_areas: Vec<KeyArea>,
-    /// Value categories to prioritize
-    pub value_focus: Vec<ValueFocus>,
     /// Entry points for top-down analysis
     pub entry_points: Vec<EntryPoint>,
 
@@ -70,7 +68,6 @@ impl ProjectProfile {
             terminology: vec![],
             dynamic_sections: vec![],
             key_areas: vec![],
-            value_focus: vec![],
             entry_points: vec![],
             characterized_at: chrono::Utc::now().to_rfc3339(),
             characterization_turns: 0,
@@ -174,14 +171,6 @@ pub struct KeyArea {
     pub path: String,
     pub importance: Importance,
     pub focus_reasons: Vec<String>,
-}
-
-/// Value category priority
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValueFocus {
-    pub category: ValueCategory,
-    pub priority: Importance,
-    pub hints: Vec<String>,
 }
 
 /// Entry point for top-down analysis

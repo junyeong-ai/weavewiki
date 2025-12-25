@@ -17,6 +17,7 @@
 //! transitions where previously all files had to wait for a write lock.
 
 mod file_analyzer;
+pub mod file_metrics;
 pub mod graph_context;
 mod parsers;
 pub mod prioritizer;
@@ -24,6 +25,7 @@ pub mod prompts;
 pub mod types;
 
 // Re-exports
+pub use file_metrics::FileMetrics;
 pub use graph_context::{FileStructuralContext, GraphContextProvider};
 pub use prioritizer::{BatchPrioritizer, PrioritizedFile};
 pub use types::*;

@@ -8,9 +8,11 @@
 //!
 //! This ensures parent/core modules can link to already-documented child modules.
 
+use crate::storage::Database;
 use crate::wiki::exhaustive::characterization::profile::{KeyArea, ProjectProfile};
 use crate::wiki::exhaustive::types::Importance;
 
+use super::file_metrics::FileMetrics;
 use super::types::ProcessingTier;
 
 /// File with its processing metadata
@@ -92,6 +94,75 @@ impl BatchPrioritizer {
 
         // Default tier based on path heuristics
         self.infer_tier_from_path(file)
+    }
+
+    /// Get processing tier using graph-based metrics if available.
+    ///
+    /// Falls back to heuristic-based tier if metrics cannot be computed.
+    pub fn get_tier_with_metrics(&self, file: &str, db: Option<&Database>) -> ProcessingTier {
+        // Try graph-based metrics first if database is available
+        if let Some(database) = db
+            && let Ok(metrics) = FileMetrics::from_database(database, file)
+        {
+            // Convert suggested tier string to ProcessingTier
+            let suggested = match metrics.suggested_tier() {
+                "core" => ProcessingTier::Core,
+                "important" => ProcessingTier::Important,
+                "standard" => ProcessingTier::Standard,
+                "leaf" => ProcessingTier::Leaf,
+                _ => ProcessingTier::Standard,
+            };
+
+            // Prefer higher tier between metrics-based and heuristic-based
+            // This ensures important files are never under-prioritized
+            let heuristic = self.get_tier(file);
+            if (suggested as u8) > (heuristic as u8) {
+                tracing::debug!(
+                    "File {}: metrics suggested {:?}, using over heuristic {:?}",
+                    file,
+                    suggested,
+                    heuristic
+                );
+                return suggested;
+            }
+        }
+
+        // Fall back to heuristic-based tier
+        self.get_tier(file)
+    }
+
+    /// Prioritize files using graph metrics if database is available
+    pub fn prioritize_with_metrics(
+        &self,
+        files: Vec<String>,
+        db: Option<&Database>,
+    ) -> Vec<PrioritizedFile> {
+        let mut prioritized: Vec<PrioritizedFile> = files
+            .into_iter()
+            .map(|path| {
+                let tier = self.get_tier_with_metrics(&path, db);
+                let is_entry_point = self.is_entry_point(&path);
+                let depth = path.matches('/').count();
+                PrioritizedFile {
+                    path,
+                    tier,
+                    is_entry_point,
+                    depth,
+                }
+            })
+            .collect();
+
+        // Leaf-first ordering: lower tier value = processed first
+        // Entry points always processed last within their tier
+        // Deeper files first within same tier (more specific modules first)
+        prioritized.sort_by(|a, b| {
+            (a.tier as u8)
+                .cmp(&(b.tier as u8))
+                .then_with(|| a.is_entry_point.cmp(&b.is_entry_point))
+                .then_with(|| b.depth.cmp(&a.depth))
+        });
+
+        prioritized
     }
 
     /// Check if file is an entry point (should be processed last)

@@ -14,7 +14,9 @@ use crate::wiki::exhaustive::bottom_up::FileInsight;
 use crate::wiki::exhaustive::characterization::profile::ProjectProfile;
 use crate::wiki::exhaustive::checkpoint::CheckpointContext;
 use agents::{ArchitectureAgent, DomainAgent, FlowAgent, RiskAgent, TopDownAgent};
-use insights::ProjectInsight;
+
+// Re-export for public use
+pub use insights::ProjectInsight;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;

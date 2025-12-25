@@ -119,6 +119,7 @@ impl FileAnalyzer {
             &self.profile,
             structural_context.as_ref(),
             self.config.bottom_up_max_file_chars,
+            None, // TODO: Pass SessionContext to save ~300-400 tokens per file
         );
 
         let schema = file_insight_schema();

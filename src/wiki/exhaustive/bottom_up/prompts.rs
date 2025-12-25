@@ -16,18 +16,23 @@ use super::graph_context::FileStructuralContext;
 use super::types::{AnalysisRequest, ChildDocContext, ProcessingTier};
 use crate::analyzer::parser::language::detect_language_or_text;
 use crate::wiki::exhaustive::characterization::profile::ProjectProfile;
+use crate::wiki::exhaustive::session_context::SessionContext;
 use serde_json::json;
 
 /// Token budget for child context section
 const MAX_CHILD_CONTEXT_TOKENS: usize = 2000;
 
 /// Build analysis prompt based on request
+///
+/// When `session_context` is provided, project context is omitted from this prompt
+/// (assumed to be in system prompt). This saves ~300-400 tokens per file.
 pub fn build_analysis_prompt(
     request: &AnalysisRequest,
     file_content: &str,
     profile: &ProjectProfile,
     structural_context: Option<&FileStructuralContext>,
     max_chars: usize,
+    session_context: Option<&SessionContext>,
 ) -> String {
     let truncated_content = if file_content.len() > max_chars {
         format!("{}... [truncated]", &file_content[..max_chars])
@@ -42,25 +47,27 @@ pub fn build_analysis_prompt(
     // Role and Objectives (CodeWiki pattern)
     prompt.push_str(&build_role_and_objectives(request.tier));
 
-    // Project context
-    prompt.push_str("# Project Context\n\n");
-    prompt.push_str(&format!("**Project**: {}\n", profile.name));
-    prompt.push_str(&format!("**Purpose**: {}\n", profile.purposes.join(", ")));
+    // Project context (skip if session_context provided - saves ~300-400 tokens)
+    if session_context.is_none() {
+        prompt.push_str("# Project Context\n\n");
+        prompt.push_str(&format!("**Project**: {}\n", profile.name));
+        prompt.push_str(&format!("**Purpose**: {}\n", profile.purposes.join(", ")));
 
-    if !profile.technical_traits.is_empty() {
-        prompt.push_str(&format!(
-            "**Tech Stack**: {}\n",
-            profile.technical_traits.join(", ")
-        ));
-    }
-
-    if !profile.terminology.is_empty() {
-        prompt.push_str("\n**Key Terms**:\n");
-        for term in profile.terminology.iter().take(5) {
-            prompt.push_str(&format!("- **{}**: {}\n", term.term, term.definition));
+        if !profile.technical_traits.is_empty() {
+            prompt.push_str(&format!(
+                "**Tech Stack**: {}\n",
+                profile.technical_traits.join(", ")
+            ));
         }
+
+        if !profile.terminology.is_empty() {
+            prompt.push_str("\n**Key Terms**:\n");
+            for term in profile.terminology.iter().take(5) {
+                prompt.push_str(&format!("- **{}**: {}\n", term.term, term.definition));
+            }
+        }
+        prompt.push('\n');
     }
-    prompt.push('\n');
 
     // Structural facts from parser
     if let Some(ctx) = structural_context {
@@ -101,8 +108,22 @@ pub fn build_analysis_prompt(
         request.is_deepening(),
     ));
 
-    // Bad examples section (DeepWiki pattern)
-    prompt.push_str(&build_bad_examples());
+    // Bad examples section (tier-specific when session_context provided)
+    if let Some(_ctx) = session_context {
+        // Use tier-specific anti-patterns to reduce bloat for leaf/standard
+        let tier_str = match request.tier {
+            ProcessingTier::Leaf => "leaf",
+            ProcessingTier::Standard => "standard",
+            ProcessingTier::Important => "important",
+            ProcessingTier::Core => "core",
+        };
+        prompt.push_str(
+            crate::wiki::exhaustive::session_context::TierAntiPatterns::for_tier(tier_str),
+        );
+    } else {
+        // Use full anti-patterns (legacy)
+        prompt.push_str(&build_bad_examples());
+    }
 
     prompt
 }
