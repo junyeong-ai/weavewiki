@@ -183,8 +183,6 @@ impl PreflightCheck {
                     "openai" => result.add_recommendation(
                         "Check OPENAI_API_KEY environment variable".to_string(),
                     ),
-                    "ollama" => result
-                        .add_recommendation("Ensure Ollama is running: ollama serve".to_string()),
                     "claude-code" => result.add_recommendation(
                         "Ensure Claude Code CLI is installed and authenticated".to_string(),
                     ),

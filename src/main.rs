@@ -71,7 +71,7 @@ enum Commands {
     Generate {
         #[arg(long, short, help = "Output directory for wiki")]
         output: Option<PathBuf>,
-        #[arg(long, help = "LLM provider (claude-code, openai, ollama)")]
+        #[arg(long, help = "LLM provider (claude-code, openai)")]
         provider: Option<String>,
         #[arg(long, help = "Model to use")]
         model: Option<String>,

@@ -126,11 +126,6 @@ export OPENAI_API_KEY="sk-..."
 weavewiki generate --provider openai --model gpt-4o
 ```
 
-### Ollama (로컬)
-```bash
-weavewiki generate --provider ollama --model llama3
-```
-
 ---
 
 ## 분석 모드

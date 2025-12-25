@@ -11,7 +11,6 @@
 mod chain;
 mod circuit_breaker;
 mod claude_code;
-mod ollama;
 mod openai;
 mod prompt_utils;
 
@@ -20,7 +19,6 @@ pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
 };
 pub use claude_code::ClaudeCodeProvider;
-pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 
 // Re-export error types from centralized location
@@ -111,16 +109,6 @@ impl TokenUsage {
         Self {
             input_tokens: prompt_tokens,
             output_tokens: completion_tokens,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        }
-    }
-
-    /// Create from Ollama-style usage response
-    pub fn from_ollama(prompt_eval_count: u32, eval_count: u32) -> Self {
-        Self {
-            input_tokens: prompt_eval_count,
-            output_tokens: eval_count,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         }
@@ -255,9 +243,8 @@ pub fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> {
     match config.provider.as_str() {
         "claude-code" => Ok(Arc::new(ClaudeCodeProvider::new(config.clone()))),
         "openai" => Ok(Arc::new(OpenAiProvider::new(config.clone())?)),
-        "ollama" => Ok(Arc::new(OllamaProvider::new(config.clone())?)),
         _ => Err(crate::types::WeaveError::Config(format!(
-            "Unknown provider: {}. Supported: claude-code, openai, ollama",
+            "Unknown provider: {}. Supported: claude-code, openai",
             config.provider
         ))),
     }

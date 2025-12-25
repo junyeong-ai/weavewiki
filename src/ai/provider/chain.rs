@@ -731,9 +731,9 @@ mod tests {
     #[test]
     fn test_estimate_cost() {
         // All providers return 0.0 - actual cost comes from response.cost_usd
-        assert_eq!(estimate_cost("ollama"), 0.0);
         assert_eq!(estimate_cost("claude-code"), 0.0);
         assert_eq!(estimate_cost("openai"), 0.0);
+        assert_eq!(estimate_cost("unknown"), 0.0);
     }
 
     #[test]
