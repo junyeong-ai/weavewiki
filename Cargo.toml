@@ -20,7 +20,7 @@ futures = "0.3"
 backon = { version = "1.6", features = ["tokio-sleep"] }
 
 # HTTP Client (for LLM providers)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
