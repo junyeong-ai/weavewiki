@@ -2,14 +2,41 @@
 //!
 //! Validates knowledge graph claims against actual source code.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::cli::util::require_graph_db_path;
 use crate::storage::Database;
 use crate::types::{
-    Claim, ClaimEvidence, ClaimType, InformationTier, IssueSeverity, Result, WeaveError,
+    Claim, ClaimEvidence, ClaimType, ClaudegenError, InformationTier, Result, Severity,
 };
 use crate::verifier::{Reporter, VerificationEngine};
+
+/// Validate that a path does not contain path traversal sequences.
+/// Returns sanitized path or error if traversal detected.
+fn sanitize_report_path(path: &Path) -> Result<PathBuf> {
+    let mut sanitized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => sanitized.push(part),
+            Component::CurDir => {} // Skip "."
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(ClaudegenError::Config(format!(
+                    "Invalid report path: '{}' contains path traversal or absolute components",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    if sanitized.as_os_str().is_empty() {
+        return Err(ClaudegenError::Config(
+            "Invalid report path: path is empty after sanitization".to_string(),
+        ));
+    }
+
+    Ok(sanitized)
+}
 
 pub fn run(path: Option<PathBuf>, report_path: &Path, severity: &str) -> Result<()> {
     let db_path = require_graph_db_path()?;
@@ -41,9 +68,13 @@ pub fn run(path: Option<PathBuf>, report_path: &Path, severity: &str) -> Result<
     }
 
     let min_severity = match severity.to_lowercase().as_str() {
-        "error" => IssueSeverity::Error,
-        "warning" => IssueSeverity::Warning,
-        _ => IssueSeverity::Info,
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "info" | "all" => Severity::Info,
+        other => {
+            tracing::warn!(value = other, "Unknown severity, using 'info'");
+            Severity::Info
+        }
     };
 
     if severity != "all" {
@@ -52,19 +83,33 @@ pub fn run(path: Option<PathBuf>, report_path: &Path, severity: &str) -> Result<
         Reporter::print_summary(&report);
     }
 
-    let weavewiki_dir = Path::new(".weavewiki");
+    let claudegen_dir = Path::new(".claudegen");
     if report_path.to_string_lossy() != "validation-report.json" || !report.issues.is_empty() {
-        let output_path = weavewiki_dir.join(report_path);
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        match sanitize_report_path(report_path) {
+            Ok(safe_report_path) => {
+                let output_path = claudegen_dir.join(safe_report_path);
+                if let Some(parent) = output_path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent) {
+                        tracing::warn!(path = %parent.display(), error = %e, "Failed to create report directory");
+                    }
+                match Reporter::generate_json(&report, &output_path) {
+                    Ok(()) => {
+                        println!();
+                        println!("Report saved to: {}", output_path.display());
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %output_path.display(), error = %e, "Failed to save report");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Invalid report path, skipping report save");
+            }
         }
-        Reporter::generate_json(&report, &output_path)?;
-        println!();
-        println!("Report saved to: {}", output_path.display());
     }
 
     if report.has_errors() {
-        return Err(WeaveError::Verification(
+        return Err(ClaudegenError::Verification(
             "Validation found errors. Check the report for details.".to_string(),
         ));
     }
@@ -94,7 +139,7 @@ fn load_claims_from_graph(db: &Database) -> Result<Vec<Claim>> {
             };
 
             Ok(Claim {
-                id: format!("claim:{}", id),
+                id: format!("claim:{id}"),
                 claim_type,
                 subject_id: id,
                 statement: name,

@@ -13,7 +13,8 @@
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::types::{Result, WeaveError};
+use crate::constants::validation as validation_constants;
+use crate::types::{ClaudegenError, Result};
 
 // =============================================================================
 // Convenience Functions
@@ -52,7 +53,7 @@ impl Default for JsonRepairer {
 impl JsonRepairer {
     pub fn new() -> Self {
         Self {
-            max_repair_attempts: 3,
+            max_repair_attempts: validation_constants::MAX_REPAIR_ATTEMPTS,
         }
     }
 
@@ -87,10 +88,13 @@ impl JsonRepairer {
             return Ok((value, true));
         }
 
-        Err(WeaveError::LlmApi(format!(
+        Err(ClaudegenError::LlmApi(format!(
             "Failed to parse or repair JSON after {} attempts. Content preview: {}...",
             self.max_repair_attempts,
-            &cleaned.chars().take(200).collect::<String>()
+            &cleaned
+                .chars()
+                .take(validation_constants::ERROR_PREVIEW_LENGTH)
+                .collect::<String>()
         )))
     }
 
@@ -116,13 +120,15 @@ impl JsonRepairer {
 
         // Remove ```json ... ``` or ``` ... ```
         if result.starts_with("```")
-            && let Some(first_newline) = result.find('\n')
-        {
-            result = result[first_newline + 1..].to_string();
-        }
+            && let Some(first_newline) = result.find('\n') {
+                // Safe: find() returns byte index at char boundary ('\n' is 1 byte)
+                result = result.get(first_newline + 1..).unwrap_or("").to_string();
+            }
 
         if result.ends_with("```") {
-            result = result[..result.len() - 3].trim_end().to_string();
+            // Safe: "```" is 3 ASCII bytes, ends_with confirms they exist
+            let len = result.len();
+            result = result.get(..len.saturating_sub(3)).unwrap_or("").trim_end().to_string();
         }
 
         result

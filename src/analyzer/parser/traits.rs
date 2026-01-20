@@ -103,8 +103,8 @@ pub fn create_ts_parser<L: Into<tree_sitter::Language>>(
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&language.into())
-        .map_err(|e| crate::types::WeaveError::Parse {
-            message: format!("Failed to set {} language: {}", lang_name, e),
+        .map_err(|e| crate::types::ClaudegenError::Parse {
+            message: format!("Failed to set {lang_name} language: {e}"),
             path: String::new(),
         })?;
     Ok(parser)
@@ -135,7 +135,7 @@ pub fn create_dependency_edge(
     import_type: ImportType,
 ) -> Edge {
     Edge {
-        id: format!("dep:{}:{}", path, import_path),
+        id: format!("dep:{path}:{import_path}"),
         edge_type: EdgeType::DependsOn,
         source_id,
         target_id,

@@ -59,16 +59,16 @@ jobs:
           target="${{ matrix.target }}"
 
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            binary="target/$target/release/weavewiki.exe"
-            archive="weavewiki-v${version}-${target}.zip"
-            cp "$binary" weavewiki.exe
-            7z a "$archive" weavewiki.exe
+            binary="target/$target/release/claudegen.exe"
+            archive="claudegen-v${version}-${target}.zip"
+            cp "$binary" claudegen.exe
+            7z a "$archive" claudegen.exe
             echo "ASSET=$archive" >> $GITHUB_ENV
           else
-            binary="target/$target/release/weavewiki"
-            archive="weavewiki-v${version}-${target}.tar.gz"
-            cp "$binary" weavewiki
-            tar -czf "$archive" weavewiki
+            binary="target/$target/release/claudegen"
+            archive="claudegen-v${version}-${target}.tar.gz"
+            cp "$binary" claudegen
+            tar -czf "$archive" claudegen
             echo "ASSET=$archive" >> $GITHUB_ENV
           fi
 

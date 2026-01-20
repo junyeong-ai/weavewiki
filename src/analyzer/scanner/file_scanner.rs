@@ -1,10 +1,8 @@
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
+use crate::config::AnalysisConfig;
 use crate::types::Result;
-
-/// Default maximum file size for analysis (1MB)
-const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
 
 /// Common source code extensions
 const SOURCE_EXTENSIONS: &[&str] = &[
@@ -34,27 +32,40 @@ pub struct FileScanner {
 
 impl FileScanner {
     pub fn new<P: AsRef<Path>>(root: P) -> Self {
+        let config = AnalysisConfig::default();
         Self {
             root: root.as_ref().to_path_buf(),
             include: vec!["**/*".to_string()],
             exclude: vec![],
-            max_file_size: DEFAULT_MAX_FILE_SIZE as u64,
+            max_file_size: config.max_file_size as u64,
             source_only: false,
         }
     }
 
     /// Create a scanner for source files with default skip patterns
     pub fn source_files<P: AsRef<Path>>(root: P) -> Self {
+        let config = AnalysisConfig::default();
         let exclude = DEFAULT_SKIP_DIRS
             .iter()
-            .map(|d| format!("{}/**", d))
+            .map(|d| format!("{d}/**"))
             .collect();
         Self {
             root: root.as_ref().to_path_buf(),
             include: vec!["**/*".to_string()],
             exclude,
-            max_file_size: DEFAULT_MAX_FILE_SIZE as u64,
+            max_file_size: config.max_file_size as u64,
             source_only: true,
+        }
+    }
+
+    /// Create a scanner with configuration
+    pub fn with_config<P: AsRef<Path>>(root: P, config: &AnalysisConfig) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+            include: config.include.clone(),
+            exclude: config.exclude.clone(),
+            max_file_size: config.max_file_size as u64,
+            source_only: false,
         }
     }
 
@@ -141,16 +152,21 @@ impl FileScanner {
                 continue;
             }
 
-            if let Ok(metadata) = path.metadata() {
-                if metadata.len() > self.max_file_size {
-                    continue;
-                }
+            match path.metadata() {
+                Ok(metadata) => {
+                    if metadata.len() > self.max_file_size {
+                        continue;
+                    }
 
-                files.push(ScannedFile {
-                    path: path.to_path_buf(),
-                    size: metadata.len(),
-                    extension: path.extension().and_then(|e| e.to_str()).map(String::from),
-                });
+                    files.push(ScannedFile {
+                        path: path.to_path_buf(),
+                        size: metadata.len(),
+                        extension: path.extension().and_then(|e| e.to_str()).map(String::from),
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(path = %path.display(), error = %e, "Failed to read file metadata");
+                }
             }
         }
 
@@ -158,15 +174,27 @@ impl FileScanner {
     }
 
     fn should_exclude(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
+        // Convert to relative path for pattern matching
+        let relative_path = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy();
 
         for pattern in &self.exclude {
-            if glob::Pattern::new(pattern)
-                .map(|p| p.matches(&path_str))
-                .unwrap_or(false)
-            {
-                return true;
-            }
+            // Try glob pattern matching
+            if let Ok(glob_pattern) = glob::Pattern::new(pattern)
+                && glob_pattern.matches(&relative_path) {
+                    return true;
+                }
+
+            // Also check if path contains the directory prefix (for patterns like ".git/**")
+            // This handles cases where the glob pattern might not match correctly
+            if let Some(dir_pattern) = pattern.strip_suffix("/**")
+                && (relative_path.starts_with(dir_pattern)
+                    || relative_path.starts_with(&format!("{}/", dir_pattern)))
+                {
+                    return true;
+                }
         }
 
         false

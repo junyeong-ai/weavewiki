@@ -6,8 +6,6 @@
 //! - Pre-calculate token counts before sending to LLM
 //! - Prevent context overflow by budgeting tokens per batch
 //! - Support different estimation methods
-//!
-//! Based on CodeWiki's token counting pattern (utils.py:29-37)
 
 use tracing::debug;
 
@@ -200,7 +198,7 @@ impl TokenBudget {
 pub fn estimate_file_tokens(path: &str, content: &str) -> usize {
     let counter = TokenCounter::default();
     // Include path, formatting, and content
-    let formatted = format!("## File: {}\n\n```\n{}\n```\n\n", path, content);
+    let formatted = format!("## File: {path}\n\n```\n{content}\n```\n\n");
     counter.count(&formatted)
 }
 

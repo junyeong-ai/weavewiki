@@ -29,11 +29,12 @@ use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, info, instrument, warn};
 
-use crate::constants::chain as chain_constants;
+use crate::config::RetryConfig;
+use crate::constants::provider::RATE_LIMIT_MAX_DELAY_SECS;
 
 use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use super::{LlmProvider, LlmResponse, ProviderConfig, SharedProvider};
-use crate::types::{ErrorCategory, ErrorClassifier, LlmError, Result, WeaveError};
+use crate::types::{ClaudegenError, ErrorCategory, ErrorClassifier, LlmError, Result};
 
 /// Provider with metadata for chain routing
 #[derive(Clone)]
@@ -54,7 +55,7 @@ impl ChainedProvider {
             provider,
             cost_per_1k: 0.0,
             priority: 100,
-            max_retries: chain_constants::DEFAULT_MAX_RETRIES,
+            max_retries: RetryConfig::default().max_retries as u8,
         }
     }
 
@@ -98,11 +99,25 @@ pub struct ChainConfig {
 
 impl Default for ChainConfig {
     fn default() -> Self {
+        let retry = RetryConfig::default();
         Self {
-            max_total_attempts: chain_constants::MAX_TOTAL_ATTEMPTS,
-            base_delay: Duration::from_millis(chain_constants::BASE_DELAY_MS),
-            max_delay: Duration::from_secs(chain_constants::MAX_DELAY_SECS),
-            backoff_factor: chain_constants::BACKOFF_FACTOR,
+            max_total_attempts: retry.max_total_attempts,
+            base_delay: Duration::from_millis(retry.base_delay_ms),
+            max_delay: Duration::from_secs(retry.max_delay_secs),
+            backoff_factor: retry.backoff_factor,
+            cost_optimize: true,
+            circuit_breaker: CircuitBreakerConfig::default(),
+        }
+    }
+}
+
+impl ChainConfig {
+    pub fn from_retry_config(retry: &RetryConfig) -> Self {
+        Self {
+            max_total_attempts: retry.max_total_attempts,
+            base_delay: Duration::from_millis(retry.base_delay_ms),
+            max_delay: Duration::from_secs(retry.max_delay_secs),
+            backoff_factor: retry.backoff_factor,
             cost_optimize: true,
             circuit_breaker: CircuitBreakerConfig::default(),
         }
@@ -157,11 +172,14 @@ impl ProviderChain {
     }
 
     /// Build chain from provider configs
-    pub fn from_configs(configs: &[ProviderConfig], chain_config: ChainConfig) -> Result<Self> {
+    pub async fn from_configs(
+        configs: &[ProviderConfig],
+        chain_config: ChainConfig,
+    ) -> Result<Self> {
         let mut chain = Self::new(chain_config);
 
         for (idx, config) in configs.iter().enumerate() {
-            let provider = super::create_provider(config)?;
+            let provider = super::create_provider(config).await?;
             let chained = ChainedProvider::from_shared(provider)
                 .with_priority(idx as u8)
                 .with_cost(estimate_cost(&config.provider));
@@ -193,7 +211,7 @@ impl ProviderChain {
         let start_time = std::time::Instant::now();
 
         if self.providers.is_empty() {
-            return Err(WeaveError::Config(
+            return Err(ClaudegenError::Config(
                 "No providers configured in chain".to_string(),
             ));
         }
@@ -206,7 +224,7 @@ impl ProviderChain {
                 .or_insert_with(|| CircuitBreaker::new(name, self.config.circuit_breaker.clone()));
         }
 
-        let mut last_error: Option<WeaveError> = None;
+        let mut last_error: Option<ClaudegenError> = None;
         let mut current_delay = self.config.base_delay;
 
         for provider_entry in &self.providers {
@@ -346,14 +364,16 @@ impl ProviderChain {
                                 warn!("Bad request error, stopping chain");
                                 stats.total_duration_ms = start_time.elapsed().as_millis() as u64;
                                 return Err(last_error.unwrap_or_else(|| {
-                                    WeaveError::LlmApi("Bad request with unknown error".to_string())
+                                    ClaudegenError::LlmApi(
+                                        "Bad request with unknown error".to_string(),
+                                    )
                                 }));
                             }
                             ErrorCategory::RateLimit => {
                                 // Use retry_after from error if available, otherwise use default
                                 let wait = classified.retry_after.unwrap_or_else(|| {
                                     parse_rate_limit_delay(&classified.message)
-                                        .unwrap_or(Duration::from_secs(30))
+                                        .unwrap_or(Duration::from_secs(RetryConfig::default().rate_limit_fallback_secs))
                                 });
                                 info!(
                                     wait_secs = wait.as_secs(),
@@ -403,7 +423,7 @@ impl ProviderChain {
         stats.total_duration_ms = start_time.elapsed().as_millis() as u64;
 
         Err(last_error
-            .unwrap_or_else(|| WeaveError::LlmApi("All providers in chain failed".to_string())))
+            .unwrap_or_else(|| ClaudegenError::LlmApi("All providers in chain failed".to_string())))
     }
 
     /// Get circuit breaker stats for all providers
@@ -479,7 +499,7 @@ fn parse_rate_limit_delay(message: &str) -> Option<Duration> {
         let after_retry = &lower[idx..];
         for word in after_retry.split_whitespace() {
             if let Ok(secs) = word.parse::<u64>() {
-                return Some(Duration::from_secs(secs.min(300))); // Cap at 5 minutes
+                return Some(Duration::from_secs(secs.min(RATE_LIMIT_MAX_DELAY_SECS))); // Cap at 5 minutes
             }
         }
     }
@@ -490,7 +510,7 @@ fn parse_rate_limit_delay(message: &str) -> Option<Duration> {
             let after_pattern = &lower[idx + pattern.len()..];
             for word in after_pattern.split_whitespace() {
                 if let Ok(secs) = word.parse::<u64>() {
-                    return Some(Duration::from_secs(secs.min(300)));
+                    return Some(Duration::from_secs(secs.min(RATE_LIMIT_MAX_DELAY_SECS)));
                 }
             }
         }
@@ -644,7 +664,10 @@ mod tests {
                     .fail_count
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if count < self.max_failures {
-                    return Err(WeaveError::LlmApi(format!("{} transient error", self.name)));
+                    return Err(ClaudegenError::LlmApi(format!(
+                        "{} transient error",
+                        self.name
+                    )));
                 }
             }
             Ok(LlmResponse::content_only(

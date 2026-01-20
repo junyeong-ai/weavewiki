@@ -5,8 +5,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::constants::network as net_constants;
-use crate::types::{Result, WeaveError};
+use crate::config::NetworkConfig;
+use crate::types::{ClaudegenError, Result};
 
 #[derive(Debug, Clone)]
 pub struct TimeoutConfig {
@@ -19,12 +19,25 @@ pub struct TimeoutConfig {
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
+        let network = NetworkConfig::default();
         Self {
-            llm_request: Duration::from_secs(net_constants::DEFAULT_TIMEOUT_SECS),
-            file_io: Duration::from_secs(30),
-            database: Duration::from_secs(30),
-            connection: Duration::from_secs(net_constants::CONNECTION_TIMEOUT_SECS),
-            analysis_phase: Duration::from_secs(600),
+            llm_request: Duration::from_millis(network.timeout_ms),
+            file_io: Duration::from_secs(30), // Default 30s for file I/O
+            database: Duration::from_secs(60), // Default 60s for database
+            connection: Duration::from_millis(network.connect_timeout_ms),
+            analysis_phase: Duration::from_secs(network.analysis_phase_timeout_secs),
+        }
+    }
+}
+
+impl TimeoutConfig {
+    pub fn from_network_config(network: &NetworkConfig) -> Self {
+        Self {
+            llm_request: Duration::from_millis(network.timeout_ms),
+            file_io: Duration::from_secs(30), // Default 30s for file I/O
+            database: Duration::from_secs(60), // Default 60s for database
+            connection: Duration::from_millis(network.connect_timeout_ms),
+            analysis_phase: Duration::from_secs(network.analysis_phase_timeout_secs),
         }
     }
 }
@@ -35,7 +48,7 @@ where
 {
     match tokio::time::timeout(timeout, future).await {
         Ok(result) => result,
-        Err(_) => Err(WeaveError::timeout(operation_name, timeout)),
+        Err(_) => Err(ClaudegenError::timeout(operation_name, timeout)),
     }
 }
 
@@ -45,7 +58,7 @@ where
 {
     match tokio::time::timeout(timeout, future).await {
         Ok(result) => Ok(result),
-        Err(_) => Err(WeaveError::timeout(operation_name, timeout)),
+        Err(_) => Err(ClaudegenError::timeout(operation_name, timeout)),
     }
 }
 
@@ -56,8 +69,9 @@ mod tests {
     #[test]
     fn test_timeout_config_defaults() {
         let config = TimeoutConfig::default();
-        assert_eq!(config.llm_request.as_secs(), 300);
-        assert_eq!(config.connection.as_secs(), 30);
+        // NetworkConfig defaults: timeout_ms=300_000, connect_timeout_ms=30_000, analysis_phase_timeout_secs=600
+        assert_eq!(config.llm_request.as_millis(), 300_000);
+        assert_eq!(config.connection.as_millis(), 30_000);
         assert_eq!(config.analysis_phase.as_secs(), 600);
     }
 
@@ -65,7 +79,7 @@ mod tests {
     async fn test_with_timeout_success() {
         let result = with_timeout(
             Duration::from_secs(1),
-            async { Ok::<_, WeaveError>(42) },
+            async { Ok::<_, ClaudegenError>(42) },
             "test operation",
         )
         .await;
@@ -79,12 +93,15 @@ mod tests {
             Duration::from_millis(10),
             async {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                Ok::<_, WeaveError>(42)
+                Ok::<_, ClaudegenError>(42)
             },
             "slow operation",
         )
         .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WeaveError::Timeout { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ClaudegenError::Timeout { .. }
+        ));
     }
 }

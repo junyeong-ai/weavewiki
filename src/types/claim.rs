@@ -2,8 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::InformationTier;
+use super::validation::Severity;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Claim {
     pub id: String,
     pub claim_type: ClaimType,
@@ -66,7 +67,7 @@ pub enum VerificationStatus {
     Conflict,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ClaimEvidence {
     pub file: String,
     pub line: Option<u32>,
@@ -100,10 +101,10 @@ impl ClaimEvidence {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationIssue {
     pub id: String,
-    pub severity: IssueSeverity,
+    pub severity: Severity,
     pub claim_id: String,
     pub message: String,
     pub suggestion: Option<String>,
@@ -113,7 +114,7 @@ pub struct VerificationIssue {
 impl VerificationIssue {
     pub fn new(
         claim_id: impl Into<String>,
-        severity: IssueSeverity,
+        severity: Severity,
         message: impl Into<String>,
     ) -> Self {
         Self {
@@ -137,15 +138,7 @@ impl VerificationIssue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "lowercase")]
-pub enum IssueSeverity {
-    Error,
-    Warning,
-    Info,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct VerificationReport {
     pub generated_at: DateTime<Utc>,
     pub total_claims: u32,
@@ -168,22 +161,20 @@ impl VerificationReport {
     }
 
     pub fn has_errors(&self) -> bool {
-        self.issues
-            .iter()
-            .any(|i| i.severity == IssueSeverity::Error)
+        self.issues.iter().any(|i| i.severity.is_error())
     }
 
     pub fn error_count(&self) -> usize {
         self.issues
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Error)
+            .filter(|i| i.severity.is_error())
             .count()
     }
 
     pub fn warning_count(&self) -> usize {
         self.issues
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Warning)
+            .filter(|i| i.severity.is_warning())
             .count()
     }
 }

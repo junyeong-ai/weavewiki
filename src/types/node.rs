@@ -37,7 +37,7 @@ impl Node {
         };
 
         Self {
-            id: format!("{}:{}", node_type_str, name),
+            id: format!("{node_type_str}:{name}"),
             node_type,
             path,
             name,
@@ -231,7 +231,7 @@ pub enum NodeStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceLocation {
     pub file: String,
     pub start_line: u32,

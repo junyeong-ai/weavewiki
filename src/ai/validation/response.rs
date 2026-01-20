@@ -1,121 +1,44 @@
 //! Response Validation
 //!
-//! Validates LLM response structure and content quality:
-//! - Required fields presence
-//! - Valid enum values
-//! - Evidence line numbers exist
-//! - Path matching with input files
-//! - Section structure integrity
-//!
-//! Based on CodeWiki's post-processing validation pattern.
+//! Validates LLM response structure and content quality.
 
 use serde_json::Value;
 use std::collections::HashSet;
-use std::fmt;
 
-/// Severity levels for validation issues
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueSeverity {
-    /// Critical error - response is unusable
-    Error,
-    /// Warning - response usable but degraded quality
-    Warning,
-    /// Info - observation that doesn't affect usability
-    Info,
-}
+use crate::types::ValidationIssue;
 
-impl fmt::Display for IssueSeverity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IssueSeverity::Error => write!(f, "ERROR"),
-            IssueSeverity::Warning => write!(f, "WARN"),
-            IssueSeverity::Info => write!(f, "INFO"),
-        }
-    }
-}
-
-/// A single validation issue
-#[derive(Debug, Clone)]
-pub struct ValidationIssue {
-    pub severity: IssueSeverity,
-    pub message: String,
-    pub location: Option<String>,
-}
-
-impl ValidationIssue {
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            severity: IssueSeverity::Error,
-            message: message.into(),
-            location: None,
-        }
-    }
-
-    pub fn warning(message: impl Into<String>) -> Self {
-        Self {
-            severity: IssueSeverity::Warning,
-            message: message.into(),
-            location: None,
-        }
-    }
-
-    pub fn info(message: impl Into<String>) -> Self {
-        Self {
-            severity: IssueSeverity::Info,
-            message: message.into(),
-            location: None,
-        }
-    }
-
-    pub fn at(mut self, location: impl Into<String>) -> Self {
-        self.location = Some(location.into());
-        self
-    }
-}
-
-/// Validation result containing all issues found
-#[derive(Debug, Clone)]
-pub struct ValidationResult {
+/// Response validation result with statistics
+#[derive(Debug, Clone, Default)]
+pub struct ResponseValidationResult {
     pub issues: Vec<ValidationIssue>,
     pub files_validated: usize,
     pub sections_validated: usize,
 }
 
-impl ValidationResult {
+impl ResponseValidationResult {
     pub fn new() -> Self {
-        Self {
-            issues: Vec::new(),
-            files_validated: 0,
-            sections_validated: 0,
-        }
+        Self::default()
     }
 
-    /// Check if response is valid (no errors)
     pub fn is_valid(&self) -> bool {
-        !self
-            .issues
-            .iter()
-            .any(|i| i.severity == IssueSeverity::Error)
+        !self.issues.iter().any(|i| i.severity.is_error())
     }
 
-    /// Check if response is acceptable (no errors, warnings are OK)
     pub fn is_acceptable(&self) -> bool {
         self.is_valid()
     }
 
-    /// Count errors
     pub fn error_count(&self) -> usize {
         self.issues
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Error)
+            .filter(|i| i.severity.is_error())
             .count()
     }
 
-    /// Count warnings
     pub fn warning_count(&self) -> usize {
         self.issues
             .iter()
-            .filter(|i| i.severity == IssueSeverity::Warning)
+            .filter(|i| i.severity.is_warning())
             .count()
     }
 
@@ -124,17 +47,9 @@ impl ValidationResult {
     }
 }
 
-impl Default for ValidationResult {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Response validator for batch analysis output
 pub struct ResponseValidator {
-    /// Valid complexity values
     valid_complexities: HashSet<&'static str>,
-    /// Valid importance values
     valid_importances: HashSet<&'static str>,
 }
 
@@ -152,40 +67,35 @@ impl ResponseValidator {
         }
     }
 
-    /// Validate batch analysis response
-    pub fn validate_batch_response(&self, response: &Value) -> ValidationResult {
-        let mut result = ValidationResult::new();
+    pub fn validate_batch_response(&self, response: &Value) -> ResponseValidationResult {
+        let mut result = ResponseValidationResult::new();
 
-        // Check top-level structure
         if !response.is_object() {
-            result.add(ValidationIssue::error("Response must be a JSON object"));
+            result.add(ValidationIssue::error("RESP001", "Response must be a JSON object"));
             return result;
         }
 
-        // Check files array
         let files = match response.get("files") {
             Some(Value::Array(arr)) => arr,
             Some(_) => {
-                result.add(ValidationIssue::error("'files' must be an array"));
+                result.add(ValidationIssue::error("RESP002", "'files' must be an array"));
                 return result;
             }
             None => {
-                result.add(ValidationIssue::error("Missing required 'files' field"));
+                result.add(ValidationIssue::error("RESP003", "Missing required 'files' field"));
                 return result;
             }
         };
 
         if files.is_empty() {
-            result.add(ValidationIssue::warning("'files' array is empty"));
+            result.add(ValidationIssue::warning("RESP004", "'files' array is empty"));
             return result;
         }
 
-        // Validate each file
         for (idx, file) in files.iter().enumerate() {
             self.validate_file_analysis(file, idx, &mut result);
         }
 
-        // Validate metadata if present
         if let Some(metadata) = response.get("analysis_metadata") {
             self.validate_metadata(metadata, files.len(), &mut result);
         }
@@ -193,18 +103,26 @@ impl ResponseValidator {
         result
     }
 
-    /// Validate a single file analysis
-    fn validate_file_analysis(&self, file: &Value, idx: usize, result: &mut ValidationResult) {
-        let location = format!("files[{}]", idx);
+    fn validate_file_analysis(
+        &self,
+        file: &Value,
+        idx: usize,
+        result: &mut ResponseValidationResult,
+    ) {
+        let location = format!("files[{idx}]");
 
-        // Required: path
         match file.get("path") {
             Some(Value::String(s)) if !s.is_empty() => {}
             Some(Value::String(_)) => {
-                result.add(ValidationIssue::error("Empty file path").at(&location));
+                result.add(
+                    ValidationIssue::error("FILE001", "Empty file path").with_location(&location),
+                );
             }
             _ => {
-                result.add(ValidationIssue::error("Missing or invalid 'path'").at(&location));
+                result.add(
+                    ValidationIssue::error("FILE002", "Missing or invalid 'path'")
+                        .with_location(&location),
+                );
             }
         }
 
@@ -213,7 +131,6 @@ impl ResponseValidator {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        // Required: sections
         match file.get("sections") {
             Some(Value::Array(sections)) => {
                 for (sec_idx, section) in sections.iter().enumerate() {
@@ -223,37 +140,36 @@ impl ResponseValidator {
             }
             _ => {
                 result.add(
-                    ValidationIssue::error("Missing or invalid 'sections' array")
-                        .at(format!("files[{}].sections", idx)),
+                    ValidationIssue::error("FILE003", "Missing or invalid 'sections' array")
+                        .with_location(format!("files[{idx}].sections")),
                 );
             }
         }
 
-        // Optional with validation: complexity
         if let Some(complexity) = file.get("complexity").and_then(|v| v.as_str())
             && !self.valid_complexities.contains(complexity)
         {
             result.add(
-                ValidationIssue::warning(format!(
-                    "Invalid complexity '{}', expected one of: low, medium, high, critical",
-                    complexity
-                ))
-                .at(format!("files[{}].complexity", idx)),
+                ValidationIssue::warning(
+                    "FILE004",
+                    format!(
+                        "Invalid complexity '{complexity}', expected: low, medium, high, critical"
+                    ),
+                )
+                .with_location(format!("files[{idx}].complexity")),
             );
         }
 
-        // Optional with validation: confidence
         if let Some(confidence) = file.get("confidence")
             && let Some(c) = confidence.as_f64()
             && !(0.0..=1.0).contains(&c)
         {
             result.add(
-                ValidationIssue::warning(format!("Confidence {} out of range [0.0, 1.0]", c))
-                    .at(format!("files[{}].confidence", idx)),
+                ValidationIssue::warning("FILE005", format!("Confidence {c} out of range [0.0, 1.0]"))
+                    .with_location(format!("files[{idx}].confidence")),
             );
         }
 
-        // Quality indicators (warnings if missing)
         if file
             .get("purpose_summary")
             .and_then(|v| v.as_str())
@@ -261,7 +177,8 @@ impl ResponseValidator {
             .unwrap_or(true)
         {
             result.add(
-                ValidationIssue::info("Missing purpose_summary").at(format!("files[{}]", idx)),
+                ValidationIssue::info("FILE006", "Missing purpose_summary")
+                    .with_location(format!("files[{idx}]")),
             );
         }
 
@@ -272,11 +189,11 @@ impl ResponseValidator {
             .unwrap_or(true)
         {
             result.add(
-                ValidationIssue::info("No key_insights provided").at(format!("files[{}]", idx)),
+                ValidationIssue::info("FILE007", "No key_insights provided")
+                    .with_location(format!("files[{idx}]")),
             );
         }
 
-        // v2.0 fields - check for completeness
         if file
             .get("hidden_assumptions")
             .and_then(|v| v.as_array())
@@ -284,8 +201,8 @@ impl ResponseValidator {
             .unwrap_or(true)
         {
             result.add(
-                ValidationIssue::info("No hidden_assumptions identified")
-                    .at(format!("files[{}]", idx)),
+                ValidationIssue::info("FILE008", "No hidden_assumptions identified")
+                    .with_location(format!("files[{idx}]")),
             );
         }
 
@@ -296,68 +213,70 @@ impl ResponseValidator {
             .unwrap_or(true)
         {
             result.add(
-                ValidationIssue::info("No modification_risks identified")
-                    .at(format!("files[{}]", idx)),
+                ValidationIssue::info("FILE009", "No modification_risks identified")
+                    .with_location(format!("files[{idx}]")),
             );
         }
 
         result.files_validated += 1;
     }
 
-    /// Validate a single section
     fn validate_section(
         &self,
         section: &Value,
         idx: usize,
         file_path: &str,
-        result: &mut ValidationResult,
+        result: &mut ResponseValidationResult,
     ) {
-        let location = format!("{}:sections[{}]", file_path, idx);
+        let location = format!("{file_path}:sections[{idx}]");
 
-        // Required: section_name
         if section
             .get("section_name")
             .and_then(|v| v.as_str())
             .map(|s| s.is_empty())
             .unwrap_or(true)
         {
-            result.add(ValidationIssue::warning("Missing or empty section_name").at(&location));
+            result.add(
+                ValidationIssue::warning("SEC001", "Missing or empty section_name")
+                    .with_location(&location),
+            );
         }
 
-        // Required: content
         if section.get("content").is_none() {
-            result.add(ValidationIssue::warning("Missing content field").at(&location));
+            result.add(
+                ValidationIssue::warning("SEC002", "Missing content field").with_location(&location),
+            );
         }
 
-        // Critical: evidence_lines (this is NON-NEGOTIABLE per prompt)
         match section.get("evidence_lines") {
             Some(Value::Array(lines)) if lines.is_empty() => {
                 result.add(
                     ValidationIssue::warning(
+                        "SEC003",
                         "Empty evidence_lines - sections should cite line numbers",
                     )
-                    .at(&location),
+                    .with_location(&location),
                 );
             }
             Some(Value::Array(lines)) => {
-                // Validate line numbers are positive integers
                 for (line_idx, line) in lines.iter().enumerate() {
                     match line.as_u64() {
                         Some(0) => {
                             result.add(
                                 ValidationIssue::warning(
+                                    "SEC004",
                                     "Line number 0 is invalid (lines start at 1)",
                                 )
-                                .at(format!("{}:evidence_lines[{}]", location, line_idx)),
+                                .with_location(format!("{location}:evidence_lines[{line_idx}]")),
                             );
                         }
                         None if !line.is_u64() => {
                             result.add(
-                                ValidationIssue::warning(format!(
-                                    "Invalid line number: {:?}",
-                                    line
-                                ))
-                                .at(format!("{}:evidence_lines[{}]", location, line_idx)),
+                                ValidationIssue::warning(
+                                    "SEC005",
+                                    format!("Invalid line number: {line:?}"),
+                                )
+                                .with_location(format!("{location}:evidence_lines[{line_idx}]")),
                             );
                         }
                         _ => {}
@@ -366,34 +285,36 @@ impl ResponseValidator {
             }
             _ => {
                 result.add(
-                    ValidationIssue::warning("Missing evidence_lines - all claims need evidence")
-                        .at(&location),
+                    ValidationIssue::warning(
+                        "SEC006",
+                        "Missing evidence_lines - all claims need evidence",
+                    )
+                    .with_location(&location),
                 );
             }
         }
 
-        // Optional with validation: importance
         if let Some(importance) = section.get("importance").and_then(|v| v.as_str())
             && !self.valid_importances.contains(importance)
         {
             result.add(
-                ValidationIssue::info(format!(
-                    "Non-standard importance '{}', expected: critical, high, medium, low",
-                    importance
-                ))
-                .at(&location),
+                ValidationIssue::info(
+                    "SEC007",
+                    format!(
+                        "Non-standard importance '{importance}', expected: critical, high, medium, low"
+                    ),
+                )
+                .with_location(&location),
             );
         }
     }
 
-    /// Validate analysis metadata
     fn validate_metadata(
         &self,
         metadata: &Value,
         file_count: usize,
-        result: &mut ValidationResult,
+        result: &mut ResponseValidationResult,
     ) {
-        // Check coverage completeness
         if let Some(complete) = metadata.get("coverage_complete").and_then(|v| v.as_bool())
             && !complete
         {
@@ -406,82 +327,76 @@ impl ResponseValidator {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
-            result.add(ValidationIssue::warning(format!(
-                "Incomplete coverage: {}/{} files analyzed",
-                analyzed, input
-            )));
+            result.add(ValidationIssue::warning(
+                "META001",
+                format!("Incomplete coverage: {analyzed}/{input} files analyzed"),
+            ));
         }
 
-        // Check for consistency
         if let Some(analyzed) = metadata.get("files_analyzed").and_then(|v| v.as_u64())
             && analyzed as usize != file_count
         {
-            result.add(ValidationIssue::info(format!(
-                "Metadata claims {} files analyzed but {} in response",
-                analyzed, file_count
-            )));
+            result.add(ValidationIssue::info(
+                "META002",
+                format!("Metadata claims {analyzed} files analyzed but {file_count} in response"),
+            ));
         }
 
-        // Report low confidence files
         if let Some(low_conf) = metadata
             .get("low_confidence_files")
             .and_then(|v| v.as_array())
         {
             for file in low_conf {
                 if let Some(path) = file.as_str() {
-                    result.add(ValidationIssue::info(format!(
-                        "Low confidence analysis: {}",
-                        path
-                    )));
+                    result.add(ValidationIssue::info(
+                        "META003",
+                        format!("Low confidence analysis: {path}"),
+                    ));
                 }
             }
         }
     }
 
-    /// Validate response against expected file paths
     pub fn validate_coverage(
         &self,
         response: &Value,
         expected_paths: &[String],
-    ) -> ValidationResult {
-        let mut result = ValidationResult::new();
+    ) -> ResponseValidationResult {
+        let mut result = ResponseValidationResult::new();
 
         let files = match response.get("files").and_then(|v| v.as_array()) {
             Some(f) => f,
             None => {
-                result.add(ValidationIssue::error("No files array in response"));
+                result.add(ValidationIssue::error("COV001", "No files array in response"));
                 return result;
             }
         };
 
-        // Collect response paths (normalized)
         let response_paths: HashSet<String> = files
             .iter()
             .filter_map(|f| f.get("path").and_then(|v| v.as_str()))
             .map(normalize_path)
             .collect();
 
-        // Check for missing files
         for expected in expected_paths {
             let normalized = normalize_path(expected);
             if !response_paths.contains(&normalized) {
-                result.add(ValidationIssue::warning(format!(
-                    "Missing analysis for: {}",
-                    expected
-                )));
+                result.add(ValidationIssue::warning(
+                    "COV002",
+                    format!("Missing analysis for: {expected}"),
+                ));
             }
         }
 
-        // Check for extra files
         let expected_normalized: HashSet<String> =
             expected_paths.iter().map(|p| normalize_path(p)).collect();
 
         for path in &response_paths {
             if !expected_normalized.contains(path) {
-                result.add(ValidationIssue::info(format!(
-                    "Extra file in response: {}",
-                    path
-                )));
+                result.add(ValidationIssue::info(
+                    "COV003",
+                    format!("Extra file in response: {path}"),
+                ));
             }
         }
 
@@ -489,7 +404,6 @@ impl ResponseValidator {
     }
 }
 
-/// Normalize file path for comparison
 fn normalize_path(path: &str) -> String {
     path.trim()
         .trim_start_matches("./")
@@ -548,7 +462,7 @@ mod tests {
         });
 
         let result = validator.validate_batch_response(&response);
-        assert!(result.is_valid()); // Warnings don't make it invalid
+        assert!(result.is_valid());
         assert!(result.warning_count() > 0);
     }
 
@@ -586,12 +500,9 @@ mod tests {
         ];
 
         let result = validator.validate_coverage(&response, &expected);
-        // Should warn about missing c.rs
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.message.contains("Missing analysis for") && i.message.contains("c.rs"))
-        );
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.message.contains("Missing analysis for") && i.message.contains("c.rs")));
     }
 }

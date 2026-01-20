@@ -1,7 +1,7 @@
 //! Mermaid Diagram Validation
 //!
 //! Validates Mermaid diagram syntax to ensure diagrams are renderable.
-//! Follows CodeWiki's strict validation approach: fail loudly on invalid diagrams.
+//! Follows strict validation approach: fail loudly on invalid diagrams.
 //!
 //! ## Supported Diagram Types
 //! - flowchart/graph (TD, LR, RL, BT)
@@ -85,7 +85,7 @@ impl std::fmt::Display for DiagramError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Line {}: {}", self.line, self.message)?;
         if let Some(ref suggestion) = self.suggestion {
-            write!(f, " ({})", suggestion)?;
+            write!(f, " ({suggestion})")?;
         }
         Ok(())
     }
@@ -279,7 +279,7 @@ impl DiagramValidator {
             if !node_ids.contains(ref_id) {
                 warnings.push(DiagramWarning {
                     line: 0,
-                    message: format!("Node '{}' referenced but not explicitly defined", ref_id),
+                    message: format!("Node '{ref_id}' referenced but not explicitly defined"),
                 });
             }
         }
@@ -434,7 +434,7 @@ impl DiagramValidator {
 
         if open_states > 0 {
             errors.push(
-                DiagramError::new(0, format!("{} unclosed state blocks", open_states))
+                DiagramError::new(0, format!("{open_states} unclosed state blocks"))
                     .with_suggestion("Add closing braces"),
             );
         }
@@ -601,10 +601,8 @@ impl DiagramValidator {
         let close_braces = content.matches('}').count();
         if open_braces != close_braces {
             errors.push(
-                DiagramError::new(0, "Mismatched braces").with_suggestion(format!(
-                    "Found {} '{{' and {} '}}'",
-                    open_braces, close_braces
-                )),
+                DiagramError::new(0, "Mismatched braces")
+                    .with_suggestion(format!("Found {open_braces} '{{' and {close_braces} '}}'")),
             );
         }
 
@@ -613,8 +611,7 @@ impl DiagramValidator {
         if open_brackets != close_brackets {
             errors.push(
                 DiagramError::new(0, "Mismatched brackets").with_suggestion(format!(
-                    "Found {} '[' and {} ']'",
-                    open_brackets, close_brackets
+                    "Found {open_brackets} '[' and {close_brackets} ']'"
                 )),
             );
         }
@@ -623,10 +620,8 @@ impl DiagramValidator {
         let close_parens = content.matches(')').count();
         if open_parens != close_parens {
             errors.push(
-                DiagramError::new(0, "Mismatched parentheses").with_suggestion(format!(
-                    "Found {} '(' and {} ')'",
-                    open_parens, close_parens
-                )),
+                DiagramError::new(0, "Mismatched parentheses")
+                    .with_suggestion(format!("Found {open_parens} '(' and {close_parens} ')'")),
             );
         }
 

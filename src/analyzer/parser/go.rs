@@ -5,8 +5,8 @@ use super::{
     create_ts_parser, get_node_text,
 };
 use crate::types::{
-    EdgeType, FunctionSignature, ImportType, NodeMetadata, NodeType, Parameter, Result, Visibility,
-    WeaveError,
+    ClaudegenError, EdgeType, FunctionSignature, ImportType, NodeMetadata, NodeType, Parameter,
+    Result, Visibility,
 };
 
 pub struct GoParser;
@@ -21,7 +21,7 @@ impl GoParser {
 impl Parser for GoParser {
     fn parse(&self, path: &str, content: &str) -> Result<ParseResult> {
         let mut parser = create_ts_parser(tree_sitter_go::LANGUAGE, "Go").map_err(|mut e| {
-            if let WeaveError::Parse {
+            if let ClaudegenError::Parse {
                 path: ref mut p, ..
             } = e
             {
@@ -32,7 +32,7 @@ impl Parser for GoParser {
 
         let tree = parser
             .parse(content, None)
-            .ok_or_else(|| WeaveError::Parse {
+            .ok_or_else(|| ClaudegenError::Parse {
                 message: "Failed to parse Go file".to_string(),
                 path: path.to_string(),
             })?;
@@ -73,10 +73,10 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
                 let import_path = get_node_text(node, content.as_bytes()).trim_matches('"');
 
                 let mut edge = create_code_edge(
-                    format!("import:{}:{}", path, import_path),
+                    format!("import:{path}:{import_path}"),
                     EdgeType::DependsOn,
-                    format!("file:{}", path),
-                    format!("package:{}", import_path),
+                    format!("file:{path}"),
+                    format!("package:{import_path}"),
                     node,
                     path,
                 );
@@ -108,7 +108,7 @@ fn extract_structs(root: tree_sitter::Node, content: &str, path: &str, result: &
 
                 // Go visibility: uppercase = public, lowercase = private
                 let mut struct_node = create_code_node(
-                    format!("struct:{}:{}", path, name),
+                    format!("struct:{path}:{name}"),
                     NodeType::Class,
                     path,
                     name.clone(),
@@ -146,7 +146,7 @@ fn extract_interfaces(
                 let name = get_node_text(node, content.as_bytes()).to_string();
 
                 let iface_node = create_code_node(
-                    format!("interface:{}:{}", path, name),
+                    format!("interface:{path}:{name}"),
                     NodeType::Interface,
                     path,
                     name,
@@ -193,7 +193,7 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
             }
 
             let mut func_node = create_code_node(
-                format!("function:{}:{}", path, name),
+                format!("function:{path}:{name}"),
                 NodeType::Function,
                 path,
                 name.clone(),
@@ -256,7 +256,7 @@ fn extract_methods(root: tree_sitter::Node, content: &str, path: &str, result: &
             }
 
             let mut method = create_code_node(
-                format!("method:{}:{}:{}", path, receiver_type, method_name),
+                format!("method:{path}:{receiver_type}:{method_name}"),
                 NodeType::Method,
                 path,
                 method_name.clone(),
@@ -268,10 +268,10 @@ fn extract_methods(root: tree_sitter::Node, content: &str, path: &str, result: &
             // Create ownership edge: struct owns method
             if !receiver_type.is_empty() {
                 let edge = create_code_edge(
-                    format!("member:{}:{}:{}", path, receiver_type, method_name),
+                    format!("member:{path}:{receiver_type}:{method_name}"),
                     EdgeType::Owns,
-                    format!("struct:{}:{}", path, receiver_type),
-                    format!("method:{}:{}:{}", path, receiver_type, method_name),
+                    format!("struct:{path}:{receiver_type}"),
+                    format!("method:{path}:{receiver_type}:{method_name}"),
                     node,
                     path,
                 );

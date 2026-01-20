@@ -3,8 +3,8 @@ use tree_sitter::{Parser as TsParser, Query, QueryCursor, StreamingIterator};
 
 use super::{Language, ParseResult, Parser, create_file_node};
 use crate::types::{
-    Edge, EdgeMetadata, EdgeType, EvidenceLocation, FunctionSignature, ImportType, InformationTier,
-    Node, NodeMetadata, NodeStatus, NodeType, Parameter, Result, Visibility, WeaveError,
+    ClaudegenError, Edge, EdgeMetadata, EdgeType, EvidenceLocation, FunctionSignature, ImportType,
+    InformationTier, Node, NodeMetadata, NodeStatus, NodeType, Parameter, Result, Visibility,
 };
 
 pub struct TypeScriptParser;
@@ -14,8 +14,8 @@ impl TypeScriptParser {
         let mut parser = TsParser::new();
         parser
             .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-            .map_err(|e| WeaveError::Parse {
-                message: format!("Failed to set TypeScript language: {}", e),
+            .map_err(|e| ClaudegenError::Parse {
+                message: format!("Failed to set TypeScript language: {e}"),
                 path: String::new(),
             })?;
         Ok(Self)
@@ -28,14 +28,14 @@ impl Parser for TypeScriptParser {
         let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
         parser
             .set_language(&language.into())
-            .map_err(|e| WeaveError::Parse {
-                message: format!("Failed to set TypeScript language: {}", e),
+            .map_err(|e| ClaudegenError::Parse {
+                message: format!("Failed to set TypeScript language: {e}"),
                 path: path.to_string(),
             })?;
 
         let tree = parser
             .parse(content, None)
-            .ok_or_else(|| WeaveError::Parse {
+            .ok_or_else(|| ClaudegenError::Parse {
                 message: "Failed to parse TypeScript file".to_string(),
                 path: path.to_string(),
             })?;
@@ -85,9 +85,9 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
                 }
 
                 let edge = Edge {
-                    id: format!("dep:{}:{}", path, source),
+                    id: format!("dep:{path}:{source}"),
                     edge_type: EdgeType::DependsOn,
-                    source_id: format!("file:{}", path),
+                    source_id: format!("file:{path}"),
                     target_id: format!("file:{}", resolve_import(path, source)),
                     metadata: EdgeMetadata {
                         import_type: Some(ImportType::Static),
@@ -139,10 +139,10 @@ fn extract_exports(root: tree_sitter::Node, content: &str, path: &str, result: &
                 let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
 
                 let edge = Edge {
-                    id: format!("export:{}:{}", path, name),
+                    id: format!("export:{path}:{name}"),
                     edge_type: EdgeType::Exposes,
-                    source_id: format!("file:{}", path),
-                    target_id: format!("symbol:{}:{}", path, name),
+                    source_id: format!("file:{path}"),
+                    target_id: format!("symbol:{path}:{name}"),
                     metadata: EdgeMetadata {
                         exposed_as: Some(name),
                         ..Default::default()
@@ -185,7 +185,7 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
                 let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
 
                 let class_node = Node {
-                    id: format!("class:{}:{}", path, name),
+                    id: format!("class:{path}:{name}"),
                     node_type: NodeType::Class,
                     path: path.to_string(),
                     name: name.clone(),
@@ -209,10 +209,10 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
                 result.nodes.push(class_node);
 
                 let owns_edge = Edge {
-                    id: format!("owns:{}:{}", path, name),
+                    id: format!("owns:{path}:{name}"),
                     edge_type: EdgeType::Owns,
-                    source_id: format!("file:{}", path),
-                    target_id: format!("class:{}:{}", path, name),
+                    source_id: format!("file:{path}"),
+                    target_id: format!("class:{path}:{name}"),
                     metadata: EdgeMetadata::default(),
                     evidence: EvidenceLocation {
                         file: path.to_string(),
@@ -286,7 +286,7 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
                     .unwrap_or(false);
 
             let func_node = Node {
-                id: format!("function:{}:{}", path, name),
+                id: format!("function:{path}:{name}"),
                 node_type: NodeType::Function,
                 path: path.to_string(),
                 name: name.clone(),
@@ -343,7 +343,7 @@ fn extract_interfaces(
                 let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
 
                 let iface_node = Node {
-                    id: format!("interface:{}:{}", path, name),
+                    id: format!("interface:{path}:{name}"),
                     node_type: NodeType::Interface,
                     path: path.to_string(),
                     name,
@@ -406,7 +406,7 @@ fn resolve_import(current_path: &str, import_path: &str) -> String {
     let path_str = resolved.to_string_lossy().to_string();
 
     if !path_str.ends_with(".ts") && !path_str.ends_with(".tsx") {
-        format!("{}.ts", path_str)
+        format!("{path_str}.ts")
     } else {
         path_str
     }

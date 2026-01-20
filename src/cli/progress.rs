@@ -1,7 +1,6 @@
 //! Real-Time Progress Streaming
 //!
 //! Multi-channel progress reporting for CLI and TUI.
-//! Based on deepwiki-open's real-time progress pattern.
 //!
 //! ## Features
 //!
@@ -11,10 +10,32 @@
 //! - Event-based updates
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
+
+/// Helper to acquire read lock with poisoning recovery and logging.
+fn read_lock_with_recovery<'a, T>(lock: &'a RwLock<T>, context: &str) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            context = context,
+            "RwLock poisoned during read, recovering with inner value"
+        );
+        poisoned.into_inner()
+    })
+}
+
+/// Helper to acquire write lock with poisoning recovery and logging.
+fn write_lock_with_recovery<'a, T>(lock: &'a RwLock<T>, context: &str) -> RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            context = context,
+            "RwLock poisoned during write, recovering with inner value"
+        );
+        poisoned.into_inner()
+    })
+}
 
 /// Progress event types
 #[derive(Debug, Clone)]
@@ -160,24 +181,16 @@ impl ProgressTracker {
 
     /// Get current state
     pub fn state(&self) -> ProgressState {
-        self.state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        read_lock_with_recovery(&self.state, "ProgressTracker::state").clone()
     }
 
     /// Start tracking
     pub fn start(&self) {
         self.active.store(true, Ordering::SeqCst);
-        *self
-            .start_time
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        *write_lock_with_recovery(&self.start_time, "ProgressTracker::start") =
+            Some(Instant::now());
 
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = write_lock_with_recovery(&self.state, "ProgressTracker::start");
         state.is_running = true;
         state.phase = 0;
     }
@@ -185,10 +198,7 @@ impl ProgressTracker {
     /// Stop tracking
     pub fn stop(&self) {
         self.active.store(false, Ordering::SeqCst);
-        self.state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_running = false;
+        write_lock_with_recovery(&self.state, "ProgressTracker::stop").is_running = false;
     }
 
     /// Start a new phase
@@ -196,17 +206,15 @@ impl ProgressTracker {
         let now = Instant::now();
 
         // Record phase start
-        self.phase_times
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((phase, now, total_items as u64));
+        write_lock_with_recovery(&self.phase_times, "ProgressTracker::start_phase").push((
+            phase,
+            now,
+            total_items as u64,
+        ));
 
         // Update state
         {
-            let mut state = self
-                .state
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = write_lock_with_recovery(&self.state, "ProgressTracker::start_phase");
             state.phase = phase;
             state.phase_name = phase_name.to_string();
             state.completed = 0;
@@ -224,15 +232,8 @@ impl ProgressTracker {
 
     /// Complete current phase
     pub fn complete_phase(&self) {
-        let phase = self
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .phase;
-        let duration = self
-            .start_time
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let phase = read_lock_with_recovery(&self.state, "ProgressTracker::complete_phase").phase;
+        let duration = read_lock_with_recovery(&self.start_time, "ProgressTracker::complete_phase")
             .as_ref()
             .map(|s| s.elapsed().as_secs())
             .unwrap_or(0);
@@ -248,21 +249,17 @@ impl ProgressTracker {
         self.items_processed.fetch_add(1, Ordering::SeqCst);
 
         let total_items = self.items_processed.load(Ordering::SeqCst);
-        let elapsed: f32 = self
-            .start_time
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .map(|s| s.elapsed().as_secs_f32())
-            .unwrap_or(1.0);
+        let elapsed: f32 =
+            read_lock_with_recovery(&self.start_time, "ProgressTracker::update_progress")
+                .as_ref()
+                .map(|s| s.elapsed().as_secs_f32())
+                .unwrap_or(1.0);
         let throughput = total_items as f32 / elapsed.max(0.1);
 
         // Update state
         let (total, _phase) = {
-            let mut state = self
-                .state
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state =
+                write_lock_with_recovery(&self.state, "ProgressTracker::update_progress");
             state.completed = completed;
             state.current_item = current_item.to_string();
             state.throughput = throughput;
@@ -274,8 +271,11 @@ impl ProgressTracker {
             } else {
                 0.0
             };
-            state.overall_progress =
-                (state.phase as f32 - 1.0 + phase_progress) / self.total_phases as f32;
+            state.overall_progress = if self.total_phases > 0 {
+                (state.phase as f32 - 1.0 + phase_progress) / self.total_phases as f32
+            } else {
+                0.0
+            };
 
             (state.total, state.phase)
         };
@@ -289,10 +289,8 @@ impl ProgressTracker {
         };
 
         if let Some(eta) = eta_secs {
-            self.state
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .eta_secs = Some(eta);
+            write_lock_with_recovery(&self.state, "ProgressTracker::update_progress").eta_secs =
+                Some(eta);
             self.emit(ProgressEvent::EtaUpdate {
                 remaining_secs: eta,
             });
@@ -321,7 +319,7 @@ impl ProgressTracker {
             } else {
                 MessageLevel::Error
             },
-            message: format!("{}: {}", item, error),
+            message: format!("{item}: {error}"),
         });
     }
 
@@ -335,18 +333,12 @@ impl ProgressTracker {
 
     /// Finish tracking
     pub fn finish(&self, success: bool, summary: &str) {
-        let duration = self
-            .start_time
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let duration = read_lock_with_recovery(&self.start_time, "ProgressTracker::finish")
             .as_ref()
             .map(|s| s.elapsed().as_secs())
             .unwrap_or(0);
 
-        self.state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_running = false;
+        write_lock_with_recovery(&self.state, "ProgressTracker::finish").is_running = false;
         self.active.store(false, Ordering::SeqCst);
 
         self.emit(ProgressEvent::Finished {
@@ -465,7 +457,7 @@ impl ConsoleRenderer {
             while tracker.is_active() {
                 let output = renderer.render();
                 if !output.is_empty() {
-                    print!("\r\x1B[K{}", output);
+                    print!("\r\x1B[K{output}");
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -491,7 +483,7 @@ fn render_progress_bar(completed: usize, total: usize, width: usize) -> String {
 /// Format duration as human-readable string
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
-        format!("{}s", secs)
+        format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {

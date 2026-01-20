@@ -1,52 +1,37 @@
-# WeaveWiki
+# claudegen
 
-[![CI](https://github.com/junyeong-ai/weavewiki/workflows/CI/badge.svg)](https://github.com/junyeong-ai/weavewiki/actions)
+[![CI](https://github.com/junyeong-ai/claudegen/workflows/CI/badge.svg)](https://github.com/junyeong-ai/claudegen/actions)
 [![Rust](https://img.shields.io/badge/rust-1.92.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fweavewiki-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/weavewiki)
 
 > **[English](README.en.md)** | **한국어**
 
-**AI가 코드베이스를 완벽하게 문서화합니다.** 100% 파일 커버리지, 100% 사실 기반 — 빠뜨리는 파일 없이, 추측 없이.
+**코드베이스 분석을 통한 Claude Code 플러그인 자동 생성.** 공식 Claude Code 플러그인 아키텍처 기반.
 
 ---
 
-## 왜 WeaveWiki인가?
+## 왜 claudegen인가?
 
-- **100% 커버리지** — 모든 소스 파일을 명시적으로 문서화
-- **사실 기반** — 코드에서 관찰 가능한 사실만 기록
-- **다중 에이전트** — 6단계 AI 파이프라인으로 깊이 있는 분석
-- **중단 복구** — 언제든 중단하고 이어서 작업 가능
+- **공식 플러그인 형식** — Claude Code 공식 구조 준수
+- **자동 Skills 생성** — 프로젝트별 맞춤 skills 자동 생성
+- **메모리 관리** — CLAUDE.md에 프로젝트 규칙과 가이드라인 포함
+- **확장 가능** — 커스텀 에이전트와 훅 지원
 
 ---
 
-## 핵심 기술
+## 출력 구조 (공식 Claude Code 플러그인)
 
-### 6-Phase 멀티 에이전트 파이프라인
-
-```mermaid
-flowchart LR
-    P1[Characterization<br/>7 agents] --> P2[Bottom-Up<br/>Leaf-First]
-    P2 --> P3[Top-Down<br/>4 agents]
-    P3 --> P4[Consolidation<br/>AI Synthesis]
-    P4 --> P5[Refinement<br/>Quality Loop]
-    P5 --> OUT[Wiki Output]
-
-    style P1 fill:#e3f2fd
-    style P2 fill:#fff3e0
-    style P3 fill:#e8f5e9
-    style P4 fill:#fce4ec
-    style P5 fill:#f3e5f5
 ```
-
-| 핵심 알고리즘 | 설명 |
-|--------------|------|
-| **멀티턴 Characterization** | 7개 에이전트가 3턴에 걸쳐 프로젝트 프로필 구축 |
-| **Deep Research** | Core/Important 파일에 대해 3-4회 반복 심층 분석 |
-| **Leaf-First 처리** | 단순→복잡 순서로 계층적 컨텍스트 구축 |
-| **TALE 예산 관리** | 동적 토큰 재할당으로 예측 가능한 비용 제어 |
-| **5차원 품질 점수** | 커버리지, 완성도, 정확도, 다이어그램, 명확도 |
-
-> 상세 아키텍처: **[ARCHITECTURE.md](ARCHITECTURE.md)**
+project/
+├── CLAUDE.md                          # 프로젝트 메모리 (규칙, 가이드라인)
+└── .claudegen/                        # 플러그인 디렉토리
+    ├── .claude-plugin/
+    │   └── plugin.json                # 플러그인 매니페스트
+    ├── skills/
+    │   └── {skill-name}/
+    │       └── SKILL.md               # YAML 프론트매터 포함 스킬
+    └── agents/
+        └── {agent-name}.md            # 에이전트 정의
+```
 
 ---
 
@@ -54,43 +39,40 @@ flowchart LR
 
 ```bash
 # 설치
-cargo install weavewiki
+cargo install claudegen
 
-# 프로젝트 초기화 및 문서 생성
+# 프로젝트 초기화 및 플러그인 생성
 cd your-project
-weavewiki init
-weavewiki generate
+claudegen init
+claudegen generate
 
 # 결과 확인
-ls .weavewiki/wiki/
+ls .claudegen/
 ```
 
 ---
 
 ## 주요 기능
 
-### 문서 생성
+### 플러그인 생성
 ```bash
-weavewiki generate                    # 기본 분석
-weavewiki generate --mode deep        # 심층 분석
-weavewiki generate --resume           # 이전 세션 재개
-weavewiki generate --status           # 진행 상태 확인
-weavewiki generate --dry-run          # 설정만 확인
+claudegen generate                    # 플러그인 생성
+claudegen generate --dry-run          # 설정만 확인
 ```
 
-### 지식 그래프
+### 코드 분석
 ```bash
-weavewiki build                       # 코드 구조 분석
-weavewiki query "src/main.rs"         # 의존성 조회
-weavewiki validate                    # 문서-코드 정합성 검증
+claudegen analyze                     # 코드 구조 분석
+claudegen query "src/main.rs"         # 의존성 조회
+claudegen validate                    # 출력 검증
 ```
 
 ### 관리
 ```bash
-weavewiki init                        # 프로젝트 초기화
-weavewiki status                      # 상태 확인
-weavewiki clean --all                 # 데이터 정리
-weavewiki config show                 # 설정 확인
+claudegen init                        # 프로젝트 초기화
+claudegen status                      # 상태 확인
+claudegen clean --all                 # 데이터 정리
+claudegen config show                 # 설정 확인
 ```
 
 ---
@@ -99,12 +81,12 @@ weavewiki config show                 # 설정 확인
 
 ### Cargo
 ```bash
-cargo install weavewiki
+cargo install claudegen
 ```
 
 ### 소스 빌드
 ```bash
-git clone https://github.com/junyeong-ai/weavewiki && cd weavewiki
+git clone https://github.com/junyeong-ai/claudegen && cd claudegen
 cargo build --release
 ```
 
@@ -112,75 +94,53 @@ cargo build --release
 
 ---
 
-## LLM 프로바이더
+## Skill 형식 (SKILL.md)
 
-### Claude Code (기본)
-```bash
-# API 키 불필요 - Claude Code CLI 사용
-weavewiki generate
-```
-
-### OpenAI
-```bash
-export OPENAI_API_KEY="sk-..."
-weavewiki generate --provider openai --model gpt-4o
-```
-
+```yaml
+---
+name: skill-name
+description: "This skill should be used when..."
+version: "1.0.0"
+allowed-tools: "Read, Grep, Glob"
+model: opus
+context: fork
+agent: agent-name
+user-invocable: true
 ---
 
-## 분석 모드
-
-| 모드 | 설명 | 용도 |
-|------|------|------|
-| `fast` | 빠른 개요 | 큰 프로젝트 미리보기 |
-| `standard` | 균형잡힌 분석 | 일반 문서화 (기본값) |
-| `deep` | 심층 분석 | 상세 문서 필요 시 |
-
-```bash
-weavewiki generate --mode deep --quality-target 0.9
+스킬 프롬프트 본문...
 ```
 
 ---
 
 ## 설정
 
-`.weavewiki/config.toml`:
+`.claudegen/config.toml`:
 ```toml
 [project]
 name = "my-project"
 
-[llm]
-provider = "claude-code"
-model = "claude-sonnet-4-20250514"
+[plugin]
+name = ".claudegen"
+version = "1.0.0"
 
-[analysis]
-mode = "standard"
-quality_target = 0.8
+[generation]
+include_skills = true
+include_agents = true
+include_hooks = true
 ```
 
 ---
 
-## 출력 구조
+## 설정 우선순위
 
 ```
-.weavewiki/wiki/
-├── index.md              # 프로젝트 개요
-├── llms.txt              # AI 에이전트용 컨텍스트
-├── patterns.md           # 발견된 코드 패턴
-├── constitution.md       # 코딩 컨벤션
-└── domains/              # 도메인별 문서
-    ├── core/
-    ├── api/
-    └── storage/
+1. 내장 기본값
+2. 글로벌 설정 (~/.claudegen/config.yaml)
+3. 프로젝트 설정 (.claudegen/config.yaml)
+4. 환경 변수 (CLAUDEGEN_*)
+5. CLI 인수 (최우선)
 ```
-
----
-
-## 지원 언어
-
-**파서 지원 (AST 분석)**: Rust, Go, Python, TypeScript, JavaScript, Java, Kotlin, C, C++, Ruby, Bash
-
-**언어 감지**: 30+ 언어
 
 ---
 
@@ -188,20 +148,20 @@ quality_target = 0.8
 
 ```bash
 # 데이터 초기화
-weavewiki clean --all && weavewiki init
+claudegen clean --all && claudegen init
 
 # 진행 상태 확인
-weavewiki generate --status
+claudegen status
 
 # 디버그 모드
-RUST_LOG=debug weavewiki generate
+RUST_LOG=debug claudegen generate
 ```
 
 ---
 
 ## 지원
 
-- [GitHub Issues](https://github.com/junyeong-ai/weavewiki/issues)
+- [GitHub Issues](https://github.com/junyeong-ai/claudegen/issues)
 - [개발자 가이드](CLAUDE.md)
 
 ---

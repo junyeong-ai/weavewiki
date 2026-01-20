@@ -5,8 +5,8 @@ use super::{
     create_ts_parser, evidence_from_node, get_node_text,
 };
 use crate::types::{
-    EdgeType, FunctionSignature, ImportType, NodeMetadata, NodeType, Parameter, Result, Visibility,
-    WeaveError,
+    ClaudegenError, EdgeType, FunctionSignature, ImportType, NodeMetadata, NodeType, Parameter,
+    Result, Visibility,
 };
 
 pub struct PythonParser;
@@ -23,7 +23,7 @@ impl Parser for PythonParser {
     fn parse(&self, path: &str, content: &str) -> Result<ParseResult> {
         let mut parser =
             create_ts_parser(tree_sitter_python::LANGUAGE, "Python").map_err(|mut e| {
-                if let WeaveError::Parse {
+                if let ClaudegenError::Parse {
                     path: ref mut p, ..
                 } = e
                 {
@@ -34,7 +34,7 @@ impl Parser for PythonParser {
 
         let tree = parser
             .parse(content, None)
-            .ok_or_else(|| WeaveError::Parse {
+            .ok_or_else(|| ClaudegenError::Parse {
                 message: "Failed to parse Python file".to_string(),
                 path: path.to_string(),
             })?;
@@ -81,10 +81,10 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
                 }
 
                 let mut edge = create_code_edge(
-                    format!("dep:{}:{}", path, module_name),
+                    format!("dep:{path}:{module_name}"),
                     EdgeType::DependsOn,
-                    format!("file:{}", path),
-                    format!("module:{}", module_name),
+                    format!("file:{path}"),
+                    format!("module:{module_name}"),
                     node,
                     path,
                 );
@@ -113,7 +113,7 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
 
                 // Create class node with Python-specific visibility (underscore convention)
                 let mut class_node = create_code_node(
-                    format!("class:{}:{}", path, name),
+                    format!("class:{path}:{name}"),
                     NodeType::Class,
                     path,
                     name.clone(),
@@ -124,10 +124,10 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
 
                 // File owns the class
                 let owns_edge = create_code_edge(
-                    format!("owns:{}:{}", path, name),
+                    format!("owns:{path}:{name}"),
                     EdgeType::Owns,
-                    format!("file:{}", path),
-                    format!("class:{}:{}", path, name),
+                    format!("file:{path}"),
+                    format!("class:{path}:{name}"),
                     node,
                     path,
                 );
@@ -180,7 +180,7 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
                     .is_some_and(|s| s.trim_end().ends_with("async"));
 
             let mut func_node = create_code_node(
-                format!("function:{}:{}", path, name),
+                format!("function:{path}:{name}"),
                 NodeType::Function,
                 path,
                 name.clone(),

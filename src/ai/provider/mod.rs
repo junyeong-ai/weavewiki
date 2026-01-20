@@ -7,19 +7,24 @@
 //!
 //! - `chain`: Fallback provider chain with cascading attempts
 //! - `circuit_breaker`: Circuit breaker pattern for provider resilience
+//! - `claude_agent`: Direct Claude API integration (default provider)
 
 mod chain;
 mod circuit_breaker;
-mod claude_code;
 mod openai;
 mod prompt_utils;
+
+#[cfg(feature = "claude-agent")]
+mod claude_agent;
 
 pub use chain::{ChainConfig, ChainedProvider, ProviderChain, ProviderChainBuilder};
 pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
 };
-pub use claude_code::ClaudeCodeProvider;
 pub use openai::OpenAiProvider;
+
+#[cfg(feature = "claude-agent")]
+pub use claude_agent::ClaudeAgentProvider;
 
 // Re-export error types from centralized location
 pub use crate::types::{ErrorCategory, ErrorClassifier, LlmError};
@@ -163,7 +168,7 @@ pub type SharedProvider = Arc<dyn LlmProvider + Send + Sync>;
 /// SecretString internally for runtime protection.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    /// Provider type: "claude-code", "openai", "ollama"
+    /// Provider type: "claude-agent", "openai"
     pub provider: String,
     /// Model name (provider-specific)
     pub model: Option<String>,
@@ -204,7 +209,7 @@ fn default_max_tokens() -> usize {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            provider: "claude-code".to_string(),
+            provider: "claude-agent".to_string(),
             model: None,
             timeout_secs: 300,
             temperature: 0.0,
@@ -238,13 +243,29 @@ pub trait LlmProvider: Send + Sync {
     async fn health_check(&self) -> Result<bool>;
 }
 
-/// Create a shared provider from configuration
-pub fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> {
+/// Create a shared provider from configuration (async)
+///
+/// Default provider is "claude-agent" which uses direct Claude API.
+/// Fallback to "openai" for OpenAI-compatible endpoints.
+#[cfg(feature = "claude-agent")]
+pub async fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> {
     match config.provider.as_str() {
-        "claude-code" => Ok(Arc::new(ClaudeCodeProvider::new(config.clone()))),
+        "claude-agent" => Ok(Arc::new(ClaudeAgentProvider::from_config(config).await?)),
         "openai" => Ok(Arc::new(OpenAiProvider::new(config.clone())?)),
-        _ => Err(crate::types::WeaveError::Config(format!(
-            "Unknown provider: {}. Supported: claude-code, openai",
+        _ => Err(crate::types::ClaudegenError::Config(format!(
+            "Unknown provider: {}. Supported: claude-agent, openai",
+            config.provider
+        ))),
+    }
+}
+
+/// Create a shared provider (async for API consistency when claude-agent feature disabled)
+#[cfg(not(feature = "claude-agent"))]
+pub async fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> {
+    match config.provider.as_str() {
+        "openai" => Ok(Arc::new(OpenAiProvider::new(config.clone())?)),
+        _ => Err(crate::types::ClaudegenError::Config(format!(
+            "Unknown provider: {}. Enable claude-agent feature for Claude API support.",
             config.provider
         ))),
     }

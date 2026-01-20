@@ -120,17 +120,27 @@ impl MetricsCollector {
 
     /// Start a new phase
     pub fn start_phase(&self, name: impl Into<String>) {
+        let name = name.into();
         let mut current = self.current_phase.write().unwrap_or_else(|poisoned| {
-            tracing::error!("Metrics current_phase RwLock poisoned, recovering");
+            tracing::warn!(
+                phase = %name,
+                "Metrics current_phase lock poisoned - recovering with inner data. \
+                 This indicates a prior panic; metrics may be incomplete."
+            );
             poisoned.into_inner()
         });
-        *current = name.into();
+        *current = name;
     }
 
     /// Complete current phase and record metrics
     pub fn complete_phase(&self, phase_metrics: PhaseMetrics) {
+        let phase_name = phase_metrics.name.clone();
         let mut phases = self.phase_metrics.write().unwrap_or_else(|poisoned| {
-            tracing::error!("Metrics phase_metrics RwLock poisoned, recovering");
+            tracing::warn!(
+                phase = %phase_name,
+                "Metrics phase_metrics lock poisoned - recovering with inner data. \
+                 This indicates a prior panic; some phase metrics may be lost."
+            );
             poisoned.into_inner()
         });
         phases.push(phase_metrics);
@@ -154,7 +164,10 @@ impl MetricsCollector {
             .phase_metrics
             .read()
             .unwrap_or_else(|poisoned| {
-                tracing::error!("Metrics phase_metrics RwLock poisoned on read, recovering");
+                tracing::warn!(
+                    "Metrics phase_metrics lock poisoned on snapshot read - \
+                     returning partial metrics from prior panic state"
+                );
                 poisoned.into_inner()
             })
             .clone();

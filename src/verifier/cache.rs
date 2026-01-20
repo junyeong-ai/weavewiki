@@ -91,7 +91,13 @@ impl FileContentCache {
 
     /// Get cached content if valid
     fn get_cached(&self, path: &Path) -> Option<String> {
-        let mut cache = self.cache.write().ok()?;
+        let mut cache = match self.cache.write() {
+            Ok(c) => c,
+            Err(poisoned) => {
+                tracing::warn!("Cache lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
 
         if let Some(entry) = cache.get_mut(path) {
             // Validate freshness

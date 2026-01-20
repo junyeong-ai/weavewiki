@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use crate::types::{
-    Claim, ClaimType, IssueSeverity, Result, VerificationIssue, VerificationStatus,
-};
+use crate::types::{Claim, ClaimType, Result, Severity, VerificationIssue, VerificationStatus};
 
 pub struct SignatureRule;
 
@@ -24,8 +22,8 @@ impl SignatureRule {
                 Some(
                     VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Error,
-                        format!("File no longer exists: {}", file_path),
+                        Severity::Error,
+                        format!("File no longer exists: {file_path}"),
                     )
                     .with_suggestion("Remove this claim or update file path"),
                 ),
@@ -36,15 +34,15 @@ impl SignatureRule {
             Ok((VerificationStatus::Verified, None))
         } else {
             let similar = Self::find_similar_signature(current_content, expected_signature);
-            let suggestion = similar.map(|s| format!("Found similar: {}", s));
+            let suggestion = similar.map(|s| format!("Found similar: {s}"));
 
             Ok((
                 VerificationStatus::Stale,
                 Some(
                     VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Warning,
-                        format!("Function signature changed: {}", expected_signature),
+                        Severity::Warning,
+                        format!("Function signature changed: {expected_signature}"),
                     )
                     .with_suggestion(
                         suggestion

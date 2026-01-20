@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use crate::constants::verification::STALE_FILE_THRESHOLD_SECS;
+const STALE_FILE_THRESHOLD_SECS: u64 = 60;
+
 use crate::types::{
-    Claim, ClaimType, InformationTier, IssueSeverity, Result, VerificationIssue,
-    VerificationReport, VerificationStatus,
+    Claim, ClaimType, InformationTier, Result, Severity, VerificationIssue, VerificationReport,
+    VerificationStatus,
 };
 
 use super::cache::FileContentCache;
@@ -82,21 +83,19 @@ impl VerificationEngine {
     ) -> Result<(VerificationStatus, Option<VerificationIssue>)> {
         let file_path = self.root_path.join(&claim.evidence.file);
 
-        if !file_path.exists() {
-            return Ok((
-                VerificationStatus::Invalid,
-                Some(VerificationIssue::new(
-                    &claim.id,
-                    IssueSeverity::Error,
-                    format!("Evidence file not found: {}", claim.evidence.file),
-                )),
-            ));
-        }
-
         match claim.claim_type {
             ClaimType::FunctionSignature => {
-                let content = self.cache.get_or_load(&file_path)?;
-                SignatureRule::verify(claim, &content)
+                match self.cache.get_or_load(&file_path) {
+                    Ok(content) => SignatureRule::verify(claim, &content),
+                    Err(_) => Ok((
+                        VerificationStatus::Invalid,
+                        Some(VerificationIssue::new(
+                            &claim.id,
+                            Severity::Error,
+                            format!("Evidence file not found or unreadable: {}", claim.evidence.file),
+                        )),
+                    )),
+                }
             }
             ClaimType::FileExists | ClaimType::ModuleExports | ClaimType::DependencyRelation => {
                 ReferenceRule::verify(claim, &self.root_path)
@@ -117,11 +116,11 @@ impl VerificationEngine {
         let expected = &claim.statement;
 
         let patterns = [
-            format!("class {}", expected),
-            format!("interface {}", expected),
-            format!("type {}", expected),
-            format!("struct {}", expected),
-            format!("enum {}", expected),
+            format!("class {expected}"),
+            format!("interface {expected}"),
+            format!("type {expected}"),
+            format!("struct {expected}"),
+            format!("enum {expected}"),
         ];
 
         for pattern in &patterns {
@@ -135,7 +134,7 @@ impl VerificationEngine {
             Some(
                 VerificationIssue::new(
                     &claim.id,
-                    IssueSeverity::Warning,
+                    Severity::Warning,
                     format!("Type '{}' not found in {}", expected, claim.evidence.file),
                 )
                 .with_suggestion("Update type definition in knowledge base"),
@@ -152,17 +151,17 @@ impl VerificationEngine {
         let endpoint = &claim.statement;
 
         let patterns = [
-            format!("@Get('{}')", endpoint),
-            format!("@Post('{}')", endpoint),
-            format!("@Put('{}')", endpoint),
-            format!("@Delete('{}')", endpoint),
-            format!("@Patch('{}')", endpoint),
-            format!(".get('{}'", endpoint),
-            format!(".post('{}'", endpoint),
-            format!(".put('{}'", endpoint),
-            format!(".delete('{}'", endpoint),
-            format!("\"{}\"", endpoint),
-            format!("'{}'", endpoint),
+            format!("@Get('{endpoint}')"),
+            format!("@Post('{endpoint}')"),
+            format!("@Put('{endpoint}')"),
+            format!("@Delete('{endpoint}')"),
+            format!("@Patch('{endpoint}')"),
+            format!(".get('{endpoint}'"),
+            format!(".post('{endpoint}'"),
+            format!(".put('{endpoint}'"),
+            format!(".delete('{endpoint}'"),
+            format!("\"{endpoint}\""),
+            format!("'{endpoint}'"),
         ];
 
         for pattern in &patterns {
@@ -176,8 +175,8 @@ impl VerificationEngine {
             Some(
                 VerificationIssue::new(
                     &claim.id,
-                    IssueSeverity::Warning,
-                    format!("API endpoint '{}' not found", endpoint),
+                    Severity::Warning,
+                    format!("API endpoint '{endpoint}' not found"),
                 )
                 .with_suggestion("Update API catalog with current endpoints"),
             ),
@@ -193,9 +192,9 @@ impl VerificationEngine {
             if !file_path.exists() {
                 issues.push(
                     VerificationIssue::new(
-                        format!("file:{}", file),
-                        IssueSeverity::Error,
-                        format!("Tracked file no longer exists: {}", file),
+                        format!("file:{file}"),
+                        Severity::Error,
+                        format!("Tracked file no longer exists: {file}"),
                     )
                     .with_suggestion("Remove all claims referencing this file")
                     .auto_fixable(),
@@ -209,9 +208,9 @@ impl VerificationEngine {
                 && age.as_secs() < STALE_FILE_THRESHOLD_SECS
             {
                 issues.push(VerificationIssue::new(
-                    format!("file:{}", file),
-                    IssueSeverity::Info,
-                    format!("File recently modified: {}", file),
+                    format!("file:{file}"),
+                    Severity::Info,
+                    format!("File recently modified: {file}"),
                 ));
             }
         }

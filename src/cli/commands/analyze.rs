@@ -1,64 +1,85 @@
-//! Analyze Command
-//!
-//! Builds knowledge graph from source code.
-//! Extracts structural information without language-specific pattern matching.
+//! Analyze Command - Builds knowledge graph from source code
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::StructureAnalyzer;
 use crate::analyzer::parser::{
-    BashParser, CLangParser, CppLangParser, GoParser, JavaParser, KotlinParser, Language,
-    ParseResult, Parser, PythonParser, RubyParser, RustParser, TypeScriptParser,
+    BashParser, GoParser, Language, ParseResult, Parser, PythonParser, RustParser, TypeScriptParser,
 };
 use crate::analyzer::scanner::FileScanner;
 use crate::config::{Config, ConfigLoader};
+use crate::constants::cli as cli_constants;
 use crate::storage::{Database, GraphStore};
-use crate::types::{Result, WeaveError};
+use crate::types::Result;
 
 pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
     let root = path.unwrap_or_else(|| PathBuf::from("."));
-    let weavewiki_dir = root.join(".weavewiki");
+    let claudegen_dir = root.join(".claudegen");
 
-    if !weavewiki_dir.exists() {
-        return Err(WeaveError::NotInitialized);
+    if !claudegen_dir.exists() {
+        std::fs::create_dir_all(&claudegen_dir)?;
     }
 
     let config = load_config()?;
-    let db = Database::open(weavewiki_dir.join("graph/graph.db"))?;
+    let db = Database::open(claudegen_dir.join("claudegen.db"))?;
     let graph_store = GraphStore::new(&db);
 
     println!("Starting analysis...");
 
-    // Clear existing data if full rebuild requested
     if full {
         graph_store.clear()?;
         println!("  Cleared existing graph data");
     }
 
-    // Step 1: Scan files
     let scanner = FileScanner::new(&root)
         .with_exclude(config.analysis.exclude.clone())
         .with_max_file_size(config.analysis.max_file_size as u64);
     let files = scanner.scan()?;
     println!("Found {} files to analyze", files.len());
 
-    // Step 2: Parse files and build graph
     let mut total_nodes = 0;
     let mut total_edges = 0;
     let mut processed = 0;
     let mut language_counts: std::collections::HashMap<&str, u32> =
         std::collections::HashMap::new();
 
+    let mut parse_errors = 0;
+    let mut store_errors = 0;
+
     for file in &files {
         let lang = Language::from_path(&file.path);
 
-        if let Some(result) = parse_file(&file.path, lang)? {
-            for node in &result.nodes {
-                graph_store.insert_node(node)?;
+        let result = match parse_file(&file.path, lang) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                processed += 1;
+                continue;
             }
+            Err(e) => {
+                tracing::debug!(path = %file.path.display(), error = %e, "Parse failed");
+                parse_errors += 1;
+                processed += 1;
+                continue;
+            }
+        };
+
+        let mut file_stored = true;
+        for node in &result.nodes {
+            if let Err(e) = graph_store.insert_node(node) {
+                tracing::debug!(node = ?node.id, error = %e, "Failed to store node");
+                file_stored = false;
+                store_errors += 1;
+                break;
+            }
+        }
+
+        if file_stored {
             for edge in &result.edges {
-                graph_store.insert_edge(edge)?;
+                if let Err(e) = graph_store.insert_edge(edge) {
+                    tracing::debug!(error = %e, "Failed to store edge");
+                    store_errors += 1;
+                }
             }
             total_nodes += result.nodes.len();
             total_edges += result.edges.len();
@@ -68,10 +89,6 @@ pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
                 Language::Python => "Python",
                 Language::Rust => "Rust",
                 Language::Go => "Go",
-                Language::Java => "Java",
-                Language::Kotlin => "Kotlin",
-                Language::Ruby => "Ruby",
-                Language::C | Language::Cpp => "C/C++",
                 Language::Bash => "Bash",
                 _ => "Other",
             };
@@ -79,14 +96,20 @@ pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
         }
 
         processed += 1;
-        if processed % 100 == 0 {
-            println!("  Processed {} files...", processed);
+        if processed % cli_constants::PROGRESS_REPORT_INTERVAL == 0 {
+            println!("  Processed {processed} files...");
         }
     }
 
-    println!("Parsed {} nodes and {} edges", total_nodes, total_edges);
+    if parse_errors > 0 || store_errors > 0 {
+        println!(
+            "  Completed with {} parse errors, {} storage errors",
+            parse_errors, store_errors
+        );
+    }
 
-    // Step 3: Structure analysis (universal, no pattern matching)
+    println!("Parsed {total_nodes} nodes and {total_edges} edges");
+
     println!("Analyzing code structure...");
     let analyzer = StructureAnalyzer::new(&db);
     let structure = analyzer.analyze()?;
@@ -98,18 +121,17 @@ pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
         structure.hotspots.len()
     );
 
-    // Print language summary
     if !language_counts.is_empty() {
         println!("\nLanguages detected:");
         let mut sorted: Vec<_> = language_counts.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
         for (lang, count) in sorted {
-            println!("  {}: {} files", lang, count);
+            println!("  {lang}: {count} files");
         }
     }
 
     if !skip_docs {
-        println!("\nTo generate AI-driven documentation, run: weavewiki generate");
+        println!("\nTo generate Claude Code plugin, run: claudegen generate");
     }
 
     println!("Analysis complete!");
@@ -124,23 +146,21 @@ fn load_config() -> Result<Config> {
 fn parse_file(path: &Path, lang: Language) -> Result<Option<ParseResult>> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Ok(None),
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "Failed to read file");
+            return Ok(None);
+        }
     };
 
     let path_str = path.to_string_lossy();
 
     let result = match lang {
-        Language::TypeScript | Language::JavaScript => {
+        Language::TypeScript | Language::JavaScript | Language::Tsx | Language::Jsx => {
             TypeScriptParser::new()?.parse(&path_str, &content)?
         }
         Language::Python => PythonParser::new()?.parse(&path_str, &content)?,
         Language::Rust => RustParser::new()?.parse(&path_str, &content)?,
         Language::Go => GoParser::new()?.parse(&path_str, &content)?,
-        Language::Java => JavaParser::new()?.parse(&path_str, &content)?,
-        Language::Kotlin => KotlinParser::new()?.parse(&path_str, &content)?,
-        Language::Ruby => RubyParser::new()?.parse(&path_str, &content)?,
-        Language::C => CLangParser::new()?.parse(&path_str, &content)?,
-        Language::Cpp => CppLangParser::new()?.parse(&path_str, &content)?,
         Language::Bash => BashParser::new()?.parse(&path_str, &content)?,
         _ => return Ok(None),
     };

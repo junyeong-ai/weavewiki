@@ -21,7 +21,7 @@
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use crate::constants::circuit_breaker as cb_constants;
+use crate::config::CircuitBreakerConfig as ConfigCircuitBreaker;
 
 /// Circuit breaker state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,33 +59,41 @@ pub struct CircuitBreakerConfig {
 
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
+        let cfg = ConfigCircuitBreaker::default();
         Self {
-            failure_threshold: cb_constants::FAILURE_THRESHOLD,
-            success_threshold: cb_constants::SUCCESS_THRESHOLD,
-            open_timeout: Duration::from_secs(cb_constants::RECOVERY_TIMEOUT_SECS),
-            half_open_max_requests: cb_constants::HALF_OPEN_MAX_REQUESTS,
+            failure_threshold: cfg.failure_threshold as u32,
+            success_threshold: 2, // Default: 2 consecutive successes to close
+            open_timeout: Duration::from_secs(cfg.recovery_timeout_secs),
+            half_open_max_requests: cfg.half_open_max_calls as u32,
         }
     }
 }
 
 impl CircuitBreakerConfig {
-    /// Create a strict configuration for critical providers
-    pub fn strict() -> Self {
+    pub fn from_config(cfg: &ConfigCircuitBreaker) -> Self {
         Self {
-            failure_threshold: 3,
-            success_threshold: 3,
-            open_timeout: Duration::from_secs(cb_constants::RECOVERY_TIMEOUT_SECS * 2),
-            half_open_max_requests: 1,
+            failure_threshold: cfg.failure_threshold as u32,
+            success_threshold: 2, // Default: 2 consecutive successes to close
+            open_timeout: Duration::from_secs(cfg.recovery_timeout_secs),
+            half_open_max_requests: cfg.half_open_max_calls as u32,
         }
     }
 
-    /// Create a lenient configuration for unstable providers
+    pub fn strict() -> Self {
+        Self {
+            failure_threshold: 3,      // Open quickly after 3 failures
+            success_threshold: 3,      // Require 3 successes to close
+            open_timeout: Duration::from_secs(30), // Short recovery timeout
+            half_open_max_requests: 1, // Only 1 test request in half-open
+        }
+    }
+
     pub fn lenient() -> Self {
         Self {
-            failure_threshold: 10,
-            success_threshold: 1,
-            open_timeout: Duration::from_secs(15),
-            half_open_max_requests: 5,
+            failure_threshold: 10,     // Allow more failures before opening
+            success_threshold: 1,      // 1 success to close
+            open_timeout: Duration::from_secs(120), // Longer recovery timeout
+            half_open_max_requests: 5, // More test requests in half-open
         }
     }
 }

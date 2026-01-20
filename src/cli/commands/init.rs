@@ -1,17 +1,17 @@
 //! Init Command
 //!
-//! Initialize WeaveWiki in the current directory.
+//! Initialize claudegen in the current directory.
 
 use crate::config::ConfigLoader;
 use crate::storage::Database;
-use crate::types::{Result, WeaveError};
+use crate::types::{ClaudegenError, Result};
 
 pub fn run(force: bool) -> Result<()> {
     let root = std::env::current_dir()?;
-    let weavewiki_dir = root.join(".weavewiki");
+    let claudegen_dir = root.join(".claudegen");
 
-    if weavewiki_dir.exists() && !force {
-        return Err(WeaveError::Config(
+    if claudegen_dir.exists() && !force {
+        return Err(ClaudegenError::Config(
             "Already initialized. Use --force to overwrite.".to_string(),
         ));
     }
@@ -32,14 +32,14 @@ pub fn run(force: bool) -> Result<()> {
     }
 
     // Initialize database
-    let db = Database::open(weavewiki_dir.join("graph/graph.db"))?;
+    let db = Database::open(claudegen_dir.join("graph/graph.db"))?;
     db.initialize()?;
 
-    println!("✓ Initialized WeaveWiki in .weavewiki/");
-    println!("  Project: {}", project_name);
+    println!("✓ Initialized claudegen in .claudegen/");
+    println!("  Project: {project_name}");
     println!();
     println!("Next steps:");
-    println!("  1. Run 'weavewiki wiki' to generate AI-driven documentation");
+    println!("  1. Run 'claudegen generate' to create Claude Code plugin");
     println!("     (Project type, architecture, and frameworks are auto-detected)");
 
     Ok(())

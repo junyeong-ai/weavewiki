@@ -76,7 +76,7 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unittests
-          name: codecov-weavewiki
+          name: codecov-claudegen
 
       - name: Generate HTML coverage report
         if: always()
@@ -112,14 +112,14 @@ jobs:
 
       - name: Check binary size
         run: |
-          ls -lh target/release/weavewiki
-          du -h target/release/weavewiki
+          ls -lh target/release/claudegen
+          du -h target/release/claudegen
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-binary
-          path: target/release/weavewiki
+          path: target/release/claudegen
           retention-days: 7
 
   lint:

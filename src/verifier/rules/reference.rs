@@ -4,9 +4,7 @@
 
 use std::path::Path;
 
-use crate::types::{
-    Claim, ClaimType, IssueSeverity, Result, VerificationIssue, VerificationStatus,
-};
+use crate::types::{Claim, ClaimType, Result, Severity, VerificationIssue, VerificationStatus};
 
 pub struct ReferenceRule;
 
@@ -37,7 +35,7 @@ impl ReferenceRule {
                 Some(
                     VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Error,
+                        Severity::Error,
                         format!("File no longer exists: {}", claim.evidence.file),
                     )
                     .with_suggestion("Remove references to this file from knowledge base")
@@ -58,7 +56,7 @@ impl ReferenceRule {
                 VerificationStatus::Invalid,
                 Some(VerificationIssue::new(
                     &claim.id,
-                    IssueSeverity::Error,
+                    Severity::Error,
                     format!("Module file not found: {}", claim.evidence.file),
                 )),
             ));
@@ -68,12 +66,17 @@ impl ReferenceRule {
         let content = match std::fs::read_to_string(&file_path) {
             Ok(c) => c,
             Err(e) => {
+                let reason = match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => "permission denied",
+                    std::io::ErrorKind::InvalidData => "invalid encoding",
+                    _ => "read error",
+                };
                 return Ok((
                     VerificationStatus::Invalid,
                     Some(VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Error,
-                        format!("Cannot read file '{}': {}", file_path.display(), e),
+                        Severity::Error,
+                        format!("Cannot read '{}' ({}): {}", file_path.display(), reason, e),
                     )),
                 ));
             }
@@ -81,11 +84,11 @@ impl ReferenceRule {
 
         let expected_export = &claim.statement;
 
-        let has_export = content.contains(&format!("export {}", expected_export))
-            || content.contains(&format!("export default {}", expected_export))
-            || content.contains(&format!("pub fn {}", expected_export))
-            || content.contains(&format!("pub struct {}", expected_export))
-            || content.contains(&format!("pub enum {}", expected_export));
+        let has_export = content.contains(&format!("export {expected_export}"))
+            || content.contains(&format!("export default {expected_export}"))
+            || content.contains(&format!("pub fn {expected_export}"))
+            || content.contains(&format!("pub struct {expected_export}"))
+            || content.contains(&format!("pub enum {expected_export}"));
 
         if has_export {
             Ok((VerificationStatus::Verified, None))
@@ -95,7 +98,7 @@ impl ReferenceRule {
                 Some(
                     VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Warning,
+                        Severity::Warning,
                         format!(
                             "Export '{}' not found in {}",
                             expected_export, claim.evidence.file
@@ -119,7 +122,7 @@ impl ReferenceRule {
                 VerificationStatus::Invalid,
                 Some(VerificationIssue::new(
                     &claim.id,
-                    IssueSeverity::Error,
+                    Severity::Error,
                     format!("Source file not found: {}", claim.evidence.file),
                 )),
             ));
@@ -129,23 +132,28 @@ impl ReferenceRule {
         let content = match std::fs::read_to_string(&source_file) {
             Ok(c) => c,
             Err(e) => {
+                let reason = match e.kind() {
+                    std::io::ErrorKind::PermissionDenied => "permission denied",
+                    std::io::ErrorKind::InvalidData => "invalid encoding",
+                    _ => "read error",
+                };
                 return Ok((
                     VerificationStatus::Invalid,
                     Some(VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Error,
-                        format!("Cannot read file '{}': {}", source_file.display(), e),
+                        Severity::Error,
+                        format!("Cannot read '{}' ({}): {}", source_file.display(), reason, e),
                     )),
                 ));
             }
         };
 
-        let has_import = content.contains(&format!("from '{}'", target))
-            || content.contains(&format!("from \"{}\"", target))
-            || content.contains(&format!("require('{}')", target))
-            || content.contains(&format!("require(\"{}\")", target))
-            || content.contains(&format!("import \"{}\"", target))
-            || content.contains(&format!("use {};", target));
+        let has_import = content.contains(&format!("from '{target}'"))
+            || content.contains(&format!("from \"{target}\""))
+            || content.contains(&format!("require('{target}')"))
+            || content.contains(&format!("require(\"{target}\")"))
+            || content.contains(&format!("import \"{target}\""))
+            || content.contains(&format!("use {target};"));
 
         if has_import {
             Ok((VerificationStatus::Verified, None))
@@ -155,8 +163,8 @@ impl ReferenceRule {
                 Some(
                     VerificationIssue::new(
                         &claim.id,
-                        IssueSeverity::Info,
-                        format!("Dependency '{}' no longer imported", target),
+                        Severity::Info,
+                        format!("Dependency '{target}' no longer imported"),
                     )
                     .with_suggestion("Remove dependency edge from knowledge graph"),
                 ),

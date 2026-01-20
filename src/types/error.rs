@@ -14,22 +14,24 @@
 //!
 //! ## Design Principles
 //!
-//! - Single unified error type (WeaveError) for the entire application
+//! - Single unified error type (ClaudegenError) for the entire application
 //! - Structured error variants with context for better debugging
 //! - Category-based routing for retry and fallback decisions
 //! - No panic/unwrap - all errors are recoverable
 
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::ai::budget::BudgetError;
+use crate::config::RetryConfig;
 
 // =============================================================================
 // Error Categories
 // =============================================================================
 
 /// Unified error categories for intelligent routing and retry decisions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
     /// Rate limited - wait then retry same provider
     RateLimit,
@@ -83,12 +85,24 @@ impl ErrorCategory {
 
     /// Get recommended retry delay for this category
     pub fn recommended_delay(&self) -> Duration {
+        let retry = RetryConfig::default();
         match self {
-            Self::RateLimit => Duration::from_secs(30),
-            Self::Network => Duration::from_secs(5),
-            Self::Transient => Duration::from_secs(2),
-            Self::ParseError => Duration::from_secs(1),
-            _ => Duration::from_millis(500),
+            Self::RateLimit => Duration::from_secs(retry.rate_limit_delay_secs),
+            Self::Network => Duration::from_secs(retry.network_retry_delay_secs),
+            Self::Transient => Duration::from_secs(retry.transient_retry_delay_secs),
+            Self::ParseError => Duration::from_secs(retry.parse_error_retry_delay_secs),
+            _ => Duration::from_millis(retry.base_delay_ms),
+        }
+    }
+
+    /// Get recommended retry delay using provided config
+    pub fn recommended_delay_with_config(&self, retry: &RetryConfig) -> Duration {
+        match self {
+            Self::RateLimit => Duration::from_secs(retry.rate_limit_delay_secs),
+            Self::Network => Duration::from_secs(retry.network_retry_delay_secs),
+            Self::Transient => Duration::from_secs(retry.transient_retry_delay_secs),
+            Self::ParseError => Duration::from_secs(retry.parse_error_retry_delay_secs),
+            _ => Duration::from_millis(retry.base_delay_ms),
         }
     }
 }
@@ -300,25 +314,25 @@ impl ErrorClassifier {
         }
     }
 
-    /// Classify a WeaveError with proper type-based routing
-    pub fn classify_weave_error(err: &WeaveError, provider: &str) -> LlmError {
+    /// Classify a ClaudegenError with proper type-based routing
+    pub fn classify_error(err: &ClaudegenError, provider: &str) -> LlmError {
         match err {
-            WeaveError::Config(_) => {
+            ClaudegenError::Config(_) => {
                 LlmError::with_provider(ErrorCategory::BadRequest, err.to_string(), provider)
             }
-            WeaveError::Io(_) => {
+            ClaudegenError::Io(_) => {
                 LlmError::with_provider(ErrorCategory::Network, err.to_string(), provider)
                     .retry_after(Duration::from_secs(5))
             }
-            WeaveError::Database(_) => {
+            ClaudegenError::Database(_) => {
                 LlmError::with_provider(ErrorCategory::Unavailable, err.to_string(), provider)
             }
-            WeaveError::LlmApi(msg) => Self::classify(msg, provider),
-            WeaveError::Llm(llm_err) => Self::classify(&llm_err.message, provider),
-            WeaveError::BudgetExceeded { .. } => {
+            ClaudegenError::LlmApi(msg) => Self::classify(msg, provider),
+            ClaudegenError::Llm(llm_err) => Self::classify(&llm_err.message, provider),
+            ClaudegenError::Budget { .. } => {
                 LlmError::with_provider(ErrorCategory::TokenLimit, err.to_string(), provider)
             }
-            WeaveError::Json(_) => {
+            ClaudegenError::Json(_) => {
                 LlmError::with_provider(ErrorCategory::ParseError, err.to_string(), provider)
             }
             _ => LlmError::with_provider(ErrorCategory::Unknown, err.to_string(), provider),
@@ -393,7 +407,8 @@ impl ValidationError {
 }
 
 /// Validation error kinds
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValidationErrorKind {
     /// Schema validation failed
     Schema,
@@ -414,7 +429,7 @@ pub enum ValidationErrorKind {
 // =============================================================================
 
 #[derive(Debug, Error)]
-pub enum WeaveError {
+pub enum ClaudegenError {
     // -------------------------------------------------------------------------
     // System Errors (auto From impl)
     // -------------------------------------------------------------------------
@@ -428,7 +443,7 @@ pub enum WeaveError {
     Json(#[from] serde_json::Error),
 
     #[error("YAML error: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_yaml_ng::Error),
 
     // -------------------------------------------------------------------------
     // LLM Errors
@@ -475,11 +490,11 @@ pub enum WeaveError {
     #[error("Config error: {0}")]
     Config(String),
 
-    #[error("Not initialized: run 'weavewiki init' first")]
+    #[error("Not initialized: run 'claudegen init' first")]
     NotInitialized,
 
-    #[error("Wiki generation failed for {item}: {reason}")]
-    WikiGeneration { item: String, reason: String },
+    #[error("Plugin generation failed for {item}: {reason}")]
+    PluginGeneration { item: String, reason: String },
 
     #[error("Storage error: {0}")]
     Storage(String),
@@ -490,77 +505,48 @@ pub enum WeaveError {
     // -------------------------------------------------------------------------
     // Budget Errors
     // -------------------------------------------------------------------------
-    #[error("Budget exceeded: consumed {consumed} of {budget} tokens")]
-    BudgetExceeded { consumed: u64, budget: u64 },
-
-    #[error("Phase budget exceeded: {phase_name} consumed {consumed}/{limit} tokens")]
-    PhaseBudgetExceeded {
-        phase: u8,
-        phase_name: String,
+    #[error("Budget exceeded: consumed {consumed} of {budget} tokens (requested {requested})")]
+    Budget {
         consumed: u64,
-        limit: u64,
+        budget: u64,
+        requested: u64,
     },
 }
 
-impl From<LlmError> for WeaveError {
+impl From<LlmError> for ClaudegenError {
     fn from(err: LlmError) -> Self {
-        WeaveError::Llm(err)
+        ClaudegenError::Llm(err)
     }
 }
 
-impl From<ValidationError> for WeaveError {
+impl From<ValidationError> for ClaudegenError {
     fn from(err: ValidationError) -> Self {
-        WeaveError::Validation(err)
+        ClaudegenError::Validation(err)
     }
 }
 
-impl From<BudgetError> for WeaveError {
-    fn from(err: BudgetError) -> Self {
-        match err {
-            BudgetError::GlobalExceeded {
-                consumed, budget, ..
-            } => WeaveError::BudgetExceeded { consumed, budget },
-            BudgetError::PhaseExceeded {
-                phase,
-                phase_name,
-                consumed,
-                limit,
-                ..
-            } => WeaveError::PhaseBudgetExceeded {
-                phase,
-                phase_name: phase_name.to_string(),
-                consumed,
-                limit,
-            },
-            BudgetError::InvalidPhase { phase } => {
-                WeaveError::Config(format!("Invalid phase number: {} (valid: 0-4)", phase))
-            }
-        }
-    }
-}
-
-impl From<anyhow::Error> for WeaveError {
+impl From<anyhow::Error> for ClaudegenError {
     fn from(err: anyhow::Error) -> Self {
         // Try to downcast to known error types
         if err.downcast_ref::<rusqlite::Error>().is_some() {
-            return WeaveError::Storage(err.to_string());
+            return ClaudegenError::Storage(err.to_string());
         }
         if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-            return WeaveError::Io(std::io::Error::new(io_err.kind(), io_err.to_string()));
+            return ClaudegenError::Io(std::io::Error::new(io_err.kind(), io_err.to_string()));
         }
 
         // Default to Storage error for context-wrapped errors (most anyhow usage is in storage)
-        WeaveError::Storage(err.to_string())
+        ClaudegenError::Storage(err.to_string())
     }
 }
 
-pub type Result<T> = std::result::Result<T, WeaveError>;
+pub type Result<T> = std::result::Result<T, ClaudegenError>;
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
 
-impl WeaveError {
+impl ClaudegenError {
     /// Create a timeout error
     pub fn timeout(operation: impl Into<String>, duration: Duration) -> Self {
         Self::Timeout {
@@ -617,8 +603,20 @@ impl WeaveError {
     pub fn should_fallback(&self) -> bool {
         match self {
             Self::Llm(e) => e.should_fallback(),
-            Self::BudgetExceeded { .. } | Self::PhaseBudgetExceeded { .. } => true,
+            Self::Budget { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Get exit code for this error (for CLI differentiation)
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::NotInitialized => 4,
+            Self::Config(_) | Self::Validation(_) => 2,
+            Self::Io(_) | Self::Storage(_) | Self::Database(_) => 3,
+            Self::Verification(_) => 5,
+            Self::Budget { .. } | Self::Llm(_) | Self::LlmApi(_) => 6,
+            _ => 1,
         }
     }
 }
@@ -637,7 +635,7 @@ pub trait ResultExt<T> {
 
 impl<T, E: std::error::Error + Send + Sync + 'static> ResultExt<T> for std::result::Result<T, E> {
     fn with_context<C: Into<String>>(self, context: C) -> Result<T> {
-        self.map_err(|e| WeaveError::Storage(format!("{}: {}", context.into(), e)))
+        self.map_err(|e| ClaudegenError::Storage(format!("{}: {}", context.into(), e)))
     }
 
     fn with_context_fn<F, C>(self, f: F) -> Result<T>
@@ -645,7 +643,7 @@ impl<T, E: std::error::Error + Send + Sync + 'static> ResultExt<T> for std::resu
         F: FnOnce() -> C,
         C: Into<String>,
     {
-        self.map_err(|e| WeaveError::Storage(format!("{}: {}", f().into(), e)))
+        self.map_err(|e| ClaudegenError::Storage(format!("{}: {}", f().into(), e)))
     }
 }
 

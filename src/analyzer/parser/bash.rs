@@ -3,8 +3,8 @@ use tree_sitter::{Parser as TsParser, Query, QueryCursor, StreamingIterator};
 
 use super::{Language, ParseResult, Parser, create_file_node};
 use crate::types::{
-    EvidenceLocation, FunctionSignature, InformationTier, Node, NodeMetadata, NodeStatus, NodeType,
-    Result, Visibility, WeaveError,
+    ClaudegenError, EvidenceLocation, FunctionSignature, InformationTier, Node, NodeMetadata,
+    NodeStatus, NodeType, Result, Visibility,
 };
 
 pub struct BashParser;
@@ -14,8 +14,8 @@ impl BashParser {
         let mut parser = TsParser::new();
         parser
             .set_language(&tree_sitter_bash::LANGUAGE.into())
-            .map_err(|e| WeaveError::Parse {
-                message: format!("Failed to set Bash language: {}", e),
+            .map_err(|e| ClaudegenError::Parse {
+                message: format!("Failed to set Bash language: {e}"),
                 path: String::new(),
             })?;
         Ok(Self)
@@ -28,14 +28,14 @@ impl Parser for BashParser {
         let language = tree_sitter_bash::LANGUAGE;
         parser
             .set_language(&language.into())
-            .map_err(|e| WeaveError::Parse {
-                message: format!("Failed to set Bash language: {}", e),
+            .map_err(|e| ClaudegenError::Parse {
+                message: format!("Failed to set Bash language: {e}"),
                 path: path.to_string(),
             })?;
 
         let tree = parser
             .parse(content, None)
-            .ok_or_else(|| WeaveError::Parse {
+            .ok_or_else(|| ClaudegenError::Parse {
                 message: "Failed to parse Bash file".to_string(),
                 path: path.to_string(),
             })?;
@@ -73,7 +73,7 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
                 let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
 
                 let func_node = Node {
-                    id: format!("function:{}:{}", path, name),
+                    id: format!("function:{path}:{name}"),
                     node_type: NodeType::Function,
                     path: path.to_string(),
                     name: name.clone(),

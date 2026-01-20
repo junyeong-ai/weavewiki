@@ -40,7 +40,7 @@ pub mod patterns {
     ///
     /// # Examples
     /// ```
-    /// use weavewiki::verifier::common::patterns::extract_function_name;
+    /// use claudegen::verifier::common::patterns::extract_function_name;
     ///
     /// assert_eq!(extract_function_name("fn hello()"), Some("hello".to_string()));
     /// assert_eq!(extract_function_name("function greet(name)"), Some("greet".to_string()));
@@ -54,7 +54,7 @@ pub mod patterns {
     ///
     /// # Examples
     /// ```
-    /// use weavewiki::verifier::common::patterns::extract_class_name;
+    /// use claudegen::verifier::common::patterns::extract_class_name;
     ///
     /// assert_eq!(extract_class_name("class MyClass {"), Some("MyClass".to_string()));
     /// assert_eq!(extract_class_name("struct Point {"), Some("Point".to_string()));
@@ -72,7 +72,7 @@ pub mod patterns {
     ///
     /// # Examples
     /// ```
-    /// use weavewiki::verifier::common::patterns::extract_dependency_target;
+    /// use claudegen::verifier::common::patterns::extract_dependency_target;
     ///
     /// assert_eq!(extract_dependency_target("import foo from 'bar'"), Some("bar".to_string()));
     /// assert_eq!(extract_dependency_target("use crate::module;"), Some("crate::module".to_string()));
@@ -153,21 +153,21 @@ pub mod patterns {
     pub fn contains_function(content: &str, name: &str) -> bool {
         FUNCTION_PATTERNS
             .iter()
-            .any(|(prefix, suffix)| content.contains(&format!("{}{}{}", prefix, name, suffix)))
+            .any(|(prefix, suffix)| content.contains(&format!("{prefix}{name}{suffix}")))
     }
 
     /// Check if content contains a class/struct with the given name
     pub fn contains_class(content: &str, name: &str) -> bool {
         CLASS_PATTERNS
             .iter()
-            .any(|(prefix, _suffix)| content.contains(&format!("{}{}", prefix, name)))
+            .any(|(prefix, _suffix)| content.contains(&format!("{prefix}{name}")))
     }
 
     /// Check if content contains a type with the given name
     pub fn contains_type(content: &str, name: &str) -> bool {
         TYPE_PATTERNS
             .iter()
-            .any(|(prefix, _)| content.contains(&format!("{}{}", prefix, name)))
+            .any(|(prefix, _)| content.contains(&format!("{prefix}{name}")))
     }
 }
 

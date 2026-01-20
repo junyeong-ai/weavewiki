@@ -1,12 +1,12 @@
 //! Config Command
 //!
-//! Manage WeaveWiki configuration.
+//! Manage claudegen configuration.
 //!
 //! Usage:
-//!   weavewiki config show [-g] [-f json]
-//!   weavewiki config path
-//!   weavewiki config edit [-g]
-//!   weavewiki config init [-g] [--force]
+//!   claudegen config show [-g] [-f json]
+//!   claudegen config path
+//!   claudegen config edit [-g]
+//!   claudegen config init [-g] [--force]
 
 use crate::config::ConfigLoader;
 use crate::types::Result;
@@ -21,14 +21,14 @@ pub fn show(global: bool, format: &str) -> Result<()> {
                 let content = std::fs::read_to_string(&global_path)?;
                 if format == "yaml" {
                     // Raw YAML output
-                    println!("{}", content);
+                    println!("{content}");
                 } else {
                     println!("# Global Config: {}\n", global_path.display());
-                    println!("{}", content);
+                    println!("{content}");
                 }
             } else {
                 println!("No global config found.");
-                println!("Run 'weavewiki config init --global' to create one.");
+                println!("Run 'claudegen config init --global' to create one.");
             }
         } else {
             println!("Cannot determine global config directory.");

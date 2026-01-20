@@ -14,7 +14,7 @@ pub fn run(query: &str, depth: u32, format: &str) -> Result<()> {
     let node_id = if query.contains(':') {
         query.to_string()
     } else {
-        format!("file:{}", query)
+        format!("file:{query}")
     };
 
     let node = store.get_node(&node_id)?;
@@ -37,8 +37,8 @@ pub fn run(query: &str, depth: u32, format: &str) -> Result<()> {
                 });
 
                 let json = serde_json::to_string_pretty(&output)
-                    .map_err(crate::types::WeaveError::Json)?;
-                println!("{}", json);
+                    .map_err(crate::types::ClaudegenError::Json)?;
+                println!("{json}");
             } else {
                 println!("{{\"error\": \"Node not found\"}}");
             }
@@ -55,7 +55,7 @@ pub fn run(query: &str, depth: u32, format: &str) -> Result<()> {
                 if !deps.is_empty() {
                     println!("Dependencies ({}):", deps.len());
                     for dep in deps.iter().take(depth as usize) {
-                        println!("  → {}", dep);
+                        println!("  → {dep}");
                     }
                     if deps.len() > depth as usize {
                         println!("  ... and {} more", deps.len() - depth as usize);
@@ -67,14 +67,14 @@ pub fn run(query: &str, depth: u32, format: &str) -> Result<()> {
                     println!();
                     println!("Dependents ({}):", dependents.len());
                     for dep in dependents.iter().take(depth as usize) {
-                        println!("  ← {}", dep);
+                        println!("  ← {dep}");
                     }
                     if dependents.len() > depth as usize {
                         println!("  ... and {} more", dependents.len() - depth as usize);
                     }
                 }
             } else {
-                println!("Node not found: {}", query);
+                println!("Node not found: {query}");
             }
         }
     }

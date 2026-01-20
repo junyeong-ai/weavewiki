@@ -1,80 +1,67 @@
 [package]
-name = "weavewiki"
+name = "claudegen"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "AI-driven wiki documentation generator for codebases"
+description = "Claude Code specialized guide and agent skill document generator"
 license = "MIT"
-repository = "https://github.com/junyeong-ai/weavewiki"
-keywords = ["cli", "wiki", "documentation", "ai", "codebase"]
+repository = "https://github.com/junyeong-ai/claudegen"
+keywords = ["cli", "claude-code", "ai", "documentation", "agents"]
 categories = ["command-line-utilities", "development-tools"]
 
 [features]
-default = []
+default = ["claude-agent"]
+claude-agent = ["dep:claude-agent"]
 
 [dependencies]
-# Async Runtime
-tokio = { version = "1.48", features = ["full", "process"] }
+# Claude Agent SDK - Direct API access with CLI OAuth support
+claude-agent = { path = "../claude-agent-rs", optional = true, features = ["cli-integration"] }
+
+# Ordered map for consistent YAML output
+indexmap = { version = "2.12", features = ["serde"] }
+tokio = { version = "1.49", features = ["full", "process"] }
 async-trait = "0.1"
-futures = "0.3"
-backon = { version = "1.6", features = ["tokio-sleep"] }
 
-# HTTP Client (for LLM providers)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
-# CLI
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 console = "0.16"
 
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 
-# Storage
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.31"
+r2d2_sqlite = "0.32"
 dashmap = "6.1"
 
-# AST Parsing
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-ruby = "0.23"
-tree-sitter-bash = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-kotlin-sg = "0.4"
+tree-sitter-go = "0.25"
+tree-sitter-bash = "0.25"
 
-# Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 ignore = "0.4"
 glob = "0.3"
 regex = "1"
-sha2 = "0.10"
 rand = "0.9"
-crc32fast = "1.5"
 
-# Error Handling
+sha2 = "0.10"
+
 thiserror = "2.0"
 anyhow = "1.0"
 
-# Security
 secrecy = "0.10"
-url = "2.5"
 
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Configuration
 directories = "6"
-toml = { version = "0.9.8", features = ["preserve_order"] }
+toml = { version = "0.9.11", features = ["preserve_order"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
 
 [dev-dependencies]

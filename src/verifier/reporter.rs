@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::types::{
-    IssueSeverity, Result, ValidationError, ValidationErrorKind, VerificationReport, WeaveError,
+    ClaudegenError, Result, Severity, ValidationError, ValidationErrorKind, VerificationReport,
 };
 
 pub struct Reporter;
@@ -13,9 +13,9 @@ impl Reporter {
         output_path: P,
     ) -> Result<()> {
         let json = serde_json::to_string_pretty(report).map_err(|e| {
-            WeaveError::Validation(ValidationError::new(
+            ClaudegenError::Validation(ValidationError::new(
                 ValidationErrorKind::Format,
-                format!("Failed to serialize report: {}", e),
+                format!("Failed to serialize report: {e}"),
             ))
         })?;
 
@@ -42,9 +42,9 @@ impl Reporter {
 
             for issue in &report.issues {
                 let icon = match issue.severity {
-                    IssueSeverity::Error => "✗",
-                    IssueSeverity::Warning => "⚠",
-                    IssueSeverity::Info => "ℹ",
+                    Severity::Error => "✗",
+                    Severity::Warning => "⚠",
+                    Severity::Info => "ℹ",
                 };
 
                 println!(
@@ -55,7 +55,7 @@ impl Reporter {
                 );
 
                 if let Some(ref suggestion) = issue.suggestion {
-                    println!("  → {}", suggestion);
+                    println!("  → {suggestion}");
                 }
 
                 if issue.auto_fixable {
@@ -77,7 +77,7 @@ impl Reporter {
         }
     }
 
-    pub fn print_filtered(report: &VerificationReport, min_severity: IssueSeverity) {
+    pub fn print_filtered(report: &VerificationReport, min_severity: Severity) {
         let filtered: Vec<_> = report
             .issues
             .iter()
@@ -85,7 +85,7 @@ impl Reporter {
             .collect();
 
         if filtered.is_empty() {
-            println!("No issues at severity {:?} or higher.", min_severity);
+            println!("No issues at severity {min_severity:?} or higher.");
             return;
         }
 
@@ -94,9 +94,9 @@ impl Reporter {
 
         for issue in filtered {
             let icon = match issue.severity {
-                IssueSeverity::Error => "✗",
-                IssueSeverity::Warning => "⚠",
-                IssueSeverity::Info => "ℹ",
+                Severity::Error => "✗",
+                Severity::Warning => "⚠",
+                Severity::Info => "ℹ",
             };
 
             println!(
@@ -107,7 +107,7 @@ impl Reporter {
             );
 
             if let Some(ref suggestion) = issue.suggestion {
-                println!("  → {}", suggestion);
+                println!("  → {suggestion}");
             }
 
             println!();

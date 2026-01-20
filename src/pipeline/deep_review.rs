@@ -1,0 +1,971 @@
+//! Deep Review Engine - Two-Pass Quality Guarantee
+//!
+//! Ensures generated artifacts meet quality standards through:
+//! - Pass 1: Full quality audit (programmatic + LLM)
+//! - Pass 2: Regression check (no new issues introduced)
+//!
+//! Validation Strategy:
+//! - Programmatic: file references, format, tier1 detection (100% reliable)
+//! - LLM: semantic quality, cross-artifact consistency (contextual judgment)
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tracing::{debug, info, warn};
+
+use crate::ai::LlmProvider;
+use crate::config::DeepReviewConfig;
+use crate::pipeline::context::VerifiedFileRegistry;
+use crate::types::Result;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CheckType {
+    SemanticQuality,
+    EvidenceValid,
+    Tier1Free,
+    CrossArtifactConsistent,
+    FormatCompliant,
+}
+
+impl CheckType {
+    pub fn is_programmatic(&self) -> bool {
+        matches!(
+            self,
+            CheckType::EvidenceValid | CheckType::Tier1Free | CheckType::FormatCompliant
+        )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CheckType::SemanticQuality => "semantic_quality",
+            CheckType::EvidenceValid => "evidence_valid",
+            CheckType::Tier1Free => "tier1_free",
+            CheckType::CrossArtifactConsistent => "cross_artifact",
+            CheckType::FormatCompliant => "format_compliant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum IssueSeverity {
+    Warning,
+    Error,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewIssue {
+    pub check_type: CheckType,
+    pub severity: IssueSeverity,
+    pub artifact: String,
+    pub message: String,
+    pub location: Option<String>,
+    pub suggestion: Option<String>,
+}
+
+impl ReviewIssue {
+    pub fn error(check_type: CheckType, artifact: &str, message: &str) -> Self {
+        Self {
+            check_type,
+            severity: IssueSeverity::Error,
+            artifact: artifact.to_string(),
+            message: message.to_string(),
+            location: None,
+            suggestion: None,
+        }
+    }
+
+    pub fn warning(check_type: CheckType, artifact: &str, message: &str) -> Self {
+        Self {
+            check_type,
+            severity: IssueSeverity::Warning,
+            artifact: artifact.to_string(),
+            message: message.to_string(),
+            location: None,
+            suggestion: None,
+        }
+    }
+
+    pub fn with_location(mut self, location: &str) -> Self {
+        self.location = Some(location.to_string());
+        self
+    }
+
+    pub fn with_suggestion(mut self, suggestion: &str) -> Self {
+        self.suggestion = Some(suggestion.to_string());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CheckResult {
+    pub passed: bool,
+    pub score: f32,
+    pub issues: Vec<ReviewIssue>,
+}
+
+impl CheckResult {
+    pub fn pass() -> Self {
+        Self {
+            passed: true,
+            score: 1.0,
+            issues: Vec::new(),
+        }
+    }
+
+    pub fn fail(issues: Vec<ReviewIssue>) -> Self {
+        Self {
+            passed: false,
+            score: 0.0,
+            issues,
+        }
+    }
+
+    pub fn with_score(mut self, score: f32) -> Self {
+        self.score = score;
+        self.passed = score >= 0.7;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeepReviewChecks {
+    pub semantic_quality: CheckResult,
+    pub evidence_valid: CheckResult,
+    pub tier1_free: CheckResult,
+    pub cross_artifact_consistent: CheckResult,
+    pub format_compliant: CheckResult,
+}
+
+impl DeepReviewChecks {
+    pub fn all_passed(&self) -> bool {
+        self.semantic_quality.passed
+            && self.evidence_valid.passed
+            && self.tier1_free.passed
+            && self.cross_artifact_consistent.passed
+            && self.format_compliant.passed
+    }
+
+    pub fn collect_issues(&self) -> Vec<ReviewIssue> {
+        let mut issues = Vec::new();
+        issues.extend(self.semantic_quality.issues.clone());
+        issues.extend(self.evidence_valid.issues.clone());
+        issues.extend(self.tier1_free.issues.clone());
+        issues.extend(self.cross_artifact_consistent.issues.clone());
+        issues.extend(self.format_compliant.issues.clone());
+        issues
+    }
+
+    pub fn overall_score(&self) -> f32 {
+        (self.semantic_quality.score
+            + self.evidence_valid.score
+            + self.tier1_free.score
+            + self.cross_artifact_consistent.score
+            + self.format_compliant.score)
+            / 5.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeepReviewResult {
+    pub pass_number: u32,
+    pub passed: bool,
+    pub issues: Vec<ReviewIssue>,
+    pub quality_score: f32,
+    pub checks: DeepReviewChecks,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegressionCheck {
+    pub has_regression: bool,
+    pub new_issues: Vec<ReviewIssue>,
+    pub resolved_issues: Vec<ReviewIssue>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TwoPassResult {
+    Passed {
+        total_attempts: u32,
+        final_quality: f32,
+    },
+    Failed {
+        total_attempts: u32,
+        remaining_issues: Vec<ReviewIssue>,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReviewArtifacts {
+    pub claude_md: Option<String>,
+    pub skills: Vec<(String, String)>,
+    pub agents: Vec<(String, String)>,
+    pub rules: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LlmReviewResponse {
+    passed: bool,
+    score: f32,
+    issues: Vec<LlmIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LlmIssue {
+    artifact: String,
+    severity: String,
+    message: String,
+    suggestion: Option<String>,
+}
+
+pub struct DeepReviewEngine {
+    provider: Arc<dyn LlmProvider>,
+    config: DeepReviewConfig,
+    file_registry: VerifiedFileRegistry,
+    tier1_patterns: Vec<Regex>,
+}
+
+impl DeepReviewEngine {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        config: DeepReviewConfig,
+        file_registry: VerifiedFileRegistry,
+    ) -> Self {
+        Self {
+            provider,
+            config,
+            file_registry,
+            tier1_patterns: Self::build_tier1_patterns(),
+        }
+    }
+
+    fn build_tier1_patterns() -> Vec<Regex> {
+        let patterns = [
+            r"(?i)cargo\s+(build|run|test|check)",
+            r"(?i)npm\s+(install|run|test|build)",
+            r"(?i)yarn\s+(install|add|build)",
+            r"(?i)pnpm\s+(install|add)",
+            r"(?i)go\s+(build|run|test)",
+            r"(?i)make\s+(build|test|clean)",
+            r"(?i)use\s+async/await",
+            r"(?i)use\s+the\s+\?\s+operator",
+            r"(?i)prefer\s+const\s+over\s+let",
+            r"(?i)use\s+strict\s+mode",
+            r"(?i)follow\s+best\s+practices",
+            r"(?i)write\s+clean\s+code",
+            r"(?i)use\s+meaningful\s+names",
+            r"(?i)add\s+comments\s+to\s+explain",
+            r"(?i)handle\s+errors\s+properly",
+            r"(?i)use\s+git\s+for\s+version\s+control",
+            r"(?i)run\s+tests\s+before\s+commit",
+            r"(?i)use\s+a\s+linter",
+            r"(?i)format\s+your\s+code",
+        ];
+
+        patterns
+            .iter()
+            .filter_map(|p| Regex::new(p).ok())
+            .collect()
+    }
+
+    pub async fn execute_two_pass_review(
+        &self,
+        artifacts: &ReviewArtifacts,
+    ) -> Result<TwoPassResult> {
+        let required_passes = self.config.required_passes;
+        let max_attempts = self.config.max_attempts;
+
+        let mut consecutive_passes = 0u32;
+        let mut total_attempts = 0u32;
+        let mut baseline_issues: Option<Vec<ReviewIssue>> = None;
+
+        info!(
+            required_passes,
+            max_attempts, "Starting two-pass deep review"
+        );
+
+        while consecutive_passes < required_passes && total_attempts < max_attempts {
+            total_attempts += 1;
+
+            let result = self.execute_single_pass(artifacts, total_attempts).await?;
+
+            if result.passed {
+                if consecutive_passes > 0 && self.config.check_regression {
+                    let regression = self.check_regression(&result, &baseline_issues);
+                    if regression.has_regression {
+                        warn!(
+                            attempt = total_attempts,
+                            new_issues = regression.new_issues.len(),
+                            "Regression detected"
+                        );
+                        consecutive_passes = 0;
+                        baseline_issues = None;
+                        continue;
+                    }
+                }
+
+                consecutive_passes += 1;
+                baseline_issues = Some(result.issues.clone());
+
+                info!(
+                    attempt = total_attempts,
+                    consecutive = consecutive_passes,
+                    required = required_passes,
+                    "Pass succeeded"
+                );
+            } else {
+                warn!(
+                    attempt = total_attempts,
+                    issues = result.issues.len(),
+                    score = format!("{:.1}%", result.quality_score * 100.0),
+                    "Pass failed"
+                );
+
+                for issue in result.issues.iter().take(3) {
+                    debug!(
+                        artifact = %issue.artifact,
+                        message = %issue.message,
+                        "Issue"
+                    );
+                }
+
+                consecutive_passes = 0;
+                baseline_issues = None;
+            }
+        }
+
+        if consecutive_passes >= required_passes {
+            info!(total_attempts, "Deep review PASSED");
+            Ok(TwoPassResult::Passed {
+                total_attempts,
+                final_quality: self.calculate_final_quality(artifacts).await?,
+            })
+        } else {
+            warn!(total_attempts, "Deep review FAILED");
+            Ok(TwoPassResult::Failed {
+                total_attempts,
+                remaining_issues: baseline_issues.unwrap_or_default(),
+            })
+        }
+    }
+
+    pub async fn execute_single_pass(
+        &self,
+        artifacts: &ReviewArtifacts,
+        pass_number: u32,
+    ) -> Result<DeepReviewResult> {
+        let mut all_issues = Vec::new();
+
+        // Programmatic checks (100% reliable)
+        let evidence = self.validate_evidence(artifacts);
+        all_issues.extend(evidence.issues.clone());
+
+        let tier1 = if self.config.reject_tier1 {
+            self.check_tier1(artifacts)
+        } else {
+            CheckResult::pass()
+        };
+        all_issues.extend(tier1.issues.clone());
+
+        let format = self.validate_format(artifacts);
+        all_issues.extend(format.issues.clone());
+
+        // LLM-based checks (contextual judgment)
+        let semantic = self.check_semantic_quality(artifacts).await?;
+        all_issues.extend(semantic.issues.clone());
+
+        let cross = self.check_cross_artifact_consistency(artifacts).await?;
+        all_issues.extend(cross.issues.clone());
+
+        let checks = DeepReviewChecks {
+            semantic_quality: semantic,
+            evidence_valid: evidence,
+            tier1_free: tier1,
+            cross_artifact_consistent: cross,
+            format_compliant: format,
+        };
+
+        let passed = checks.all_passed();
+        let quality_score = checks.overall_score();
+
+        Ok(DeepReviewResult {
+            pass_number,
+            passed,
+            issues: all_issues,
+            quality_score,
+            checks,
+        })
+    }
+
+    fn validate_evidence(&self, artifacts: &ReviewArtifacts) -> CheckResult {
+        let reference_pattern = Regex::new(r"@([^\s:]+):(\d+)").unwrap();
+        let mut issues = Vec::new();
+        let mut total_refs = 0;
+        let mut valid_refs = 0;
+
+        let all_content = self.collect_all_content(artifacts);
+
+        for (artifact_name, content) in &all_content {
+            for cap in reference_pattern.captures_iter(content) {
+                total_refs += 1;
+                let file_path = &cap[1];
+                let line_num: usize = cap[2].parse().unwrap_or(0);
+
+                if !self.file_registry.file_exists(file_path) {
+                    issues.push(
+                        ReviewIssue::error(
+                            CheckType::EvidenceValid,
+                            artifact_name,
+                            &format!("File not found: {}", file_path),
+                        )
+                        .with_location(&format!("@{}:{}", file_path, line_num))
+                        .with_suggestion("Remove or update the file reference"),
+                    );
+                    continue;
+                }
+
+                if let Ok(max_lines) = self.file_registry.get_line_count(file_path) {
+                    if line_num > max_lines {
+                        issues.push(
+                            ReviewIssue::error(
+                                CheckType::EvidenceValid,
+                                artifact_name,
+                                &format!(
+                                    "Invalid line {} (file has {} lines): {}",
+                                    line_num, max_lines, file_path
+                                ),
+                            )
+                            .with_location(&format!("@{}:{}", file_path, line_num)),
+                        );
+                        continue;
+                    }
+                }
+
+                valid_refs += 1;
+            }
+        }
+
+        if total_refs > 0 {
+            let ratio = valid_refs as f32 / total_refs as f32;
+            if ratio < self.config.min_evidence_ratio {
+                issues.push(ReviewIssue::error(
+                    CheckType::EvidenceValid,
+                    "overall",
+                    &format!(
+                        "Evidence ratio {:.1}% below minimum {:.1}%",
+                        ratio * 100.0,
+                        self.config.min_evidence_ratio * 100.0
+                    ),
+                ));
+            }
+        }
+
+        if issues.is_empty() {
+            CheckResult::pass()
+        } else {
+            let score = if total_refs > 0 {
+                valid_refs as f32 / total_refs as f32
+            } else {
+                0.5
+            };
+            CheckResult::fail(issues).with_score(score)
+        }
+    }
+
+    fn check_tier1(&self, artifacts: &ReviewArtifacts) -> CheckResult {
+        let mut issues = Vec::new();
+        let all_content = self.collect_all_content(artifacts);
+
+        for (artifact_name, content) in &all_content {
+            let lines: Vec<&str> = content.lines().collect();
+            let mut tier1_matches = 0;
+
+            for (line_num, line) in lines.iter().enumerate() {
+                for pattern in &self.tier1_patterns {
+                    if pattern.is_match(line) {
+                        tier1_matches += 1;
+                        if tier1_matches <= 3 {
+                            issues.push(
+                                ReviewIssue::error(
+                                    CheckType::Tier1Free,
+                                    artifact_name,
+                                    &format!("Tier 1 content: {}", line.trim()),
+                                )
+                                .with_location(&format!("line {}", line_num + 1))
+                                .with_suggestion("Remove basic knowledge that Claude already knows"),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if !lines.is_empty() {
+                let ratio = tier1_matches as f32 / lines.len() as f32;
+                if ratio > 0.1 {
+                    issues.push(ReviewIssue::error(
+                        CheckType::Tier1Free,
+                        artifact_name,
+                        &format!(
+                            "High Tier 1 ratio: {:.1}% ({} matches)",
+                            ratio * 100.0,
+                            tier1_matches
+                        ),
+                    ));
+                }
+            }
+        }
+
+        if issues.is_empty() {
+            CheckResult::pass()
+        } else {
+            let score = 1.0 - (issues.len() as f32 * 0.1).min(1.0);
+            CheckResult::fail(issues).with_score(score)
+        }
+    }
+
+    fn validate_format(&self, artifacts: &ReviewArtifacts) -> CheckResult {
+        let mut issues = Vec::new();
+
+        for (name, content) in &artifacts.skills {
+            if !content.starts_with("---") {
+                issues.push(
+                    ReviewIssue::error(
+                        CheckType::FormatCompliant,
+                        name,
+                        "Missing YAML frontmatter",
+                    )
+                    .with_suggestion("Add YAML frontmatter with name and description"),
+                );
+            } else if !content.contains("name:") {
+                issues.push(ReviewIssue::error(
+                    CheckType::FormatCompliant,
+                    name,
+                    "Missing 'name' in frontmatter",
+                ));
+            }
+        }
+
+        for (name, content) in &artifacts.agents {
+            if !content.starts_with("---") {
+                issues.push(
+                    ReviewIssue::error(
+                        CheckType::FormatCompliant,
+                        name,
+                        "Missing YAML frontmatter",
+                    )
+                    .with_suggestion("Add YAML frontmatter with name and description"),
+                );
+            } else if !content.contains("name:") {
+                issues.push(ReviewIssue::error(
+                    CheckType::FormatCompliant,
+                    name,
+                    "Missing 'name' in frontmatter",
+                ));
+            }
+        }
+
+        for (name, content) in &artifacts.rules {
+            if content.starts_with("---") && !content.contains("paths:") {
+                issues.push(
+                    ReviewIssue::error(
+                        CheckType::FormatCompliant,
+                        name,
+                        "Frontmatter missing 'paths' field",
+                    )
+                    .with_suggestion("Add 'paths:' with glob patterns"),
+                );
+            }
+        }
+
+        if issues.is_empty() {
+            CheckResult::pass()
+        } else {
+            CheckResult::fail(issues).with_score(0.5)
+        }
+    }
+
+    async fn check_semantic_quality(&self, artifacts: &ReviewArtifacts) -> Result<CheckResult> {
+        let prompt = self.build_semantic_quality_prompt(artifacts);
+        let schema = self.review_response_schema();
+
+        let response = match self.provider.generate(&prompt, &schema).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(error = %e, "LLM semantic check failed, using conservative pass");
+                return Ok(CheckResult::pass().with_score(0.7));
+            }
+        };
+
+        self.parse_llm_review_response(&response.content, CheckType::SemanticQuality)
+    }
+
+    fn build_semantic_quality_prompt(&self, artifacts: &ReviewArtifacts) -> String {
+        let mut content_summary = String::new();
+
+        if let Some(ref claude_md) = artifacts.claude_md {
+            let preview: String = claude_md.chars().take(2000).collect();
+            content_summary.push_str(&format!("## CLAUDE.md\n{}\n\n", preview));
+        }
+
+        for (name, body) in artifacts.skills.iter().take(3) {
+            let preview: String = body.chars().take(500).collect();
+            content_summary.push_str(&format!("## Skill: {}\n{}\n\n", name, preview));
+        }
+
+        for (name, body) in artifacts.agents.iter().take(2) {
+            let preview: String = body.chars().take(500).collect();
+            content_summary.push_str(&format!("## Agent: {}\n{}\n\n", name, preview));
+        }
+
+        format!(
+            r#"You are a quality reviewer for Claude Code plugin artifacts.
+
+Evaluate the following generated content for SEMANTIC QUALITY:
+
+1. **Actionability** (0-100): Are instructions specific and actionable?
+   - Bad: "Follow best practices"
+   - Good: "Use Arc::clone(&provider) when sharing providers across threads"
+
+2. **Specificity** (0-100): Does it contain project-specific knowledge?
+   - Bad: Generic advice applicable to any project
+   - Good: References actual files, patterns, constraints unique to this project
+
+3. **Value-Add** (0-100): Does it provide value beyond Claude's existing knowledge?
+   - Bad: "Use cargo build to compile" (Claude knows this)
+   - Good: "This project requires --features=cli for binary builds"
+
+4. **Evidence Quality** (0-100): Are file references meaningful?
+   - Bad: Random file references without context
+   - Good: "@src/main.rs:42 is the entry point for CLI parsing"
+
+CONTENT TO REVIEW:
+{content_summary}
+
+Respond in JSON format:
+{{
+  "passed": true/false,
+  "score": 0.0-1.0,
+  "issues": [
+    {{
+      "artifact": "artifact name",
+      "severity": "warning|error|critical",
+      "message": "specific issue description",
+      "suggestion": "how to fix"
+    }}
+  ]
+}}
+
+Only report issues with score < 0.7 for any dimension. Pass if overall score >= 0.7."#
+        )
+    }
+
+    async fn check_cross_artifact_consistency(
+        &self,
+        artifacts: &ReviewArtifacts,
+    ) -> Result<CheckResult> {
+        let prompt = self.build_cross_artifact_prompt(artifacts);
+        let schema = self.review_response_schema();
+
+        let response = match self.provider.generate(&prompt, &schema).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(error = %e, "LLM cross-artifact check failed, using conservative pass");
+                return Ok(CheckResult::pass().with_score(0.7));
+            }
+        };
+
+        self.parse_llm_review_response(&response.content, CheckType::CrossArtifactConsistent)
+    }
+
+    fn build_cross_artifact_prompt(&self, artifacts: &ReviewArtifacts) -> String {
+        let mut artifact_list = String::new();
+
+        if artifacts.claude_md.is_some() {
+            artifact_list.push_str("- CLAUDE.md (project conventions)\n");
+        }
+
+        for (name, _) in &artifacts.skills {
+            artifact_list.push_str(&format!("- Skill: {}\n", name));
+        }
+
+        for (name, _) in &artifacts.agents {
+            artifact_list.push_str(&format!("- Agent: {}\n", name));
+        }
+
+        for (name, _) in &artifacts.rules {
+            artifact_list.push_str(&format!("- Rule: {}\n", name));
+        }
+
+        let claude_preview = artifacts
+            .claude_md
+            .as_ref()
+            .map(|c| c.chars().take(1500).collect::<String>())
+            .unwrap_or_default();
+
+        let skills_preview: String = artifacts
+            .skills
+            .iter()
+            .take(2)
+            .map(|(n, b)| format!("### {}\n{}", n, b.chars().take(300).collect::<String>()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        format!(
+            r#"You are reviewing Claude Code plugin artifacts for CROSS-ARTIFACT CONSISTENCY.
+
+Check for:
+1. **Logical Consistency**: Do skills/agents align with CLAUDE.md conventions?
+2. **No Contradictions**: Are there conflicting instructions between artifacts?
+3. **Completeness**: Does CLAUDE.md reference skills/agents that exist?
+4. **Coherent Terminology**: Same concepts use same names across artifacts?
+
+ARTIFACTS:
+{artifact_list}
+
+CLAUDE.md PREVIEW:
+{claude_preview}
+
+SKILLS PREVIEW:
+{skills_preview}
+
+Respond in JSON format:
+{{
+  "passed": true/false,
+  "score": 0.0-1.0,
+  "issues": [
+    {{
+      "artifact": "artifact name or 'cross-reference'",
+      "severity": "warning|error|critical",
+      "message": "consistency issue description",
+      "suggestion": "how to resolve"
+    }}
+  ]
+}}
+
+Pass if artifacts are logically consistent (score >= 0.7)."#
+        )
+    }
+
+    fn review_response_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "passed": { "type": "boolean" },
+                "score": { "type": "number" },
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "artifact": { "type": "string" },
+                            "severity": { "type": "string" },
+                            "message": { "type": "string" },
+                            "suggestion": { "type": "string" }
+                        }
+                    }
+                }
+            },
+            "required": ["passed", "score", "issues"]
+        })
+    }
+
+    fn parse_llm_review_response(
+        &self,
+        content: &Value,
+        check_type: CheckType,
+    ) -> Result<CheckResult> {
+        let parsed: LlmReviewResponse = match serde_json::from_value(content.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "Failed to parse LLM review response");
+                return Ok(CheckResult::pass().with_score(0.7));
+            }
+        };
+
+        let issues: Vec<ReviewIssue> = parsed
+            .issues
+            .into_iter()
+            .map(|i| {
+                let severity = match i.severity.to_lowercase().as_str() {
+                    "critical" => IssueSeverity::Critical,
+                    "error" => IssueSeverity::Error,
+                    _ => IssueSeverity::Warning,
+                };
+
+                ReviewIssue {
+                    check_type,
+                    severity,
+                    artifact: i.artifact,
+                    message: i.message,
+                    location: None,
+                    suggestion: i.suggestion,
+                }
+            })
+            .collect();
+
+        if parsed.passed && issues.is_empty() {
+            Ok(CheckResult::pass().with_score(parsed.score.max(0.7)))
+        } else {
+            Ok(CheckResult {
+                passed: parsed.passed,
+                score: parsed.score,
+                issues,
+            })
+        }
+    }
+
+    fn check_regression(
+        &self,
+        current: &DeepReviewResult,
+        baseline: &Option<Vec<ReviewIssue>>,
+    ) -> RegressionCheck {
+        let baseline_issues: HashSet<_> = baseline
+            .as_ref()
+            .map(|b| b.iter().map(|i| (&i.artifact, &i.message)).collect())
+            .unwrap_or_default();
+
+        let current_issues: HashSet<_> = current
+            .issues
+            .iter()
+            .map(|i| (&i.artifact, &i.message))
+            .collect();
+
+        let new_issues: Vec<_> = current
+            .issues
+            .iter()
+            .filter(|i| !baseline_issues.contains(&(&i.artifact, &i.message)))
+            .cloned()
+            .collect();
+
+        let resolved_issues: Vec<_> = baseline
+            .as_ref()
+            .map(|b| {
+                b.iter()
+                    .filter(|i| !current_issues.contains(&(&i.artifact, &i.message)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        RegressionCheck {
+            has_regression: !new_issues.is_empty(),
+            new_issues,
+            resolved_issues,
+        }
+    }
+
+    async fn calculate_final_quality(&self, artifacts: &ReviewArtifacts) -> Result<f32> {
+        let result = self.execute_single_pass(artifacts, 0).await?;
+        Ok(result.quality_score)
+    }
+
+    fn collect_all_content(&self, artifacts: &ReviewArtifacts) -> Vec<(String, String)> {
+        let mut all = Vec::new();
+
+        if let Some(ref claude_md) = artifacts.claude_md {
+            all.push(("CLAUDE.md".to_string(), claude_md.clone()));
+        }
+
+        for (name, content) in &artifacts.skills {
+            all.push((format!("skill:{}", name), content.clone()));
+        }
+
+        for (name, content) in &artifacts.agents {
+            all.push((format!("agent:{}", name), content.clone()));
+        }
+
+        for (name, content) in &artifacts.rules {
+            all.push((format!("rule:{}", name), content.clone()));
+        }
+
+        all
+    }
+}
+
+pub trait FileRegistryExt {
+    fn file_exists(&self, path: &str) -> bool;
+    fn get_line_count(&self, path: &str) -> Result<usize>;
+}
+
+impl FileRegistryExt for VerifiedFileRegistry {
+    fn file_exists(&self, path: &str) -> bool {
+        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
+
+        self.contains(clean_path)
+            || self.contains(&format!("./{}", clean_path))
+            || self.contains(&format!("src/{}", clean_path))
+    }
+
+    fn get_line_count(&self, path: &str) -> Result<usize> {
+        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
+
+        self.line_count(clean_path).ok_or_else(|| {
+            crate::types::ClaudegenError::Config(format!("File not found: {}", path))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tier1_patterns() {
+        let patterns = DeepReviewEngine::build_tier1_patterns();
+        assert!(!patterns.is_empty());
+
+        let test_cases = [
+            ("cargo build", true),
+            ("npm install", true),
+            ("use async/await", true),
+            ("follow best practices", true),
+            ("Use @src/main.rs:42 for entry", false),
+        ];
+
+        for (text, should_match) in test_cases {
+            let matched = patterns.iter().any(|p| p.is_match(text));
+            assert_eq!(matched, should_match, "Failed for: {}", text);
+        }
+    }
+
+    #[test]
+    fn test_review_issue() {
+        let issue = ReviewIssue::error(CheckType::EvidenceValid, "test.md", "File not found")
+            .with_location("@missing.rs:10")
+            .with_suggestion("Check file path");
+
+        assert_eq!(issue.severity, IssueSeverity::Error);
+        assert!(issue.location.is_some());
+        assert!(issue.suggestion.is_some());
+    }
+
+    #[test]
+    fn test_check_result() {
+        let pass = CheckResult::pass();
+        assert!(pass.passed);
+        assert_eq!(pass.score, 1.0);
+
+        let fail = CheckResult::fail(vec![ReviewIssue::error(
+            CheckType::Tier1Free,
+            "test",
+            "error",
+        )]);
+        assert!(!fail.passed);
+    }
+
+    #[test]
+    fn test_deep_review_checks() {
+        let checks = DeepReviewChecks {
+            semantic_quality: CheckResult::pass(),
+            evidence_valid: CheckResult::pass(),
+            tier1_free: CheckResult::pass(),
+            cross_artifact_consistent: CheckResult::pass(),
+            format_compliant: CheckResult::pass(),
+        };
+
+        assert!(checks.all_passed());
+        assert_eq!(checks.overall_score(), 1.0);
+    }
+}

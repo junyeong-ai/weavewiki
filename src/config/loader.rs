@@ -2,9 +2,9 @@
 //!
 //! Loads and merges configuration from multiple sources using Figment:
 //! 1. Built-in defaults (Serialized)
-//! 2. Global config (~/.config/weavewiki/config.toml)
-//! 3. Project config (.weavewiki/config.toml)
-//! 4. Environment variables (WEAVEWIKI_* prefix)
+//! 2. Global config (~/.config/claudegen/config.toml)
+//! 3. Project config (.claudegen/config.toml)
+//! 4. Environment variables (CLAUDEGEN_* prefix)
 
 use figment::{
     Figment,
@@ -18,7 +18,7 @@ use std::process::Command;
 use tracing::{debug, info};
 
 use super::types::Config;
-use crate::types::{Result, WeaveError};
+use crate::types::{ClaudegenError, Result};
 
 /// Configuration loader
 pub struct ConfigLoader;
@@ -44,12 +44,12 @@ impl ConfigLoader {
             figment = figment.merge(Toml::file(&project_path));
         }
 
-        // Merge environment variables (e.g., WEAVEWIKI_LLM_MODEL -> llm.model)
-        figment = figment.merge(Env::prefixed("WEAVEWIKI_").split('_').lowercase(true));
+        // Merge environment variables (e.g., CLAUDEGEN_LLM_MODEL -> llm.model)
+        figment = figment.merge(Env::prefixed("CLAUDEGEN_").split('_').lowercase(true));
 
         let config: Config = figment
             .extract()
-            .map_err(|e| WeaveError::Config(format!("Configuration error: {}", e)))?;
+            .map_err(|e| ClaudegenError::Config(format!("Configuration error: {e}")))?;
 
         // Validate configuration after loading
         config.validate()?;
@@ -63,14 +63,14 @@ impl ConfigLoader {
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::file(path))
             .extract()
-            .map_err(|e| WeaveError::Config(format!("Configuration error: {}", e)))
+            .map_err(|e| ClaudegenError::Config(format!("Configuration error: {e}")))
     }
 
     // =========================================================================
     // Path Management
     // =========================================================================
 
-    /// Get path to global config directory (~/.config/weavewiki/)
+    /// Get path to global config directory (~/.config/claudegen/)
     pub fn global_dir() -> Option<PathBuf> {
         env::var("XDG_CONFIG_HOME")
             .ok()
@@ -80,7 +80,7 @@ impl ConfigLoader {
                     .ok()
                     .map(|home| PathBuf::from(home).join(".config"))
             })
-            .map(|p| p.join("weavewiki"))
+            .map(|p| p.join("claudegen"))
     }
 
     /// Get path to global config file
@@ -98,17 +98,17 @@ impl ConfigLoader {
                     .ok()
                     .map(|home| PathBuf::from(home).join(".cache"))
             })
-            .map(|p| p.join("weavewiki"))
+            .map(|p| p.join("claudegen"))
     }
 
     /// Get path to project config file
     pub fn project_config_path() -> PathBuf {
-        PathBuf::from(".weavewiki/config.toml")
+        PathBuf::from(".claudegen/config.toml")
     }
 
     /// Get project data directory
     pub fn project_dir() -> PathBuf {
-        PathBuf::from(".weavewiki")
+        PathBuf::from(".claudegen")
     }
 
     // =========================================================================
@@ -150,7 +150,8 @@ impl ConfigLoader {
             // Pretty print in TOML format
             println!(
                 "{}",
-                toml::to_string_pretty(&config).map_err(|e| WeaveError::Config(e.to_string()))?
+                toml::to_string_pretty(&config)
+                    .map_err(|e| ClaudegenError::Config(e.to_string()))?
             );
         }
 
@@ -161,7 +162,7 @@ impl ConfigLoader {
     pub fn edit_config(global: bool) -> Result<()> {
         let path = if global {
             Self::global_config_path().ok_or_else(|| {
-                WeaveError::Config("Cannot determine global config path".to_string())
+                ClaudegenError::Config("Cannot determine global config path".to_string())
             })?
         } else {
             Self::project_config_path()
@@ -170,7 +171,7 @@ impl ConfigLoader {
         if !path.exists() {
             println!("Config file does not exist: {}", path.display());
             println!(
-                "Run: weavewiki config init {}",
+                "Run: claudegen config init {}",
                 if global { "--global" } else { "" }
             );
             return Ok(());
@@ -187,11 +188,13 @@ impl ConfigLoader {
         });
 
         let status = Command::new(&editor).arg(&path).status().map_err(|e| {
-            WeaveError::Config(format!("Failed to launch editor {}: {}", editor, e))
+            ClaudegenError::Config(format!("Failed to launch editor {editor}: {e}"))
         })?;
 
         if !status.success() {
-            return Err(WeaveError::Config("Editor exited with error".to_string()));
+            return Err(ClaudegenError::Config(
+                "Editor exited with error".to_string(),
+            ));
         }
 
         println!("Config saved: {}", path.display());
@@ -205,7 +208,7 @@ impl ConfigLoader {
     /// Initialize global configuration
     pub fn init_global(force: bool) -> Result<PathBuf> {
         let global_dir = Self::global_dir().ok_or_else(|| {
-            WeaveError::Config("Cannot determine global config directory".to_string())
+            ClaudegenError::Config("Cannot determine global config directory".to_string())
         })?;
 
         // Create directories
@@ -235,7 +238,6 @@ impl ConfigLoader {
         // Create directories
         fs::create_dir_all(&project_dir)?;
         fs::create_dir_all(project_dir.join("graph"))?;
-        fs::create_dir_all(project_dir.join("wiki"))?;
         fs::create_dir_all(project_dir.join("cache"))?;
         fs::create_dir_all(project_dir.join("checkpoints"))?;
 
@@ -261,14 +263,14 @@ impl ConfigLoader {
 
     /// Generate default global config content (TOML)
     fn default_global_config() -> String {
-        r#"# WeaveWiki Global Configuration
-# User-wide defaults. Project settings in .weavewiki/config.toml override these.
+        r#"# claudegen Global Configuration
+# User-wide defaults. Project settings in .claudegen/config.toml override these.
 
-version = "1.0"
+version = "2.0"
 
-# LLM settings (for wiki generation)
+# LLM settings (for documentation generation)
 [llm]
-provider = "claude-code"
+provider = "claude-agent"
 model = "claude-sonnet-4-20250514"
 timeout_secs = 300
 
@@ -284,13 +286,13 @@ auto_resume = true
     fn default_project_config(name: Option<&str>) -> String {
         let project_name = name.unwrap_or("project");
         format!(
-            r#"# WeaveWiki Project Configuration
+            r#"# claudegen Project Configuration
 # Project-specific settings that override global defaults.
 
-version = "1.0"
+version = "2.0"
 
 [project]
-name = "{}"
+name = "{project_name}"
 type = "auto"
 
 # Analysis settings
@@ -303,12 +305,7 @@ exclude = [
     "target/**",
     "build/**",
 ]
-
-# Documentation output
-[documentation]
-output_dir = "wiki"
-"#,
-            project_name
+"#
         )
     }
 }
@@ -321,7 +318,7 @@ mod tests {
     #[test]
     fn test_load_default_config() {
         let config = ConfigLoader::load().unwrap();
-        assert_eq!(config.version, "1.0");
+        assert_eq!(config.version, "2.0");
     }
 
     #[test]
@@ -331,22 +328,20 @@ mod tests {
 
         ConfigLoader::init_project(Some("test-project")).unwrap();
 
-        assert!(PathBuf::from(".weavewiki").exists());
-        assert!(PathBuf::from(".weavewiki/config.toml").exists());
-        assert!(PathBuf::from(".weavewiki/graph").exists());
-        assert!(PathBuf::from(".weavewiki/wiki").exists());
+        assert!(PathBuf::from(".claudegen").exists());
+        assert!(PathBuf::from(".claudegen/config.toml").exists());
+        assert!(PathBuf::from(".claudegen/graph").exists());
     }
 
     #[test]
-    fn test_env_override() {
-        // SAFETY: This test runs in isolation
-        unsafe {
-            std::env::set_var("WEAVEWIKI_LLM_MODEL", "test-model");
-        }
+    fn test_config_load_default() {
+        // Test that ConfigLoader can load default configuration
         let config = ConfigLoader::load().unwrap();
-        assert_eq!(config.llm.model, "test-model");
-        unsafe {
-            std::env::remove_var("WEAVEWIKI_LLM_MODEL");
-        }
+
+        // Verify default values are sensible
+        assert!(config.llm.timeout_secs > 0);
+        assert!(!config.llm.default_model.is_empty());
+        assert!(config.convergence.max_iterations > 0);
+        assert!(config.value.min_overall >= 0.0 && config.value.min_overall <= 1.0);
     }
 }

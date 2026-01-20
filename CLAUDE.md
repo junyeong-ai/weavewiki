@@ -1,224 +1,166 @@
-# WeaveWiki - AI Agent Developer Guide
+# claudegen
 
-Rust CLI for AI-driven codebase documentation. 6-phase multi-agent pipeline, SQLite persistence, tree-sitter parsing.
-
----
+Rust CLI that generates Claude Code plugins (CLAUDE.md, skills, agents, rules) by analyzing codebases.
 
 ## Architecture
 
 ```
 src/
-├── main.rs                    # CLI entry, command dispatch
-├── lib.rs                     # Module exports
-├── constants.rs               # Centralized constants (budget, thresholds)
-├── config/                    # AnalysisMode, ProjectScale, ModeConfig
+├── pipeline/
+│   ├── adaptive.rs       # 9-phase orchestrator: Detection→Analysis→Generation→Refinement→Validation
+│   ├── phases/           # ProjectDetection, ConventionInference, ConstraintExtraction
+│   ├── strategy/         # RefinementStrategy implementations (Semantic, Evidence, Regeneration)
+│   ├── validation/       # TierFilter, SemanticValidator, CrossArtifactValidator
+│   ├── quality_loop.rs   # Outer loop with checkpoint recovery
+│   └── learning.rs       # Cross-session pattern learning (failing_patterns, issue_patterns)
 ├── ai/
-│   ├── provider/
-│   │   ├── mod.rs             # LlmProvider trait, LlmResponse
-│   │   ├── claude_code.rs     # Default provider (subprocess)
-│   │   ├── openai.rs          # HTTP API
-│   │   ├── chain.rs           # Fallback chain with retry
-│   │   └── circuit_breaker.rs # Circuit breaker pattern
-│   ├── validation/            # Response validation
-│   │   ├── json_repair.rs     # JSON repair attempts
-│   │   ├── response.rs        # Schema validation
-│   │   └── diagram.rs         # Mermaid validation
-│   ├── budget.rs              # Token budget per phase (TALE)
-│   ├── metrics.rs             # Usage metrics collection
-│   ├── preflight.rs           # Pre-flight validation
-│   ├── timeout.rs             # Timeout management
-│   └── tokenizer.rs           # Token counting
-├── wiki/exhaustive/
-│   ├── mod.rs                 # MultiAgentPipeline orchestrator
-│   ├── checkpoint.rs          # CheckpointManager, PipelinePhase
-│   ├── session_context.rs     # Session context for prompts
-│   ├── characterization/      # Phase 1: 7 agents (Turn 1-3)
-│   ├── bottom_up/             # Phase 2-3: File analysis (Tier-based)
-│   ├── top_down/              # Phase 4: Architecture agents
-│   ├── consolidation/         # Phase 5: Domain grouping
-│   ├── refinement/            # Phase 6: Quality iteration
-│   ├── research/              # Deep Research implementation
-│   ├── documentation/         # Doc blueprint generation
-│   ├── patterns.rs            # Code pattern extraction
-│   ├── mermaid.rs             # Mermaid diagram utilities
-│   └── llms_txt.rs            # llms.txt generation
-├── analyzer/
-│   ├── parser/                # Tree-sitter (11 languages)
-│   ├── scanner/               # File scanning with gitignore
-│   └── structure.rs           # Code structure analysis
-├── storage/database.rs        # SQLite WAL, r2d2 pool
-├── types/
-│   ├── error.rs               # WeaveError, ErrorCategory
-│   └── ...                    # Domain types
-├── cli/                       # CLI commands (init, generate, query, etc.)
-└── verifier/                  # Knowledge base verification
+│   ├── provider/         # LlmProvider trait, ProviderChain with circuit breaker
+│   └── budget.rs         # Atomic token budget (CAS loop)
+├── config/types.rs       # All configuration with presets (Fast/Standard/Thorough/Exhaustive)
+└── types/                # Skill, Agent, Rule, Plugin domain types
 ```
 
----
+## Key Abstractions
 
-## Pipeline Flow
-
-```
-Characterization (Turn 1-3)
-  │ Turn 1: Structure, Dependency, EntryPoint (parallel)
-  │ Turn 2: Purpose, Technical, Terminology (parallel)
-  │ Turn 3: SectionDiscovery
-  ↓
-ProjectProfile → Bottom-Up (Leaf→Standard→Important→Core)
-  ↓
-FileInsight[] → Top-Down (Architecture, Flow, Risk, Domain)
-  ↓
-ProjectInsight[] → Consolidation (SemanticDomainGrouper)
-  ↓
-DomainInsight[] → Refinement (QualityScorer → DocGenerator)
-  ↓
-Wiki Output (.weavewiki/wiki/)
-```
-
----
-
-## Key Patterns
-
-### Adding Characterization Agent
-
+### LlmProvider (ai/provider/mod.rs:227-244)
 ```rust
-// characterization/agents/my_agent.rs
 #[async_trait]
-impl CharacterizationAgent for MyAgent {
-    fn name(&self) -> &str { "my_agent" }
-    fn turn(&self) -> u8 { 1 }  // 1, 2, or 3
-
-    async fn run(&self, ctx: &CharacterizationContext) -> Result<AgentOutput> {
-        let prompt = PromptBuilder::new()
-            .role("analyst", "your domain")
-            .objectives(vec!["Find X", "Identify Y"])
-            .build();
-
-        let response = ctx.provider.generate(&prompt, &schema).await?;
-        Ok(AgentOutput { agent_name: self.name().into(), turn: self.turn(), .. })
-    }
-}
-// Register in characterization/mod.rs agents vec
-```
-
-### Adding LLM Provider
-
-```rust
-// ai/provider/my_provider.rs
-#[async_trait]
-impl LlmProvider for MyProvider {
+pub trait LlmProvider: Send + Sync {
     async fn generate(&self, prompt: &str, schema: &Value) -> Result<LlmResponse>;
     fn name(&self) -> &str;
     fn model(&self) -> &str;
 }
-// Add to create_provider() in mod.rs
 ```
+All LLM interactions go through this trait. Providers are shared via `Arc<dyn LlmProvider>`.
 
-### Adding Language Parser
-
+### RefinementStrategy (pipeline/strategy/mod.rs:94-130)
 ```rust
-// analyzer/parser/my_lang.rs
-impl Parser for MyLangParser {
-    fn parse(&self, path: &str, content: &str) -> Result<ParseResult>;
-    fn language(&self) -> Language;
+#[async_trait]
+pub trait RefinementStrategy: Send + Sync {
+    fn name(&self) -> &str;
+    fn applicable_to(&self, issue: &IssueKind) -> bool;
+    fn priority(&self) -> u8 { 50 }
+    async fn refine_skill(&self, skill: &mut Skill, ctx: &StrategyContext) -> Result<StrategyResult>;
+    async fn refine_agent(&self, agent: &mut Agent, ctx: &StrategyContext) -> Result<StrategyResult>;
+    async fn refine_rule(&self, rule: &mut Rule, ctx: &StrategyContext) -> Result<StrategyResult>;
 }
-// Requires tree-sitter grammar in Cargo.toml
-// Add to Language enum in language.rs
 ```
+Implementations: `SemanticStrategy`, `EvidenceStrategy`, `RegenerationStrategy`
 
----
-
-## Processing Tiers (Bottom-Up)
-
+### IssueKind (pipeline/strategy/mod.rs:28-41)
 ```rust
-enum ProcessingTier {
-    Leaf = 0,      // Utilities, minimal analysis
-    Standard = 1,  // Normal depth
-    Important = 2, // Deep Research (3 turns + child context)
-    Core = 3,      // Deep Research (4 turns + child context)
+pub enum IssueKind {
+    LowActionability,    // Lacks clear action items
+    TooGeneric,          // Not project-specific
+    WeakEvidence,        // Missing @file:line refs
+    MissingReferences,   // Expected refs not found
+    Shallow,             // Lacks depth
+    Tier1Content,        // Generic knowledge (rejected)
+    MissingModule,       // Key module not covered
+    // ...
 }
-// Deep Research: Plan → Update1 → Update2 (Core only) → Synthesis
 ```
 
----
+## Critical Constraints
 
-## Token Budget Allocation
-
+### Provider Sharing
 ```rust
-// constants.rs - TALE algorithm (single source of truth)
-PhaseAllocations {
-    characterization: 5%,   // 7 agents project profiling
-    bottom_up: 50%,         // All file analysis (largest portion)
-    top_down: 10%,          // 4 agents project-level analysis
-    consolidation: 20%,     // Per-domain AI synthesis
-    refinement: 15%,        // Quality improvement passes
+// MUST share via Arc::clone (rate limit counter is per-instance)
+let provider = Arc::clone(&shared_provider);
+
+// WRONG: New instance loses rate limit state
+let provider = OpenAiProvider::new(config);
+```
+
+### Budget Atomicity (ai/budget.rs:34-54)
+```rust
+// Uses CAS loop for thread-safe consumption
+pub fn consume(&self, tokens: u64) -> Result<()> {
+    loop {
+        let current = self.consumed.load(Ordering::Acquire);
+        if current + tokens > self.total_budget {
+            return Err(ClaudegenError::Budget { ... });
+        }
+        if self.consumed.compare_exchange_weak(current, current + tokens, ...).is_ok() {
+            return Ok(());
+        }
+    }
 }
-// Dynamic reallocation when phase completes early
 ```
 
----
-
-## Database Schema
-
-```sql
--- storage/schema.sql (key tables)
-doc_sessions (id, project_path, status, current_phase, checkpoint_data, project_profile)
-file_checkpoints (session_id, file_path, insight_json)
-agent_insights (session_id, agent_name, turn, output_json)
-```
-
----
-
-## Error Categories
-
+### OnceCell for File Registry (pipeline/adaptive.rs:68,85-92)
 ```rust
-// types/error.rs - ErrorCategory enum
-RateLimit    → Retry with exponential backoff
-TokenLimit   → Reduce context or fallback provider
-Auth         → Fail fast
-Network      → Retry with backoff
-ParseError   → JSON repair attempt (ai/validation/)
+// Expensive to build - cache with OnceCell
+file_registry: OnceCell<VerifiedFileRegistry>
+
+async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
+    self.file_registry.get_or_try_init(|| async {
+        VerifiedFileRegistry::build(&self.project_root).await
+    }).await.cloned()
+}
 ```
 
----
-
-## Constants
-
-| Location | Constant | Value |
-|----------|----------|-------|
-| `constants.rs` | DEFAULT_BUDGET | 1,000,000 tokens |
-| `constants.rs` | WARNING_THRESHOLD | 75% |
-| `constants.rs` | CRITICAL_THRESHOLD | 90% |
-| `constants.rs` | MAX_CHILD_CONTEXT_TOKENS | 2000 |
-| `constants.rs` | FAILURE_THRESHOLD | 5 |
-
----
-
-## Common Tasks
-
-### Resume Interrupted Session
+### HashMap Bounds (pipeline/learning.rs:201-237)
 ```rust
-let checkpoint = pipeline.load_checkpoint()?;
-pipeline.resume(checkpoint).await?;
+// MUST bound all learning HashMaps to prevent unbounded growth
+if self.failing_patterns.len() >= self.config.max_patterns {
+    self.prune_oldest_failing_patterns();  // Removes bottom 10% by age
+}
 ```
 
-### Debug LLM Calls
-```bash
-RUST_LOG=debug cargo run -- generate
-```
+### Config Validation (config/types.rs:186-271)
+Required invariants:
+- `quality.minimum_quality <= quality.target`
+- `deep_review.max_attempts >= deep_review.required_passes`
+- `retry.backoff_factor >= 1.0`
+- `execution.parallel_workers > 0`
 
-### Inspect Checkpoints
-```bash
-sqlite3 .weavewiki/weavewiki.db "SELECT * FROM doc_sessions"
-```
+## Content Value Classification
 
----
+| Tier | Definition | Action |
+|------|------------|--------|
+| Tier 1 | Generic language/tool knowledge | **REJECT** |
+| Tier 2 | Project conventions | Keep |
+| Tier 3 | Hidden constraints, gotchas | **Essential** |
 
-## Test Commands
+Examples:
+- Tier 1 (reject): "Use `cargo build`", "Prefer `async/await`"
+- Tier 2 (keep): "Controllers in `adapter/inbound/web/`"
+- Tier 3 (essential): "Provider must be Arc-shared for rate limit tracking"
 
-```bash
-cargo test                    # 267 tests
-cargo clippy -- -D warnings   # Lint
-cargo fmt --check             # Format check
-cargo build --release         # Release build
-```
+## Error Handling (types/error.rs:35-80)
+
+| Category | Retry | Fallback | Action |
+|----------|-------|----------|--------|
+| RateLimit | Yes | No | Parse retry-after header |
+| TokenLimit | No | Yes | Try next provider |
+| Auth | No | No | Fail fast |
+| Network | Yes | No | Exponential backoff |
+| Unavailable | No | Yes | Try next provider |
+
+## Configuration Presets (config/types.rs:17-68)
+
+| Preset | Model | Quality Target | Strategy |
+|--------|-------|----------------|----------|
+| Fast | Haiku | 0.80 | 3 iterations, 1 review pass |
+| Standard | Sonnet | 0.85 | 10 iterations, 2 review passes |
+| Thorough | Sonnet | 0.90 | 20 iterations, 2 review passes |
+| Exhaustive | Opus | 0.95 | Long-running (weeks), 3 review passes |
+
+Config resolution: defaults → `~/.config/claudegen/config.toml` → `.claudegen/config.toml` → `CLAUDEGEN_*` env vars
+
+## Extension Points
+
+**Add new refinement strategy:**
+1. Create `src/pipeline/strategy/{name}.rs`
+2. Implement `RefinementStrategy` trait
+3. Add to `RefinementStrategyType` enum in `config/types.rs`
+4. Register in `StrategyRotator::new()` at `pipeline/strategy/mod.rs:141-146`
+
+**Add new validation:**
+1. Create validator in `src/pipeline/validation/`
+2. Call from `AdaptivePipeline::run()` final validation phase (adaptive.rs:380-410)
+
+**Add new analysis phase:**
+1. Create phase in `src/pipeline/phases/`
+2. Integrate into `AdaptivePipeline::run()` (adaptive.rs:122-437)

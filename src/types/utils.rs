@@ -62,21 +62,6 @@ pub fn json_f64(value: &serde_json::Value, key: &str, default: f64) -> f64 {
 }
 
 // =============================================================================
-// String Utilities
-// =============================================================================
-
-/// Capitalize the first character of a string.
-/// Used for formatting purpose statements and titles.
-#[inline]
-pub fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-    }
-}
-
-// =============================================================================
 // Type Parsing
 // =============================================================================
 
@@ -216,124 +201,22 @@ pub fn log_filter_warn<T, E: Display>(result: Result<T, E>, context: &str) -> Op
     }
 }
 
-// =============================================================================
-// Token Estimation
-// =============================================================================
-
-/// Token estimation configuration for different content types
-#[derive(Debug, Clone, Copy)]
-pub struct TokenEstimator {
-    /// Characters per token for ASCII text (default: 4.0)
-    pub ascii_chars_per_token: f32,
-    /// Characters per token for non-ASCII (CJK, etc.) (default: 1.5)
-    pub non_ascii_chars_per_token: f32,
-    /// Extra tokens per line for code structure (default: 0.5)
-    pub code_overhead_per_line: f32,
-}
-
-impl Default for TokenEstimator {
-    fn default() -> Self {
-        Self {
-            ascii_chars_per_token: 4.0,
-            non_ascii_chars_per_token: 1.5,
-            code_overhead_per_line: 0.5,
-        }
-    }
-}
-
-impl TokenEstimator {
-    /// Create estimator optimized for code
-    pub fn for_code() -> Self {
-        Self {
-            ascii_chars_per_token: 3.5, // Code has more short tokens (operators, brackets)
-            non_ascii_chars_per_token: 1.5,
-            code_overhead_per_line: 0.8, // More structural tokens
-        }
-    }
-
-    /// Estimate token count for content
-    pub fn estimate(&self, content: &str) -> usize {
-        if content.is_empty() {
-            return 0;
-        }
-
-        let mut ascii_chars = 0usize;
-        let mut non_ascii_chars = 0usize;
-
-        for c in content.chars() {
-            if c.is_ascii() {
-                ascii_chars += 1;
-            } else {
-                non_ascii_chars += 1;
-            }
-        }
-
-        let line_count = content.lines().count();
-        let code_overhead = (line_count as f32 * self.code_overhead_per_line) as usize;
-
-        let ascii_tokens = (ascii_chars as f32 / self.ascii_chars_per_token) as usize;
-        let non_ascii_tokens = (non_ascii_chars as f32 / self.non_ascii_chars_per_token) as usize;
-
-        ascii_tokens + non_ascii_tokens + code_overhead
-    }
-}
-
-/// Estimate token count from content (convenience function)
+/// Check if a string is valid kebab-case format.
 ///
-/// Uses default estimator settings. For code-specific estimation,
-/// use `TokenEstimator::for_code().estimate(content)`.
+/// Valid kebab-case:
+/// - Contains only lowercase letters, digits, and hyphens
+/// - Does not start or end with a hyphen
+/// - Does not contain consecutive hyphens
 #[inline]
-pub fn estimate_tokens(content: &str) -> usize {
-    TokenEstimator::default().estimate(content)
+pub fn is_kebab_case(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--")
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// Estimate tokens specifically for code content
-#[inline]
-pub fn estimate_code_tokens(content: &str) -> usize {
-    TokenEstimator::for_code().estimate(content)
-}
-
-/// Truncate content to fit within token limit
-///
-/// Preserves paragraph boundaries when possible, falls back to line boundaries.
-pub fn truncate_to_token_limit(content: &str, max_tokens: usize) -> String {
-    let estimated = estimate_tokens(content);
-    if estimated <= max_tokens {
-        return content.to_string();
-    }
-
-    // Estimate character budget based on token ratio
-    let ratio = max_tokens as f64 / estimated as f64;
-    let max_chars = (content.len() as f64 * ratio * 0.95) as usize; // 5% buffer
-
-    if max_chars >= content.len() {
-        return content.to_string();
-    }
-
-    let truncated = &content[..max_chars.min(content.len())];
-
-    // Try to break at paragraph boundary
-    if let Some(pos) = truncated.rfind("\n\n") {
-        return format!(
-            "{}...\n\n*[Content truncated due to token budget]*",
-            &content[..pos]
-        );
-    }
-
-    // Fall back to line boundary
-    if let Some(pos) = truncated.rfind('\n') {
-        return format!(
-            "{}...\n\n*[Content truncated due to token budget]*",
-            &content[..pos]
-        );
-    }
-
-    // Last resort: hard truncation
-    format!(
-        "{}...\n\n*[Content truncated due to token budget]*",
-        truncated
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -351,52 +234,5 @@ mod tests {
     fn test_enum_to_str_edge_type() {
         assert_eq!(enum_to_str(&EdgeType::DependsOn), "depends_on");
         assert_eq!(enum_to_str(&EdgeType::Owns), "owns");
-    }
-
-    #[test]
-    fn test_estimate_tokens_empty() {
-        assert_eq!(estimate_tokens(""), 0);
-    }
-
-    #[test]
-    fn test_estimate_tokens_ascii() {
-        // 12 ASCII chars / 4.0 + 1 line * 0.5 = 3 + 0 = 3
-        let result = estimate_tokens("hello world!");
-        assert!(result > 0);
-        assert!(result < 10);
-    }
-
-    #[test]
-    fn test_estimate_tokens_non_ascii() {
-        // Non-ASCII uses 1.5 chars/token, should produce higher token-per-char ratio
-        let korean = estimate_tokens("안녕하세요");
-
-        // 5 Korean characters should estimate to meaningful token count
-        assert!(korean > 0);
-        assert!(korean >= 3); // At least 5 chars / 1.5 = ~3 tokens
-    }
-
-    #[test]
-    fn test_estimate_code_tokens() {
-        let code = "fn main() {\n    println!(\"hello\");\n}";
-        let code_estimate = estimate_code_tokens(code);
-        let text_estimate = estimate_tokens(code);
-
-        // Code estimator should give higher estimate due to structural overhead
-        assert!(code_estimate >= text_estimate);
-    }
-
-    #[test]
-    fn test_truncate_to_token_limit_no_truncation() {
-        let content = "Short content.";
-        let result = truncate_to_token_limit(content, 1000);
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn test_truncate_to_token_limit_with_truncation() {
-        let content = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
-        let result = truncate_to_token_limit(content, 5);
-        assert!(result.contains("truncated"));
     }
 }

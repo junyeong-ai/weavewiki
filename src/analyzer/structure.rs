@@ -319,7 +319,7 @@ impl<'a> StructureAnalyzer<'a> {
                 };
 
                 Ok(CodeCluster {
-                    id: format!("cluster:{}", root),
+                    id: format!("cluster:{root}"),
                     root_directory: root,
                     node_count: 0, // Would need separate query
                     internal_edges: internal,
@@ -368,7 +368,7 @@ impl<'a> StructureAnalyzer<'a> {
                 conn.prepare("SELECT path FROM nodes WHERE node_type = 'file' AND path LIKE ?")?;
 
             let paths: Vec<String> = stmt
-                .query_map([format!("%{}", pattern)], |row| row.get(0))?
+                .query_map([format!("%{pattern}")], |row| row.get(0))?
                 .filter_map(|r| log_filter_error(r, "reading build marker path"))
                 .collect();
 

@@ -1,13 +1,6 @@
 //! AI Response Validation and Quality Assurance
 //!
-//! Comprehensive validation layer for LLM responses ensuring:
-//! - Structural integrity (required fields, valid enums)
-//! - JSON repair for malformed responses
-//! - Mermaid diagram syntax validation (CodeWiki-style strict checking)
-//!
-//! ## Design Philosophy
-//! - Fail fast on structural errors, repair on format issues
-//! - Strict diagram validation: fail loudly on invalid diagrams
+//! Comprehensive validation layer for LLM responses.
 
 mod diagram;
 mod json_repair;
@@ -18,7 +11,7 @@ pub use diagram::{
     validate_mermaid,
 };
 pub use json_repair::{JsonRepairer, extract_json_from_response, extract_json_with_repair_status};
-pub use response::{IssueSeverity, ResponseValidator, ValidationIssue, ValidationResult};
+pub use response::{ResponseValidationResult, ResponseValidator};
 
 use crate::types::Result;
 use serde_json::Value;
@@ -43,17 +36,8 @@ impl ValidationPipeline {
         }
     }
 
-    /// Process raw LLM response through full validation pipeline
-    ///
-    /// Steps:
-    /// 1. Attempt JSON repair if malformed
-    /// 2. Validate structure and required fields
-    /// 3. Return validated response
     pub fn process(&self, raw_response: &str) -> Result<ProcessedResponse> {
-        // Step 1: Parse/repair JSON
         let (value, was_repaired) = self.repairer.parse_or_repair(raw_response)?;
-
-        // Step 2: Validate structure
         let validation = self.validator.validate_batch_response(&value);
 
         Ok(ProcessedResponse {
@@ -63,38 +47,29 @@ impl ValidationPipeline {
         })
     }
 
-    /// Quick validation check without full processing
-    pub fn validate_only(&self, value: &Value) -> ValidationResult {
+    pub fn validate_only(&self, value: &Value) -> ResponseValidationResult {
         self.validator.validate_batch_response(value)
     }
 }
 
-/// Result of full validation pipeline
 #[derive(Debug)]
 pub struct ProcessedResponse {
-    /// Parsed (and possibly repaired) JSON value
     pub value: Value,
-    /// Whether JSON repair was needed
     pub was_repaired: bool,
-    /// Validation result with issues
-    pub validation: ValidationResult,
+    pub validation: ResponseValidationResult,
 }
 
 impl ProcessedResponse {
-    /// Check if response is usable (may have warnings but no errors)
     pub fn is_usable(&self) -> bool {
         self.validation.is_acceptable()
     }
 
-    /// Get list of all issues (validation + quality)
     pub fn all_issues(&self) -> Vec<String> {
-        let mut issues = Vec::new();
-
-        for issue in &self.validation.issues {
-            issues.push(format!("[{}] {}", issue.severity, issue.message));
-        }
-
-        issues
+        self.validation
+            .issues
+            .iter()
+            .map(|issue| format!("[{}] {}: {}", issue.severity, issue.code, issue.message))
+            .collect()
     }
 }
 
@@ -134,8 +109,6 @@ mod tests {
     #[test]
     fn test_pipeline_repairs_json() {
         let pipeline = ValidationPipeline::new();
-
-        // Missing closing brace
         let malformed = r#"{"files": [{"path": "test.rs", "sections": []}]"#;
 
         let result = pipeline.process(malformed).unwrap();

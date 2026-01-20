@@ -3,8 +3,9 @@ use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 use super::{Language, ParseResult, Parser, create_file_node, create_ts_parser, get_node_text};
 use crate::types::{
-    Edge, EdgeMetadata, EdgeType, EvidenceLocation, FunctionSignature, ImportType, InformationTier,
-    Node, NodeId, NodeMetadata, NodeStatus, NodeType, Parameter, Result, Visibility, WeaveError,
+    ClaudegenError, Edge, EdgeMetadata, EdgeType, EvidenceLocation, FunctionSignature, ImportType,
+    InformationTier, Node, NodeId, NodeMetadata, NodeStatus, NodeType, Parameter, Result,
+    Visibility,
 };
 
 pub struct RustParser;
@@ -22,7 +23,7 @@ impl Parser for RustParser {
         let mut parser =
             create_ts_parser(tree_sitter_rust::LANGUAGE, "Rust").map_err(|mut e| {
                 // Update error path to current file being parsed
-                if let crate::types::WeaveError::Parse {
+                if let crate::types::ClaudegenError::Parse {
                     path: ref mut p, ..
                 } = e
                 {
@@ -33,7 +34,7 @@ impl Parser for RustParser {
 
         let tree = parser
             .parse(content, None)
-            .ok_or_else(|| WeaveError::Parse {
+            .ok_or_else(|| ClaudegenError::Parse {
                 message: "Failed to parse Rust file".to_string(),
                 path: path.to_string(),
             })?;
@@ -83,7 +84,7 @@ fn extract_use_statements(
 
                 if use_path.starts_with("crate::") || use_path.starts_with("super::") {
                     let edge = Edge {
-                        id: format!("use:{}:{}", path, use_path),
+                        id: format!("use:{path}:{use_path}"),
                         edge_type: EdgeType::DependsOn,
                         source_id: NodeId::file(path).into_inner(),
                         target_id: NodeId::module(use_path).into_inner(),
@@ -131,7 +132,7 @@ fn extract_mod_declarations(
                 let name = get_node_text(node, content.as_bytes()).to_string();
 
                 let mod_node = Node {
-                    id: format!("module:{}:{}", path, name),
+                    id: format!("module:{path}:{name}"),
                     node_type: NodeType::Module,
                     path: path.to_string(),
                     name: name.clone(),
@@ -218,7 +219,7 @@ fn extract_enums(root: tree_sitter::Node, content: &str, path: &str, result: &mu
                 let visibility = detect_visibility(node.parent(), content);
 
                 let enum_node = Node {
-                    id: format!("enum:{}:{}", path, name),
+                    id: format!("enum:{path}:{name}"),
                     node_type: NodeType::Enum,
                     path: path.to_string(),
                     name: name.clone(),
@@ -261,7 +262,7 @@ fn extract_traits(root: tree_sitter::Node, content: &str, path: &str, result: &m
                 let name = get_node_text(node, content.as_bytes()).to_string();
 
                 let trait_node = Node {
-                    id: format!("trait:{}:{}", path, name),
+                    id: format!("trait:{path}:{name}"),
                     node_type: NodeType::Interface,
                     path: path.to_string(),
                     name: name.clone(),
@@ -402,10 +403,10 @@ fn extract_impl_blocks(
 
             if let (Some(trait_name), Some(node)) = (impl_trait, node_ref) {
                 let edge = Edge {
-                    id: format!("impl:{}:{}:{}", path, impl_type, trait_name),
+                    id: format!("impl:{path}:{impl_type}:{trait_name}"),
                     edge_type: EdgeType::Implements,
                     source_id: NodeId::class(path, &impl_type).into_inner(),
-                    target_id: format!("trait:{}", trait_name),
+                    target_id: format!("trait:{trait_name}"),
                     metadata: EdgeMetadata::default(),
                     evidence: EvidenceLocation {
                         file: path.to_string(),

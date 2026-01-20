@@ -14,10 +14,8 @@ use super::{
     LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, TokenUsage,
 };
 use crate::ai::validation::extract_json_from_response;
-use crate::types::{Result, WeaveError};
-
-const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
-const DEFAULT_MODEL: &str = "gpt-4-turbo-preview";
+use crate::constants::provider::openai as openai_constants;
+use crate::types::{ClaudegenError, Result};
 
 /// OpenAI API Provider with secure API key handling
 pub struct OpenAiProvider {
@@ -48,7 +46,7 @@ impl OpenAiProvider {
             .api_key
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .ok_or_else(|| {
-                WeaveError::Config(
+                ClaudegenError::Config(
                     "OpenAI API key not found. Set OPENAI_API_KEY env var or provide in config"
                         .to_string(),
                 )
@@ -56,14 +54,16 @@ impl OpenAiProvider {
 
         let api_base = config
             .api_base
-            .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
+            .unwrap_or_else(|| openai_constants::DEFAULT_BASE_URL.to_string());
 
-        let model = config.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let model = config
+            .model
+            .unwrap_or_else(|| openai_constants::DEFAULT_MODEL.to_string());
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
-            .map_err(|e| WeaveError::LlmApi(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ClaudegenError::LlmApi(format!("Failed to create HTTP client: {e}")))?;
 
         Ok(Self {
             api_key: SecretString::from(api_key_str),
@@ -90,8 +90,7 @@ impl OpenAiProvider {
                 }
             };
             format!(
-                "You are a code documentation expert. Always respond with valid JSON matching this schema:\n\n```json\n{}\n```\n\nRespond ONLY with valid JSON, no explanation.",
-                schema_str
+                "You are a code documentation expert. Always respond with valid JSON matching this schema:\n\n```json\n{schema_str}\n```\n\nRespond ONLY with valid JSON, no explanation."
             )
         };
 
@@ -141,23 +140,22 @@ impl LlmProvider for OpenAiProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| WeaveError::LlmApi(format!("OpenAI request failed: {}", e)))?;
+            .map_err(|e| ClaudegenError::LlmApi(format!("OpenAI request failed: {e}")))?;
 
         let elapsed = start_time.elapsed();
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(WeaveError::LlmApi(format!(
-                "OpenAI API error ({}): {}",
-                status, body
+            return Err(ClaudegenError::LlmApi(format!(
+                "OpenAI API error ({status}): {body}"
             )));
         }
 
         let response_body: ChatCompletionResponse = response
             .json()
             .await
-            .map_err(|e| WeaveError::LlmApi(format!("Failed to parse OpenAI response: {}", e)))?;
+            .map_err(|e| ClaudegenError::LlmApi(format!("Failed to parse OpenAI response: {e}")))?;
 
         // Extract token usage
         let usage = response_body
@@ -169,7 +167,7 @@ impl LlmProvider for OpenAiProvider {
             .choices
             .first()
             .and_then(|c| c.message.content.as_ref())
-            .ok_or_else(|| WeaveError::LlmApi("No content in OpenAI response".to_string()))?;
+            .ok_or_else(|| ClaudegenError::LlmApi("No content in OpenAI response".to_string()))?;
 
         debug!("Received response from OpenAI, parsing JSON");
         let content = extract_json_from_response(content_str)?;

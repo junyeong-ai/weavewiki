@@ -148,10 +148,10 @@ impl<'a> GraphStore<'a> {
         let status = NodeStatus::parse_or_default(&status_str);
 
         let metadata: NodeMetadata = serde_json::from_str(&metadata_str).map_err(|e| {
-            crate::types::WeaveError::Storage(format!("Invalid node metadata for {}: {}", id, e))
+            crate::types::ClaudegenError::Storage(format!("Invalid node metadata for {id}: {e}"))
         })?;
         let evidence: EvidenceLocation = serde_json::from_str(&evidence_str).map_err(|e| {
-            crate::types::WeaveError::Storage(format!("Invalid node evidence for {}: {}", id, e))
+            crate::types::ClaudegenError::Storage(format!("Invalid node evidence for {id}: {e}"))
         })?;
 
         let last_verified = chrono::DateTime::parse_from_rfc3339(&last_verified_str)

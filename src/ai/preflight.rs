@@ -1,7 +1,6 @@
 //! Pre-flight Validation Checks
 //!
 //! Validates system state before expensive operations.
-//! Based on deepwiki-open's pre-validation pattern.
 //!
 //! ## Checks
 //!
@@ -211,13 +210,14 @@ impl PreflightCheck {
         }
 
         let passed = inaccessible.is_empty();
+        const MAX_ERROR_SAMPLES: usize = 5;
         let message = if passed {
             format!("All {} files accessible", files.len())
         } else {
             format!(
                 "{} files not accessible: {:?}",
                 inaccessible.len(),
-                inaccessible.iter().take(5).collect::<Vec<_>>()
+                inaccessible.iter().take(MAX_ERROR_SAMPLES).collect::<Vec<_>>()
             )
         };
 
@@ -267,11 +267,12 @@ impl PreflightCheck {
             files.len()
         );
 
+        const MAX_WARNING_SAMPLES: usize = 3;
         let warning = if !oversized_files.is_empty() {
             Some(format!(
                 "{} files exceed 50% of batch budget: {:?}",
                 oversized_files.len(),
-                oversized_files.iter().take(3).collect::<Vec<_>>()
+                oversized_files.iter().take(MAX_WARNING_SAMPLES).collect::<Vec<_>>()
             ))
         } else {
             None
@@ -296,7 +297,7 @@ impl PreflightCheck {
     /// Check for large files that may cause issues
     fn check_large_files(&self, files: &[(String, String)], result: &mut PreflightResult) {
         let large_threshold = 500; // lines
-        let very_large_threshold = 2000;
+        let very_large_threshold = 2000; // lines
 
         let mut large_files = Vec::new();
         let mut very_large_files = Vec::new();
@@ -310,12 +311,13 @@ impl PreflightCheck {
             }
         }
 
+        const MAX_WARNING_SAMPLES: usize = 3;
         if !very_large_files.is_empty() {
             result.add_warning(format!(
                 "{} very large files (>{}lines): {:?}",
                 very_large_files.len(),
                 very_large_threshold,
-                very_large_files.iter().take(3).collect::<Vec<_>>()
+                very_large_files.iter().take(MAX_WARNING_SAMPLES).collect::<Vec<_>>()
             ));
             result.add_recommendation(
                 "Consider enabling deep analysis for very large files".to_string(),
@@ -363,11 +365,11 @@ impl PreflightCheck {
         let parent_writable = db_path.parent().map(|p| p.exists()).unwrap_or(false);
 
         let (passed, message) = if exists {
-            (true, format!("Database exists: {:?}", db_path))
+            (true, format!("Database exists: {db_path:?}"))
         } else if parent_writable {
-            (true, format!("Database will be created: {:?}", db_path))
+            (true, format!("Database will be created: {db_path:?}"))
         } else {
-            (false, format!("Cannot create database: {:?}", db_path))
+            (false, format!("Cannot create database: {db_path:?}"))
         };
 
         result.add_check(CheckResult {

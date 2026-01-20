@@ -6,7 +6,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use weavewiki::analyzer::parser::language::{Language, detect_language};
+//! use claudegen::analyzer::parser::language::{Language, detect_language};
 //!
 //! // Using the enum
 //! let lang = Language::from_path("src/main.rs");
@@ -514,7 +514,7 @@ impl FromStr for Language {
 /// # Examples
 ///
 /// ```rust,ignore
-/// use weavewiki::analyzer::parser::language::detect_language;
+/// use claudegen::analyzer::parser::language::detect_language;
 ///
 /// assert_eq!(detect_language("main.rs"), Some("rust"));
 /// assert_eq!(detect_language("app.py"), Some("python"));
