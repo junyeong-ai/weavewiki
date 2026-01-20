@@ -72,6 +72,19 @@ pub const VALUE_INDICATORS: &[&str] = &[
     "rationale",
 ];
 
+/// Minimal generic patterns for quick structural checks
+/// Full content-based tier classification is handled by HybridClassifier
+pub const GENERIC_COMMANDS: &[&str] = &[
+    "cargo build",
+    "cargo test",
+    "npm install",
+    "npm run",
+    "pip install",
+    "go build",
+    "docker run",
+    "git commit",
+];
+
 pub fn count_file_refs(content: &str) -> usize {
     FILE_REF.captures_iter(content).count()
 }
@@ -84,14 +97,6 @@ pub fn count_code_examples(content: &str) -> usize {
     CODE_EXAMPLE_PATTERN.find_iter(content).count()
 }
 
-pub fn has_actionable_language(content: &str) -> bool {
-    ACTIONABLE_PATTERN.is_match(content)
-}
-
-pub fn has_generic_language(content: &str) -> bool {
-    GENERIC_PATTERN.is_match(content)
-}
-
 pub fn count_tier3_indicators(content: &str) -> usize {
     let lower = content.to_lowercase();
     TIER3_INDICATORS.iter().filter(|i| lower.contains(*i)).count()
@@ -100,6 +105,34 @@ pub fn count_tier3_indicators(content: &str) -> usize {
 pub fn count_value_indicators(content: &str) -> usize {
     let lower = content.to_lowercase();
     VALUE_INDICATORS.iter().filter(|i| lower.contains(*i)).count()
+}
+
+pub fn count_generic_patterns(content: &str) -> usize {
+    let lower = content.to_lowercase();
+    GENERIC_COMMANDS.iter().filter(|c| lower.contains(*c)).count()
+}
+
+/// Extract all file references from content (paths only, no line numbers)
+/// Returns list of paths like "src/main.rs"
+pub fn extract_file_refs(content: &str) -> Vec<String> {
+    FILE_REF
+        .captures_iter(content)
+        .filter_map(|cap| cap.get(1))
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+/// Extract file references with line numbers only
+/// Returns tuples of (path, line_number)
+pub fn extract_file_line_refs(content: &str) -> Vec<(String, u32)> {
+    FILE_LINE_REF
+        .captures_iter(content)
+        .filter_map(|cap| {
+            let path = cap.get(1)?.as_str().to_string();
+            let line = cap.get(2)?.as_str().parse().ok()?;
+            Some((path, line))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -142,5 +175,23 @@ mod tests {
     fn test_tier3_indicators() {
         assert_eq!(count_tier3_indicators("race condition detected"), 1);
         assert_eq!(count_tier3_indicators("normal code"), 0);
+    }
+
+    #[test]
+    fn test_extract_file_refs() {
+        let content = "See @src/main.rs:10 and @src/lib.rs for details";
+        let refs = extract_file_refs(content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], "src/main.rs");
+        assert_eq!(refs[1], "src/lib.rs");
+    }
+
+    #[test]
+    fn test_extract_file_line_refs() {
+        let content = "See @src/main.rs:42 and @src/lib.rs:100 for details";
+        let refs = extract_file_line_refs(content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], ("src/main.rs".to_string(), 42));
+        assert_eq!(refs[1], ("src/lib.rs".to_string(), 100));
     }
 }

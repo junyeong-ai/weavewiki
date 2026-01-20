@@ -81,18 +81,12 @@ impl PhaseProviderFactory {
     pub fn get_phase_config(&self, phase: Phase) -> PhaseProviderConfig {
         let default_timeout = self.config.llm.timeout_secs;
 
-        if let Some(phases) = &self.config.llm.phases {
-            let model = match phase {
-                Phase::ProjectDetection => phases.project_detection.clone(),
-                Phase::ConventionInference => phases.convention_inference.clone(),
-                Phase::ConstraintExtraction => phases.constraint_extraction.clone(),
-                Phase::Generation => phases.generation.clone(),
-                Phase::Verification => phases.verification.clone(),
-            };
-            PhaseProviderConfig::new(&model, default_timeout)
-        } else {
-            PhaseProviderConfig::new(&self.config.llm.default_model, default_timeout)
-        }
+        // Use tier-based model selection:
+        // - Fast (Haiku): detection, convention inference
+        // - Performance (Opus): constraint extraction (critical analysis)
+        // - Balanced (Sonnet): generation, verification
+        let model = self.config.llm.model_for_phase(phase.as_str());
+        PhaseProviderConfig::new(model, default_timeout)
     }
 
     pub fn budget(&self) -> &SharedBudget {
@@ -108,7 +102,6 @@ impl PhaseProviderFactory {
 mod tests {
     use super::*;
     use crate::ai::create_shared_budget;
-    use crate::config::PhaseModels;
 
     #[test]
     fn test_phase_as_str() {
@@ -117,24 +110,36 @@ mod tests {
     }
 
     #[test]
-    fn test_get_phase_config() {
+    fn test_default_config_uses_default_model() {
         let config = Config::default();
         let budget = create_shared_budget(1_000_000);
         let factory = PhaseProviderFactory::new(config, budget);
 
-        // When phases are not configured, all phases use the default model
-        let detection_config = factory.get_phase_config(Phase::ProjectDetection);
-        assert!(detection_config.model.contains("sonnet"));
+        // Without tier config, all phases use default_model
+        let detection = factory.get_phase_config(Phase::ProjectDetection);
+        let extraction = factory.get_phase_config(Phase::ConstraintExtraction);
+        let generation = factory.get_phase_config(Phase::Generation);
 
-        let extraction_config = factory.get_phase_config(Phase::ConstraintExtraction);
-        assert!(extraction_config.model.contains("sonnet"));
+        assert_eq!(detection.model, extraction.model);
+        assert_eq!(extraction.model, generation.model);
+        assert!(detection.model.contains("sonnet"));
+    }
 
-        // Test with custom phases
-        let mut config_with_phases = Config::default();
-        config_with_phases.llm.phases = Some(PhaseModels::default());
-        let factory2 = PhaseProviderFactory::new(config_with_phases, create_shared_budget(1_000_000));
+    #[test]
+    fn test_tier_config_overrides() {
+        let mut config = Config::default();
+        config.llm.fast_model = Some("claude-haiku-4-5-20251001".into());
+        config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
+        let budget = create_shared_budget(1_000_000);
+        let factory = PhaseProviderFactory::new(config, budget);
 
-        let detection_config2 = factory2.get_phase_config(Phase::ProjectDetection);
-        assert!(detection_config2.model.contains("haiku"));
+        let detection = factory.get_phase_config(Phase::ProjectDetection);
+        assert!(detection.model.contains("haiku"));
+
+        let extraction = factory.get_phase_config(Phase::ConstraintExtraction);
+        assert!(extraction.model.contains("opus"));
+
+        let generation = factory.get_phase_config(Phase::Generation);
+        assert!(generation.model.contains("sonnet"));
     }
 }

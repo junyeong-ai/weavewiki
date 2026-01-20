@@ -2,10 +2,71 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{ArtifactClassification, TierClassification, ValueScore};
+use super::ValueScore;
 
-// Re-export BusinessRuleType from config (single source of truth)
 pub use crate::config::BusinessRuleType;
+
+/// Tier classification for value assessment
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TierClassification {
+    /// Reject: Generic knowledge AI already knows
+    Tier0,
+    /// Low value: Can be found in code structure
+    Tier1,
+    /// Medium value: Requires analysis to discover
+    Tier2,
+    /// High value: Hidden knowledge, prevents mistakes
+    Tier3,
+}
+
+impl TierClassification {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tier0 => "tier0",
+            Self::Tier1 => "tier1",
+            Self::Tier2 => "tier2",
+            Self::Tier3 => "tier3",
+        }
+    }
+
+    pub fn as_priority(&self) -> u8 {
+        match self {
+            Self::Tier0 => 0,
+            Self::Tier1 => 1,
+            Self::Tier2 => 2,
+            Self::Tier3 => 3,
+        }
+    }
+
+    pub fn value_multiplier(&self) -> f32 {
+        match self {
+            Self::Tier0 => 0.0,
+            Self::Tier1 => 0.3,
+            Self::Tier2 => 0.6,
+            Self::Tier3 => 1.0,
+        }
+    }
+}
+
+/// Target artifact classification
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtifactClassification {
+    ClaudeMd,
+    Rules,
+    Skills,
+    Agents,
+}
+
+impl ArtifactClassification {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClaudeMd => "claude_md",
+            Self::Rules => "rules",
+            Self::Skills => "skills",
+            Self::Agents => "agents",
+        }
+    }
+}
 
 // ============================================================================
 // Keyword Matching Utilities

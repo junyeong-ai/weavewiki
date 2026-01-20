@@ -4,6 +4,7 @@
 
 pub mod budget;
 pub mod metrics;
+pub mod model_capabilities;
 pub mod preflight;
 pub mod prompt;
 pub mod provider;
@@ -15,13 +16,16 @@ pub use budget::{BudgetStats, GlobalTokenBudget, SharedBudget, create_shared_bud
 pub use metrics::{
     MetricsCollector, MetricsSummary, PhaseMetrics, SharedMetrics, create_shared_metrics,
 };
+pub use model_capabilities::{
+    AuthMode, ContextConfig, ModelCapabilities, ModelFamily, ModelRegistry,
+};
 pub use preflight::{PreflightCheck, PreflightResult};
 pub use prompt::PromptBuilder;
 pub use provider::{
     ChainConfig, ChainedProvider, CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats,
     CircuitState, ErrorCategory, ErrorClassifier, LlmError, LlmProvider, LlmResponse,
-    ProviderChain, ProviderChainBuilder, ProviderConfig, ResponseMetadata, ResponseTiming,
-    TokenUsage,
+    ProviderChain, ProviderChainBuilder, ProviderConfig, ResponseMetadata,
+    ResponseTiming, TokenUsage, create_provider_for_model,
 };
 
 #[cfg(feature = "claude-agent")]

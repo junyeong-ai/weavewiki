@@ -308,18 +308,7 @@ impl Default for ArtifactValidator {
 
 /// Extract file references from text (format: @path/to/file:line)
 fn extract_file_refs(text: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-
-    for word in text.split_whitespace() {
-        if let Some(path) = word.strip_prefix('@') {
-            let file_path = path.split(':').next().unwrap_or(path);
-            if file_path.contains('/') || file_path.contains('.') {
-                refs.push(file_path.to_string());
-            }
-        }
-    }
-
-    refs
+    crate::pipeline::patterns::extract_file_refs(text)
 }
 
 /// Batch validator for multiple artifacts

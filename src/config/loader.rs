@@ -271,7 +271,7 @@ version = "2.0"
 # LLM settings (for documentation generation)
 [llm]
 provider = "claude-agent"
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-5-20250929"
 timeout_secs = 300
 
 # Session settings

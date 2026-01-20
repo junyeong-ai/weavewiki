@@ -246,7 +246,7 @@ impl CheckpointManager {
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
+            if path.extension().is_some_and(|ext| ext == "json") {
                 match fs::read_to_string(&path).await {
                     Ok(content) => match serde_json::from_str::<ExecutionCheckpoint>(&content) {
                         Ok(cp) => checkpoints.push(cp),
@@ -313,13 +313,11 @@ impl CheckpointManager {
 
         while let Some(entry) = dir.next_entry().await? {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "json") {
-                if let Ok(metadata) = entry.metadata().await {
-                    if let Ok(modified) = metadata.modified() {
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Ok(metadata) = entry.metadata().await
+                    && let Ok(modified) = metadata.modified() {
                         entries.push((path, modified));
                     }
-                }
-            }
         }
 
         // Sort by modification time, oldest first
@@ -457,8 +455,8 @@ impl CheckpointManager {
 pub enum RecoveryResult {
     /// No recovery needed - fresh start
     NoRecoveryNeeded,
-    /// Recovered from checkpoint
-    Recovered(ExecutionCheckpoint),
+    /// Recovered from checkpoint (boxed to reduce enum size)
+    Recovered(Box<ExecutionCheckpoint>),
     /// No checkpoint found - starting fresh
     StartFresh,
     /// Another process is still running
@@ -499,7 +497,7 @@ impl CrashRecovery {
                             checkpoint.current_phase,
                             checkpoint.progress_percentage()
                         );
-                        Ok(RecoveryResult::Recovered(checkpoint))
+                        Ok(RecoveryResult::Recovered(Box::new(checkpoint)))
                     }
                     None => {
                         warn!(

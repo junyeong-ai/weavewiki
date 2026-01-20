@@ -1,17 +1,12 @@
-//! Tier 1 Filter
+//! Tier Filter
 //!
-//! Filters out Tier 1 content (basic language/tool knowledge that Claude already knows).
-//! Only Tier 2 (project conventions) and Tier 3 (hidden constraints) should be generated.
-//!
-//! Value Tiers:
-//! - Tier 1: Generic knowledge (e.g., "cargo build", "use async/await") - FILTERED
-//! - Tier 2: Project conventions (e.g., naming patterns, architecture rules) - KEPT
-//! - Tier 3: Hidden constraints (e.g., file dependencies, anti-patterns) - ESSENTIAL
+//! Structural validation filter for generated artifacts.
+//! Content-based tier classification is handled by HybridClassifier.
+//! This filter focuses on structural requirements: file refs, length, actionable language.
 
 use crate::config::QualityConfig;
 use crate::pipeline::patterns::{
-    count_code_examples, count_file_refs, count_tier1_patterns, count_tier3_indicators,
-    TIER1_AGENT_NAMES, TIER1_PATTERNS, TIER1_SKILL_NAMES,
+    count_code_examples, count_file_refs, count_generic_patterns, count_tier3_indicators,
 };
 use crate::types::{Agent, Rule, Skill};
 
@@ -109,7 +104,6 @@ impl TierFilter {
             };
         }
 
-        let min_score = self.config.min_value_score;
         let mut violations = Vec::new();
         let mut filtered = FilteredContent::default();
         let mut value_scores = Vec::new();
@@ -120,11 +114,15 @@ impl TierFilter {
 
             if let Some(mut violation) = self.check_skill(skill) {
                 violation.value_score = score.score;
-                if score.score > min_score {
-                    filtered.skills.push(skill.clone());
-                } else {
-                    violations.push(violation);
-                }
+                violations.push(violation);
+            } else if score.tier == ContentTier::Tier1Generic {
+                violations.push(Tier1Violation {
+                    item_type: ItemType::Skill,
+                    item_name: skill.name.clone(),
+                    violation: "Content classified as Tier1 (generic)".to_string(),
+                    suggestion: "Add project-specific constraints, file references, and internal knowledge".to_string(),
+                    value_score: score.score,
+                });
             } else {
                 filtered.skills.push(skill.clone());
             }
@@ -136,11 +134,15 @@ impl TierFilter {
 
             if let Some(mut violation) = self.check_agent(agent) {
                 violation.value_score = score.score;
-                if score.score > min_score {
-                    filtered.agents.push(agent.clone());
-                } else {
-                    violations.push(violation);
-                }
+                violations.push(violation);
+            } else if score.tier == ContentTier::Tier1Generic {
+                violations.push(Tier1Violation {
+                    item_type: ItemType::Agent,
+                    item_name: agent.name.clone(),
+                    violation: "Content classified as Tier1 (generic)".to_string(),
+                    suggestion: "Add internal knowledge section with project-specific constraints".to_string(),
+                    value_score: score.score,
+                });
             } else {
                 filtered.agents.push(agent.clone());
             }
@@ -152,11 +154,15 @@ impl TierFilter {
 
             if let Some(mut violation) = self.check_rule(rule) {
                 violation.value_score = score.score;
-                if score.score > min_score {
-                    filtered.rules.push(rule.clone());
-                } else {
-                    violations.push(violation);
-                }
+                violations.push(violation);
+            } else if score.tier == ContentTier::Tier1Generic {
+                violations.push(Tier1Violation {
+                    item_type: ItemType::Rule,
+                    item_name: rule.name.clone(),
+                    violation: "Content classified as Tier1 (generic)".to_string(),
+                    suggestion: "Add project-specific constraints with evidence references".to_string(),
+                    value_score: score.score,
+                });
             } else {
                 filtered.rules.push(rule.clone());
             }
@@ -210,8 +216,8 @@ impl TierFilter {
             indicators.push(format!("{} constraint indicators", tier3_count));
         }
 
-        let tier1_count = count_tier1_patterns(&content_lower);
-        score -= w.tier1_penalty * tier1_count as f32;
+        let generic_count = count_generic_patterns(&content_lower);
+        score -= w.tier1_penalty * generic_count as f32;
 
         score = score.clamp(0.0, 1.0);
         let tier = self.classify_tier(score);
@@ -357,9 +363,9 @@ impl TierFilter {
             indicators.push("Has examples".to_string());
         }
 
-        let tier1_count = count_tier1_patterns(&content_lower);
-        if tier1_count > 3 {
-            score -= w.tier1_penalty * (tier1_count - 3) as f32;
+        let generic_count = count_generic_patterns(&content_lower);
+        if generic_count > 3 {
+            score -= w.tier1_penalty * (generic_count - 3) as f32;
         }
 
         score = score.clamp(0.0, 1.0);
@@ -375,35 +381,7 @@ impl TierFilter {
     }
 
     fn check_skill(&self, skill: &Skill) -> Option<Tier1Violation> {
-        let name_lower = skill.name.to_lowercase();
-
-        // Check for Tier 1 skill names
-        if TIER1_SKILL_NAMES.contains(&name_lower.as_str()) {
-            return Some(Tier1Violation {
-                item_type: ItemType::Skill,
-                item_name: skill.name.clone(),
-                violation: "Skill name suggests basic functionality Claude already knows".to_string(),
-                suggestion: "Focus on project-specific workflows with multiple steps".to_string(),
-                value_score: 0.0,
-            });
-        }
-
-        let body = skill.body.to_lowercase();
-
-        // STRICT: Check for Tier 1 patterns in content
-        for pattern in TIER1_PATTERNS {
-            if body.contains(pattern) && is_primary_content(&body, pattern) {
-                return Some(Tier1Violation {
-                    item_type: ItemType::Skill,
-                    item_name: skill.name.clone(),
-                    violation: format!("Contains basic knowledge: '{pattern}'"),
-                    suggestion: "Add project-specific steps, gotchas, or constraints".to_string(),
-                    value_score: 0.0,
-                });
-            }
-        }
-
-        // STRICT: Check minimum body length
+        // Check minimum body length
         if skill.body.lines().count() < self.config.scoring.min_skill_body_lines {
             return Some(Tier1Violation {
                 item_type: ItemType::Skill,
@@ -414,7 +392,7 @@ impl TierFilter {
             });
         }
 
-        // STRICT: Reject inline code blocks in reference-only mode
+        // Reject inline code blocks in reference-only mode
         if self.config.reference_only_mode && skill.body.contains("```") {
             return Some(Tier1Violation {
                 item_type: ItemType::Skill,
@@ -425,7 +403,7 @@ impl TierFilter {
             });
         }
 
-        // STRICT: Require minimum file references (@file:line)
+        // Require minimum file references
         let file_refs = count_file_refs(&skill.body);
         if file_refs < 2 {
             return Some(Tier1Violation {
@@ -441,23 +419,9 @@ impl TierFilter {
     }
 
     fn check_agent(&self, agent: &Agent) -> Option<Tier1Violation> {
-        let name_lower = agent.name.to_lowercase();
-
-        // Check for Tier 1 agent names
-        if TIER1_AGENT_NAMES.contains(&name_lower.as_str()) {
-            return Some(Tier1Violation {
-                item_type: ItemType::Agent,
-                item_name: agent.name.clone(),
-                violation: "Agent name suggests generic functionality".to_string(),
-                suggestion: "Focus on project-specific domain expertise".to_string(),
-                value_score: 0.0,
-            });
-        }
-
         let desc = agent.description.to_lowercase();
         let generic_phrases = ["help with", "assist with", "general purpose", "any task", "all code"];
 
-        // Check for generic description phrases
         for phrase in generic_phrases {
             if desc.contains(phrase) {
                 return Some(Tier1Violation {
@@ -470,7 +434,7 @@ impl TierFilter {
             }
         }
 
-        // STRICT: Reject inline code blocks in reference-only mode
+        // Reject inline code blocks in reference-only mode
         if self.config.reference_only_mode && agent.prompt.contains("```") {
             return Some(Tier1Violation {
                 item_type: ItemType::Agent,
@@ -481,7 +445,7 @@ impl TierFilter {
             });
         }
 
-        // STRICT: Require minimum file references in prompt
+        // Require minimum file references in prompt
         let file_refs = count_file_refs(&agent.prompt);
         if file_refs < 2 {
             return Some(Tier1Violation {
@@ -493,7 +457,7 @@ impl TierFilter {
             });
         }
 
-        // STRICT: Require internal knowledge section or constraint indicators
+        // Require internal knowledge indicators
         let prompt_lower = agent.prompt.to_lowercase();
         let has_internal_knowledge = prompt_lower.contains("internal knowledge")
             || prompt_lower.contains("hidden")
@@ -530,7 +494,6 @@ impl TierFilter {
             "be consistent",
         ];
 
-        // Check for generic advice
         for generic in generic_rules {
             if content_lower.contains(generic) {
                 return Some(Tier1Violation {
@@ -543,7 +506,7 @@ impl TierFilter {
             }
         }
 
-        // STRICT: Require at least one file reference
+        // Require at least one file reference
         let file_refs = count_file_refs(&content);
         if file_refs < 1 {
             return Some(Tier1Violation {
@@ -578,13 +541,6 @@ impl TierFilter {
 
     fn check_claude_md(&self, content: &str) -> Vec<String> {
         let mut issues = Vec::new();
-        let content_lower = content.to_lowercase();
-
-        for pattern in TIER1_PATTERNS {
-            if is_instructional(&content_lower, pattern) {
-                issues.push(format!("Contains basic instruction: '{pattern}'"));
-            }
-        }
 
         let lines: Vec<_> = content.lines().collect();
         if lines.len() < self.config.scoring.min_claude_md_lines {
@@ -603,7 +559,6 @@ impl TierFilter {
         issues
     }
 
-    /// Classify content tier based on score using configurable thresholds
     fn classify_tier(&self, score: f32) -> ContentTier {
         let w = &self.config.scoring;
         if score >= w.tier3_threshold {
@@ -616,7 +571,6 @@ impl TierFilter {
     }
 }
 
-/// Standalone classify_tier for tests (uses default thresholds)
 #[cfg(test)]
 fn classify_tier(score: f32) -> ContentTier {
     let w = crate::config::TierScoringWeights::default();
@@ -627,26 +581,6 @@ fn classify_tier(score: f32) -> ContentTier {
     } else {
         ContentTier::Tier1Generic
     }
-}
-
-fn is_primary_content(content: &str, pattern: &str) -> bool {
-    let w = crate::config::TierScoringWeights::default();
-    let pattern_count = content.matches(pattern).count();
-    let total_sentences = content.matches('.').count().max(1);
-    pattern_count as f32 / total_sentences as f32 > w.primary_content_ratio
-}
-
-fn is_instructional(content: &str, pattern: &str) -> bool {
-    let instructional_contexts = [
-        format!("always {pattern}"),
-        format!("you should {pattern}"),
-        format!("make sure to {pattern}"),
-        format!("remember to {pattern}"),
-    ];
-
-    instructional_contexts
-        .iter()
-        .any(|ctx| content.contains(&ctx.to_lowercase()))
 }
 
 pub fn filter(

@@ -1,16 +1,19 @@
-//! Enhanced Evidence Validator
+//! Evidence Validator with Deep Verification
 //!
-//! Validates evidence quality with strengthened requirements:
-//! - Minimum file references per artifact type
-//! - Evidence depth validation (FileOnly, FileAndLine, FileLineContext)
-//! - Per-project-type requirements
-//! - Context snippet validation for FileLineContext depth
+//! Validates all file references against actual filesystem:
+//! - File existence verification
+//! - Line number range validation (reads file to check bounds)
+//! - Evidence depth requirements (FileOnly, FileAndLine, FileLineContext)
+//! - Hallucination detection with precise diagnostics
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::fs;
+use tokio::sync::OnceCell;
 
 use crate::config::{EvidenceDepth, ProjectType, ProjectTypeQuality, QualityConfig};
 use crate::pipeline::context::VerifiedFileRegistry;
@@ -92,14 +95,31 @@ pub enum IssueCategory {
     MissingContext,
 }
 
-/// Parsed file reference
+/// Deep validation result for a single reference
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReferenceValidation {
+    Valid,
+    FileNotFound,
+    LineOutOfRange { referenced: u32, actual_max: usize },
+    RangeOutOfBounds { start: u32, end: u32, actual_max: usize },
+    InvalidRange { start: u32, end: u32 },
+}
+
+impl ReferenceValidation {
+    pub fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+/// Parsed file reference with deep validation
 #[derive(Debug, Clone)]
 pub struct ParsedReference {
     pub file_path: String,
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
     pub depth: EvidenceDepth,
-    pub is_valid: bool,
+    pub validation: ReferenceValidation,
+    pub resolved_path: Option<PathBuf>,
 }
 
 impl ParsedReference {
@@ -107,17 +127,21 @@ impl ParsedReference {
         match (self.line_start, self.line_end) {
             (Some(_), Some(_)) => EvidenceDepth::FileLineContext,
             (Some(_), None) => EvidenceDepth::FileAndLine,
-            (None, Some(_)) => EvidenceDepth::FileOnly, // Invalid case: end without start
-            (None, None) => EvidenceDepth::FileOnly,
+            _ => EvidenceDepth::FileOnly,
         }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.validation.is_valid()
     }
 }
 
-/// Enhanced evidence validator
+/// Evidence validator with deep file verification
 pub struct EnhancedEvidenceValidator {
     quality_gate: ProjectTypeQuality,
     file_registry: VerifiedFileRegistry,
-    project_root: std::path::PathBuf,
+    project_root: PathBuf,
+    line_count_cache: OnceCell<HashMap<PathBuf, usize>>,
 }
 
 impl EnhancedEvidenceValidator {
@@ -136,11 +160,12 @@ impl EnhancedEvidenceValidator {
             quality_gate,
             file_registry,
             project_root: project_root.as_ref().to_path_buf(),
+            line_count_cache: OnceCell::new(),
         }
     }
 
-    /// Validate all artifacts against evidence requirements
-    pub fn validate(
+    /// Validate all artifacts with deep reference verification
+    pub async fn validate(
         &self,
         skills: &[Skill],
         agents: &[Agent],
@@ -161,12 +186,14 @@ impl EnhancedEvidenceValidator {
 
         // Validate each artifact type
         for skill in skills {
-            let result = self.validate_artifact(
-                "skill",
-                &skill.name,
-                &skill.body,
-                self.quality_gate.min_file_references,
-            );
+            let result = self
+                .validate_artifact(
+                    "skill",
+                    &skill.name,
+                    &skill.body,
+                    self.quality_gate.min_file_references,
+                )
+                .await;
             self.update_summary(&result, &mut summary);
             if !result.passed {
                 issues.extend(self.generate_issues(&result));
@@ -175,12 +202,14 @@ impl EnhancedEvidenceValidator {
         }
 
         for agent in agents {
-            let result = self.validate_artifact(
-                "agent",
-                &agent.name,
-                &agent.prompt,
-                self.quality_gate.min_file_references,
-            );
+            let result = self
+                .validate_artifact(
+                    "agent",
+                    &agent.name,
+                    &agent.prompt,
+                    self.quality_gate.min_file_references,
+                )
+                .await;
             self.update_summary(&result, &mut summary);
             if !result.passed {
                 issues.extend(self.generate_issues(&result));
@@ -190,9 +219,10 @@ impl EnhancedEvidenceValidator {
 
         for rule in rules {
             let content = rule.content.join("\n");
-            // Rules have slightly lower reference requirement
             let min_refs = (self.quality_gate.min_file_references as f32 * 0.5).ceil() as usize;
-            let result = self.validate_artifact("rule", &rule.name, &content, min_refs.max(1));
+            let result = self
+                .validate_artifact("rule", &rule.name, &content, min_refs.max(1))
+                .await;
             self.update_summary(&result, &mut summary);
             if !result.passed {
                 issues.extend(self.generate_issues(&result));
@@ -202,9 +232,10 @@ impl EnhancedEvidenceValidator {
 
         // Validate CLAUDE.md
         let memory_content = memory.to_markdown();
-        let memory_min_refs = self.quality_gate.min_file_references * 2; // CLAUDE.md needs more references
-        let memory_result =
-            self.validate_artifact("memory", "CLAUDE.md", &memory_content, memory_min_refs);
+        let memory_min_refs = self.quality_gate.min_file_references * 2;
+        let memory_result = self
+            .validate_artifact("memory", "CLAUDE.md", &memory_content, memory_min_refs)
+            .await;
         self.update_summary(&memory_result, &mut summary);
         if !memory_result.passed {
             issues.extend(self.generate_issues(&memory_result));
@@ -234,15 +265,15 @@ impl EnhancedEvidenceValidator {
         }
     }
 
-    fn validate_artifact(
+    async fn validate_artifact(
         &self,
         artifact_type: &str,
         name: &str,
         content: &str,
         min_references: usize,
     ) -> ArtifactEvidenceResult {
-        let references = self.extract_references(content);
-        let valid_refs: Vec<_> = references.iter().filter(|r| r.is_valid).collect();
+        let references = self.extract_and_validate_references(content).await;
+        let valid_refs: Vec<_> = references.iter().filter(|r| r.is_valid()).collect();
         let required_depth = self.quality_gate.evidence_depth;
 
         // Check depth compliance for each reference
@@ -259,7 +290,7 @@ impl EnhancedEvidenceValidator {
             valid_refs
                 .iter()
                 .map(|r| r.depth_level())
-                .max_by_key(|d| depth_to_level(d))
+                .max_by_key(depth_to_level)
                 .unwrap_or(EvidenceDepth::FileOnly)
         };
 
@@ -275,7 +306,7 @@ impl EnhancedEvidenceValidator {
         }
 
         // Check hallucinations
-        let hallucinated: Vec<_> = references.iter().filter(|r| !r.is_valid).collect();
+        let hallucinated: Vec<_> = references.iter().filter(|r| !r.is_valid()).collect();
         if !hallucinated.is_empty() {
             for h in &hallucinated {
                 artifact_issues.push(format!("Hallucinated reference: {}", h.file_path));
@@ -307,53 +338,127 @@ impl EnhancedEvidenceValidator {
         }
     }
 
-    fn extract_references(&self, content: &str) -> Vec<ParsedReference> {
-        FILE_REF_PATTERN
+    async fn extract_and_validate_references(&self, content: &str) -> Vec<ParsedReference> {
+        let raw_refs: Vec<_> = FILE_REF_PATTERN
             .captures_iter(content)
-            .map(|cap| {
-                let file_path = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
-                let line_start = cap
-                    .get(2)
-                    .and_then(|m| m.as_str().parse::<u32>().ok());
-                let line_end = cap
-                    .get(3)
-                    .and_then(|m| m.as_str().parse::<u32>().ok());
-
-                // Skip non-file references
-                if file_path.starts_with("http")
+            .filter_map(|cap| {
+                let file_path = cap.get(1).map(|m| m.as_str().to_string())?;
+                if file_path.is_empty()
+                    || file_path.starts_with("http")
                     || file_path.starts_with("CLAUDE")
-                    || file_path.is_empty()
                 {
-                    return ParsedReference {
-                        file_path: file_path.to_string(),
-                        line_start: None,
-                        line_end: None,
-                        depth: EvidenceDepth::FileOnly,
-                        is_valid: false,
-                    };
+                    return None;
                 }
-
-                let is_valid = self.file_registry.contains(file_path)
-                    || self.project_root.join(file_path).exists()
-                    || self.project_root.join("src").join(file_path).exists();
-
-                let depth = match (line_start, line_end) {
-                    (Some(_), Some(_)) => EvidenceDepth::FileLineContext,
-                    (Some(_), None) => EvidenceDepth::FileAndLine,
-                    (None, Some(_)) => EvidenceDepth::FileOnly, // Invalid: end without start
-                    (None, None) => EvidenceDepth::FileOnly,
-                };
-
-                ParsedReference {
-                    file_path: file_path.to_string(),
-                    line_start,
-                    line_end,
-                    depth,
-                    is_valid,
-                }
+                let line_start = cap.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+                let line_end = cap.get(3).and_then(|m| m.as_str().parse::<u32>().ok());
+                Some((file_path, line_start, line_end))
             })
-            .filter(|r| !r.file_path.is_empty())
-            .collect()
+            .collect();
+
+        let mut results = Vec::with_capacity(raw_refs.len());
+
+        for (file_path, line_start, line_end) in raw_refs {
+            let validation = self.validate_reference_deeply(&file_path, line_start, line_end).await;
+            let resolved_path = self.resolve_path(&file_path);
+            let depth = match (line_start, line_end) {
+                (Some(_), Some(_)) => EvidenceDepth::FileLineContext,
+                (Some(_), None) => EvidenceDepth::FileAndLine,
+                _ => EvidenceDepth::FileOnly,
+            };
+
+            results.push(ParsedReference {
+                file_path,
+                line_start,
+                line_end,
+                depth,
+                validation,
+                resolved_path,
+            });
+        }
+
+        results
+    }
+
+    fn resolve_path(&self, file_path: &str) -> Option<PathBuf> {
+        let candidates = [
+            self.project_root.join(file_path),
+            self.project_root.join("src").join(file_path),
+        ];
+
+        for candidate in candidates {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+
+        if self.file_registry.contains(file_path) {
+            return Some(self.project_root.join(file_path));
+        }
+
+        None
+    }
+
+    async fn validate_reference_deeply(
+        &self,
+        file_path: &str,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> ReferenceValidation {
+        let resolved = match self.resolve_path(file_path) {
+            Some(p) => p,
+            None => return ReferenceValidation::FileNotFound,
+        };
+
+        // No line numbers to validate
+        let Some(start) = line_start else {
+            return ReferenceValidation::Valid;
+        };
+
+        // Validate range ordering
+        if let Some(end) = line_end {
+            if start > end {
+                return ReferenceValidation::InvalidRange { start, end };
+            }
+        }
+
+        // Read file and count lines
+        let line_count = match self.get_line_count(&resolved).await {
+            Some(count) => count,
+            None => return ReferenceValidation::Valid, // Can't read = assume valid
+        };
+
+        // Check start line
+        if start as usize > line_count {
+            return ReferenceValidation::LineOutOfRange {
+                referenced: start,
+                actual_max: line_count,
+            };
+        }
+
+        // Check end line if present
+        if let Some(end) = line_end {
+            if end as usize > line_count {
+                return ReferenceValidation::RangeOutOfBounds {
+                    start,
+                    end,
+                    actual_max: line_count,
+                };
+            }
+        }
+
+        ReferenceValidation::Valid
+    }
+
+    async fn get_line_count(&self, path: &Path) -> Option<usize> {
+        // Try to read from cache first
+        let cache = self.line_count_cache.get_or_init(|| async { HashMap::new() }).await;
+        if let Some(&count) = cache.get(path) {
+            return Some(count);
+        }
+
+        // Read file and count lines
+        let content = fs::read_to_string(path).await.ok()?;
+        Some(content.lines().count())
     }
 
     fn depth_meets_requirement(&self, achieved: EvidenceDepth, required: EvidenceDepth) -> bool {
@@ -515,9 +620,9 @@ impl EnhancedEvidenceValidator {
     }
 }
 
-/// Convenience function for quick validation
+/// Convenience function for async validation
 #[allow(clippy::too_many_arguments)]
-pub fn validate_evidence(
+pub async fn validate_evidence(
     project_type: ProjectType,
     quality_config: &QualityConfig,
     file_registry: VerifiedFileRegistry,
@@ -529,7 +634,7 @@ pub fn validate_evidence(
 ) -> EnhancedEvidenceResult {
     let validator =
         EnhancedEvidenceValidator::new(project_type, quality_config, file_registry, project_root);
-    validator.validate(skills, agents, rules, memory)
+    validator.validate(skills, agents, rules, memory).await
 }
 
 /// Convert EvidenceDepth to a numeric level for comparison
@@ -553,63 +658,59 @@ mod tests {
             line_start: None,
             line_end: None,
             depth: EvidenceDepth::FileOnly,
-            is_valid: true,
+            validation: ReferenceValidation::Valid,
+            resolved_path: None,
         };
-        assert!(matches!(
-            file_only.depth_level(),
-            EvidenceDepth::FileOnly
-        ));
+        assert!(matches!(file_only.depth_level(), EvidenceDepth::FileOnly));
+        assert!(file_only.is_valid());
 
         let file_line = ParsedReference {
             file_path: "src/main.rs".into(),
             line_start: Some(42),
             line_end: None,
             depth: EvidenceDepth::FileAndLine,
-            is_valid: true,
+            validation: ReferenceValidation::Valid,
+            resolved_path: None,
         };
-        assert!(matches!(
-            file_line.depth_level(),
-            EvidenceDepth::FileAndLine
-        ));
+        assert!(matches!(file_line.depth_level(), EvidenceDepth::FileAndLine));
 
         let file_context = ParsedReference {
             file_path: "src/main.rs".into(),
             line_start: Some(42),
             line_end: Some(50),
             depth: EvidenceDepth::FileLineContext,
-            is_valid: true,
+            validation: ReferenceValidation::Valid,
+            resolved_path: None,
         };
-        assert!(matches!(
-            file_context.depth_level(),
-            EvidenceDepth::FileLineContext
-        ));
+        assert!(matches!(file_context.depth_level(), EvidenceDepth::FileLineContext));
+    }
+
+    #[test]
+    fn test_reference_validation() {
+        let valid = ReferenceValidation::Valid;
+        assert!(valid.is_valid());
+
+        let not_found = ReferenceValidation::FileNotFound;
+        assert!(!not_found.is_valid());
+
+        let out_of_range = ReferenceValidation::LineOutOfRange {
+            referenced: 500,
+            actual_max: 100,
+        };
+        assert!(!out_of_range.is_valid());
     }
 
     #[test]
     fn test_depth_meets_requirement() {
-        // FileOnly meets FileOnly
         assert!(depth_comparison(EvidenceDepth::FileOnly, EvidenceDepth::FileOnly));
-        // FileAndLine meets FileOnly
         assert!(depth_comparison(EvidenceDepth::FileAndLine, EvidenceDepth::FileOnly));
-        // FileLineContext meets all
         assert!(depth_comparison(EvidenceDepth::FileLineContext, EvidenceDepth::FileOnly));
         assert!(depth_comparison(EvidenceDepth::FileLineContext, EvidenceDepth::FileAndLine));
-        // FileOnly does NOT meet FileAndLine
         assert!(!depth_comparison(EvidenceDepth::FileOnly, EvidenceDepth::FileAndLine));
     }
 
     fn depth_comparison(achieved: EvidenceDepth, required: EvidenceDepth) -> bool {
-        let achieved_level = match achieved {
-            EvidenceDepth::Minimal | EvidenceDepth::FileOnly => 0,
-            EvidenceDepth::Standard | EvidenceDepth::FileAndLine => 1,
-            EvidenceDepth::Comprehensive | EvidenceDepth::FileLineContext => 2,
-        };
-        let required_level = match required {
-            EvidenceDepth::Minimal | EvidenceDepth::FileOnly => 0,
-            EvidenceDepth::Standard | EvidenceDepth::FileAndLine => 1,
-            EvidenceDepth::Comprehensive | EvidenceDepth::FileLineContext => 2,
-        };
-        achieved_level >= required_level
+        depth_to_level(&achieved) >= depth_to_level(&required)
     }
 
     #[test]

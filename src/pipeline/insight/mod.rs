@@ -6,7 +6,6 @@
 mod constraint_detector;
 mod domain_analyzer;
 mod hybrid_classifier;
-mod knowledge_classifier;
 mod llm_classifier;
 mod mistake_finder;
 mod types;
@@ -15,15 +14,15 @@ mod value_scorer;
 pub use constraint_detector::ConstraintDetector;
 pub use domain_analyzer::{BusinessRuleExtractor, DomainAnalyzer, TerminologyExtractor};
 pub use hybrid_classifier::{ClassificationStrategy, HybridClassifier};
-pub use knowledge_classifier::{ArtifactClassification, KnowledgeClassifier, TierClassification};
 pub use llm_classifier::{
     BatchClassificationRequest, ClassificationCache, ClassificationResult, DefaultLlmClassifier,
     InsightSummary, LlmClassifier,
 };
 pub use mistake_finder::{MistakeFinder, MistakeSeverity, PotentialMistake};
 pub use types::{
-    BusinessRule, Constraint, ConstraintType, DomainKnowledge, ExtractedInsight, Insight,
-    InsightCategory, InsightSource, Knowledge, Terminology,
+    ArtifactClassification, BusinessRule, Constraint, ConstraintType, DomainKnowledge,
+    ExtractedInsight, Insight, InsightCategory, InsightSource, Knowledge, Terminology,
+    TierClassification,
 };
 pub use value_scorer::{ValueScore, ValueScorer};
 
@@ -47,7 +46,6 @@ pub struct InsightEngine {
     domain_analyzer: DomainAnalyzer,
     classifier: HybridClassifier,
     value_scorer: ValueScorer,
-    config: Arc<Config>,
 }
 
 /// Context for insight extraction
@@ -96,8 +94,7 @@ impl InsightEngine {
             constraint_detector: ConstraintDetector::new(Arc::clone(&config)),
             domain_analyzer: DomainAnalyzer::new(Arc::clone(&provider), Arc::clone(&config)),
             classifier: HybridClassifier::new(Arc::clone(&provider), Arc::clone(&config)),
-            value_scorer: ValueScorer::new(Arc::clone(&config)),
-            config,
+            value_scorer: ValueScorer::new(config),
         }
     }
 

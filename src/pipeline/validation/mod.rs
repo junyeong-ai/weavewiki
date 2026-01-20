@@ -1,18 +1,31 @@
 //! Pipeline Validation Module
 //!
-//! Two-tier validation architecture:
-//! - Tier 1: Pattern-based pre-filter (fast, no LLM)
-//! - Tier 2: AI-based quality validation (single LLM call, self-review perspective)
+//! 5-Layer Validation Architecture:
+//! - Layer 0: Format (100% programmatic, structure validation)
+//! - Layer 1: Evidence (programmatic + file I/O, reference validity)
+//! - Layer 2: Semantic Context (LLM + file reading, claim-context match)
+//! - Layer 3: Value Assessment (LLM + few-shot, tier classification)
+//! - Layer 4: Cross-Artifact (LLM, consistency between artifacts)
 //!
-//! Enhanced evidence validation:
-//! - Per-project-type minimum references
-//! - Evidence depth validation (FileOnly, FileAndLine, FileLineContext)
+//! Clean Pass Guarantee: Requires N consecutive passes with zero issues.
 
+// Core validation types
+pub mod layers;
+pub mod clean_pass;
+pub mod pipeline;
+
+// Validation layers
+pub mod semantic_context;
+pub mod few_shot_examples;
+pub mod value_assessor;
+
+// Legacy validators (to be integrated)
 pub mod content;
 pub mod cross_artifact;
 pub mod cross_specialist;
 pub mod cross_validation;
 pub mod evidence;
+pub mod multi_perspective;
 pub mod project_applicability;
 pub mod project_consistency;
 pub mod quality_validator;
@@ -65,3 +78,26 @@ pub use project_applicability::{
     ApplicabilityConfig, ApplicabilityIssue, ApplicabilityIssueType, ApplicabilityResult,
     ProjectApplicabilityValidator,
 };
+
+pub use multi_perspective::{
+    ClaimSeverity, CompletenessResult, HallucinationResult, MultiPerspectiveResult,
+    MultiPerspectiveValidator, PerspectiveResult, SuspiciousClaim,
+};
+
+// New validation system exports
+pub use layers::{
+    IssueCode, IssueSeverity as LayerIssueSeverity, LayerResult, ValidationIssue, ValidationLayer,
+    ValidationResults,
+};
+
+pub use clean_pass::{
+    CleanPassAttempt, CleanPassStatus, CleanPassTracker, FailureReason, PassTrend, ProgressSummary,
+};
+
+pub use pipeline::ValidationPipeline;
+
+pub use semantic_context::{ClaimContext, ContextMatch, SemanticContextResult, SemanticContextValidator};
+
+pub use few_shot_examples::{FewShotExamples, TierExample, TierLevel, ValueDimensions};
+
+pub use value_assessor::{ContentAssessment as ValueContentAssessment, ValueAssessmentResult, ValueAssessor};

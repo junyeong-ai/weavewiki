@@ -72,6 +72,15 @@ pub struct StrategyContext<'a> {
     pub file_registry: &'a VerifiedFileRegistry,
     pub issue_description: String,
     pub suggestions: Vec<String>,
+    pub validation_feedback: Option<ValidationFeedback>,
+}
+
+/// Feedback from validation to guide targeted refinement
+#[derive(Debug, Clone, Default)]
+pub struct ValidationFeedback {
+    pub missing_modules: Vec<String>,
+    pub weak_coverage_areas: Vec<String>,
+    pub module_constraints: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -311,7 +320,7 @@ impl StrategyRotator {
 
 pub fn calculate_quick_quality(content: &str) -> f32 {
     use super::patterns::{
-        count_tier1_patterns, count_value_indicators, ACTIONABLE_PATTERN, FILE_LINE_REF, FILE_REF,
+        count_generic_patterns, count_value_indicators, ACTIONABLE_PATTERN, FILE_LINE_REF, FILE_REF,
         GENERIC_PATTERN,
     };
 
@@ -343,13 +352,13 @@ pub fn calculate_quick_quality(content: &str) -> f32 {
         .filter(|l| GENERIC_PATTERN.is_match(l))
         .count();
     let specific_segments = count_value_indicators(content);
-    let tier1_count = count_tier1_patterns(content);
+    let generic_pattern_count = count_generic_patterns(content);
 
     let specificity = if !total_lines.is_empty() {
         let generic_ratio = generic_count as f32 / total_lines.len() as f32;
         let specific_ratio = (specific_segments as f32 / 10.0).min(1.0);
-        let tier1_penalty = (tier1_count as f32 * 0.1).min(0.5);
-        ((1.0 - generic_ratio) * 0.5 + specific_ratio * 0.5 - tier1_penalty).clamp(0.0, 1.0)
+        let generic_penalty = (generic_pattern_count as f32 * 0.1).min(0.5);
+        ((1.0 - generic_ratio) * 0.5 + specific_ratio * 0.5 - generic_penalty).clamp(0.0, 1.0)
     } else {
         0.0
     };

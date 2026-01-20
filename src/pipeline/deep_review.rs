@@ -426,8 +426,8 @@ impl DeepReviewEngine {
                     continue;
                 }
 
-                if let Ok(max_lines) = self.file_registry.get_line_count(file_path) {
-                    if line_num > max_lines {
+                if let Ok(max_lines) = self.file_registry.get_line_count(file_path)
+                    && line_num > max_lines {
                         issues.push(
                             ReviewIssue::error(
                                 CheckType::EvidenceValid,
@@ -441,7 +441,6 @@ impl DeepReviewEngine {
                         );
                         continue;
                     }
-                }
 
                 valid_refs += 1;
             }
@@ -593,8 +592,13 @@ impl DeepReviewEngine {
         let response = match self.provider.generate(&prompt, &schema).await {
             Ok(resp) => resp,
             Err(e) => {
-                warn!(error = %e, "LLM semantic check failed, using conservative pass");
-                return Ok(CheckResult::pass().with_score(0.7));
+                warn!(error = %e, "LLM semantic check failed");
+                return Ok(CheckResult::fail(vec![ReviewIssue::error(
+                    CheckType::SemanticQuality,
+                    "llm_validation",
+                    &format!("LLM validation failed: {}", e),
+                )
+                .with_suggestion("Check LLM provider connectivity and retry")]));
             }
         };
 
@@ -671,8 +675,13 @@ Only report issues with score < 0.7 for any dimension. Pass if overall score >= 
         let response = match self.provider.generate(&prompt, &schema).await {
             Ok(resp) => resp,
             Err(e) => {
-                warn!(error = %e, "LLM cross-artifact check failed, using conservative pass");
-                return Ok(CheckResult::pass().with_score(0.7));
+                warn!(error = %e, "LLM cross-artifact check failed");
+                return Ok(CheckResult::fail(vec![ReviewIssue::error(
+                    CheckType::CrossArtifactConsistent,
+                    "llm_validation",
+                    &format!("LLM cross-artifact validation failed: {}", e),
+                )
+                .with_suggestion("Check LLM provider connectivity and retry")]));
             }
         };
 
@@ -780,7 +789,12 @@ Pass if artifacts are logically consistent (score >= 0.7)."#
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "Failed to parse LLM review response");
-                return Ok(CheckResult::pass().with_score(0.7));
+                return Ok(CheckResult::fail(vec![ReviewIssue::error(
+                    check_type,
+                    "llm_response_parse",
+                    &format!("Failed to parse LLM response: {}", e),
+                )
+                .with_suggestion("LLM response format may be invalid, retry validation")]));
             }
         };
 

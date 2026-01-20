@@ -16,55 +16,10 @@ use super::hook::ToolHooks;
 use super::node::EvidenceLocation;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
+use crate::pipeline::patterns;
 use indexmap::IndexMap;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng as serde_yaml;
-use std::sync::LazyLock;
-
-// Quality calculation patterns (defined locally to avoid circular deps)
-static FILE_LINE_REF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@([a-zA-Z0-9_\-]+/[a-zA-Z0-9_./\-]+):(\d+)").expect("Invalid regex")
-});
-
-static ACTIONABLE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(must|shall|should|always|never|avoid|do not|don't|forbidden|prohibited)\b")
-        .expect("Invalid regex")
-});
-
-// Tier 1 patterns (subset for basic detection)
-const TIER1_KEYWORDS: &[&str] = &[
-    "cargo build", "cargo test", "npm install", "npm run", "pip install",
-    "go build", "gradle build", "use async/await", "write tests",
-];
-
-// Tier 3 indicators (high-value content)
-const TIER3_KEYWORDS: &[&str] = &[
-    "hidden", "gotcha", "pitfall", "constraint", "dependency",
-    "must not", "never", "forbidden", "anti-pattern", "order matters",
-];
-
-/// Count @file:line references in content
-fn count_file_line_refs(content: &str) -> usize {
-    FILE_LINE_REF.captures_iter(content).count()
-}
-
-/// Count actionable statements in content
-fn count_actionable_statements(content: &str) -> usize {
-    ACTIONABLE_PATTERN.find_iter(content).count()
-}
-
-/// Count Tier 1 patterns in content
-fn count_tier1_patterns(content: &str) -> usize {
-    let lower = content.to_lowercase();
-    TIER1_KEYWORDS.iter().filter(|k| lower.contains(*k)).count()
-}
-
-/// Count Tier 3 indicators in content
-fn count_tier3_indicators(content: &str) -> usize {
-    let lower = content.to_lowercase();
-    TIER3_KEYWORDS.iter().filter(|k| lower.contains(*k)).count()
-}
 
 /// Content value tier classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -196,10 +151,10 @@ impl Skill {
 
     /// Calculate quality metrics from body content
     pub fn calculate_quality(body: &str) -> QualityMetrics {
-        let file_refs = count_file_line_refs(body);
-        let actionable_count = count_actionable_statements(body);
-        let tier1_count = count_tier1_patterns(body);
-        let tier3_count = count_tier3_indicators(body);
+        let file_refs = patterns::count_file_line_refs(body);
+        let actionable_count = patterns::ACTIONABLE_PATTERN.find_iter(body).count();
+        let tier1_count = patterns::count_generic_patterns(body);
+        let tier3_count = patterns::count_tier3_indicators(body);
 
         // Determine tier based on content
         let tier = if tier1_count > 2 {

@@ -50,7 +50,7 @@ impl ConfigPreset {
             }
             Self::Thorough => {
                 config.llm.default_model = "claude-sonnet-4-5-20250929".into();
-                config.llm.insight_model = Some("claude-opus-4-5-20251101".into());
+                config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
                 config.value.min_overall = 0.7;
                 config.convergence.max_iterations = 50;
                 config.convergence.consecutive_passes = 2;
@@ -58,7 +58,7 @@ impl ConfigPreset {
             }
             Self::Exhaustive => {
                 config.llm.default_model = "claude-opus-4-5-20251101".into();
-                config.llm.insight_model = Some("claude-opus-4-5-20251101".into());
+                config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
                 config.value.min_overall = 0.8;
                 config.convergence.max_iterations = 100;
                 config.convergence.consecutive_passes = 3;
@@ -91,6 +91,7 @@ pub struct Config {
     pub performance: PerformanceConfig,
     pub project: ProjectConfig,
     pub output: OutputConfig,
+    pub validation: ValidationConfig,
 }
 
 impl Default for Config {
@@ -111,18 +112,12 @@ impl Default for Config {
             performance: PerformanceConfig::default(),
             project: ProjectConfig::default(),
             output: OutputConfig::default(),
+            validation: ValidationConfig::default(),
         }
     }
 }
 
 impl Config {
-    pub fn with_preset(preset: ConfigPreset) -> Self {
-        let mut config = Self::default();
-        preset.apply(&mut config);
-        config.preset = Some(preset);
-        config
-    }
-
     pub fn validate(&self) -> crate::types::Result<()> {
         use crate::types::ClaudegenError;
 
@@ -157,6 +152,48 @@ impl Config {
             return Err(ClaudegenError::Config(
                 "performance.parallel_workers must be > 0".into(),
             ));
+        }
+
+        // =========================================================================
+        // Cross-field validation (interdependency checks)
+        // Order matters: validate base configs before derived configs
+        // =========================================================================
+
+        // 1. Convergence consistency (base config - must validate first)
+        //    This must come before deep_review validation because deep_review.required_passes
+        //    is derived from convergence.consecutive_passes
+        if self.convergence.consecutive_passes > self.convergence.max_iterations {
+            return Err(ClaudegenError::Config(format!(
+                "convergence.consecutive_passes ({}) must be <= max_iterations ({})",
+                self.convergence.consecutive_passes, self.convergence.max_iterations
+            )));
+        }
+
+        // 2. Clean pass: max_attempts must allow convergence
+        if self.validation.clean_pass.max_attempts < self.validation.clean_pass.consecutive_passes {
+            return Err(ClaudegenError::Config(format!(
+                "validation.clean_pass.max_attempts ({}) must be >= consecutive_passes ({})",
+                self.validation.clean_pass.max_attempts,
+                self.validation.clean_pass.consecutive_passes
+            )));
+        }
+
+        // 3. Deep review: max_attempts must allow convergence (derived config)
+        let deep_review = self.deep_review();
+        if deep_review.max_attempts < deep_review.required_passes {
+            return Err(ClaudegenError::Config(format!(
+                "deep_review.max_attempts ({}) must be >= required_passes ({})",
+                deep_review.max_attempts, deep_review.required_passes
+            )));
+        }
+
+        // 4. Quality thresholds ordering (warning only)
+        if self.convergence.early_exit_threshold < self.value.min_overall {
+            tracing::warn!(
+                early_exit = self.convergence.early_exit_threshold,
+                min_overall = self.value.min_overall,
+                "early_exit_threshold < min_overall: may exit before quality target reached"
+            );
         }
 
         self.value.validate()?;
@@ -717,11 +754,10 @@ impl TierPatterns {
 
         // Check patterns (compile lazily - this could be optimized with caching)
         for pattern in &self.patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if re.is_match(&lower) {
+            if let Ok(re) = regex::Regex::new(pattern)
+                && re.is_match(&lower) {
                     return true;
                 }
-            }
         }
 
         false
@@ -735,6 +771,7 @@ impl TierPatterns {
 /// Per-artifact-type configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ArtifactConfigs {
     pub claude_md: ClaudeMdConfig,
     pub rules: RulesConfig,
@@ -742,16 +779,6 @@ pub struct ArtifactConfigs {
     pub agents: AgentsConfig,
 }
 
-impl Default for ArtifactConfigs {
-    fn default() -> Self {
-        Self {
-            claude_md: ClaudeMdConfig::default(),
-            rules: RulesConfig::default(),
-            skills: SkillsConfig::default(),
-            agents: AgentsConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -921,79 +948,158 @@ impl std::fmt::Display for AgentModel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
-    /// Default model for most operations
+    /// Balanced model for standard operations (Sonnet-class)
+    /// This is the workhorse model for generation, refinement, review
     pub default_model: String,
-    /// Model for insight extraction (can be more powerful)
-    pub insight_model: Option<String>,
-    /// Model for value validation
-    pub validation_model: Option<String>,
+
+    /// Performance model for critical high-intelligence tasks (Opus-class)
+    /// Used for: constraint extraction, mistake discovery, deep analysis
+    /// Industry terminology: highest capability tier
+    pub performance_model: Option<String>,
+
+    /// Fast model for quick, simple tasks (Haiku-class)
+    /// Used for: classification, detection, validation
+    /// Industry terminology: speed-optimized tier
+    pub fast_model: Option<String>,
+
     /// Request timeout in seconds
     pub timeout_secs: u64,
     /// Temperature (0.0 = deterministic, 1.0 = creative)
     pub temperature: f32,
     /// Provider (claude-agent, openai)
     pub provider: String,
-    /// Per-phase model overrides
-    pub phases: Option<PhaseModels>,
+    /// Context configuration
+    pub context: ContextWindowConfig,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             default_model: "claude-sonnet-4-5-20250929".into(),
-            insight_model: None,
-            validation_model: None,
+            performance_model: None,
+            fast_model: None,
             timeout_secs: 300,
             temperature: 0.0,
             provider: "claude-agent".into(),
-            phases: None,
+            context: ContextWindowConfig::default(),
         }
     }
 }
 
-/// Per-phase model configuration for fine-grained control
+/// Context window configuration for managing token limits
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PhaseModels {
-    pub project_detection: String,
-    pub convention_inference: String,
-    pub constraint_extraction: String,
-    pub generation: String,
-    pub verification: String,
+pub struct ContextWindowConfig {
+    /// Authentication mode (api_key or oauth)
+    /// OAuth (Claude Code CLI) doesn't support extended context
+    pub auth_mode: AuthModeConfig,
+    /// Whether to use extended context (1M) if available
+    /// Only works with API key authentication
+    pub use_extended_context: bool,
+    /// Override context window size (tokens)
+    /// If set, ignores model defaults and auth mode restrictions
+    pub override_window_size: Option<u64>,
+    /// Ratio of context window for input vs output (0.0-1.0)
+    pub input_ratio: f32,
+    /// Safety margin tokens reserved for overhead
+    pub safety_margin_tokens: u64,
+    /// Maximum tokens per batch (if unset, calculated from window size)
+    pub max_batch_tokens: Option<u64>,
 }
 
-impl Default for PhaseModels {
+impl Default for ContextWindowConfig {
     fn default() -> Self {
         Self {
-            // Use lighter models for detection/convention phases
-            project_detection: "claude-haiku-4-5-20251001".to_string(),
-            convention_inference: "claude-haiku-4-5-20251001".to_string(),
-            constraint_extraction: "claude-sonnet-4-5-20250929".to_string(),
-            generation: "claude-sonnet-4-5-20250929".to_string(),
-            verification: "claude-sonnet-4-5-20250929".to_string(),
+            auth_mode: AuthModeConfig::OAuth, // Default to OAuth (Claude Code CLI)
+            use_extended_context: false,       // Disabled by default
+            override_window_size: None,
+            input_ratio: 0.90,
+            safety_margin_tokens: 10_000,
+            max_batch_tokens: None, // Calculated dynamically
         }
     }
 }
 
-impl PhaseModels {
-    pub fn new(default_model: &str) -> Self {
-        Self {
-            project_detection: default_model.to_string(),
-            convention_inference: default_model.to_string(),
-            constraint_extraction: default_model.to_string(),
-            generation: default_model.to_string(),
-            verification: default_model.to_string(),
+impl ContextWindowConfig {
+    /// Get effective context window size for a model
+    pub fn effective_window_size(&self, model_id: &str) -> u64 {
+        if let Some(override_size) = self.override_window_size {
+            return override_size;
         }
+
+        use crate::ai::model_capabilities::{AuthMode, ModelRegistry};
+
+        let registry = ModelRegistry::global();
+        let caps = registry.get_or_default(model_id);
+        let auth_mode = match self.auth_mode {
+            AuthModeConfig::ApiKey => AuthMode::ApiKey,
+            AuthModeConfig::OAuth => AuthMode::OAuth,
+        };
+
+        caps.effective_context_window(auth_mode, self.use_extended_context)
+    }
+
+    /// Get effective maximum batch tokens
+    pub fn effective_batch_tokens(&self, model_id: &str) -> u64 {
+        if let Some(batch_tokens) = self.max_batch_tokens {
+            return batch_tokens;
+        }
+
+        let window = self.effective_window_size(model_id);
+        let available = (window as f32 * self.input_ratio) as u64 - self.safety_margin_tokens;
+
+        // Batch ratio based on window size
+        let batch_ratio = if window >= 500_000 {
+            0.10
+        } else if window >= 200_000 {
+            0.25
+        } else {
+            0.30
+        };
+
+        (available as f32 * batch_ratio) as u64
+    }
+
+    /// Get available tokens for content
+    pub fn available_for_content(&self, model_id: &str) -> u64 {
+        let window = self.effective_window_size(model_id);
+        let input_budget = (window as f32 * self.input_ratio) as u64;
+        input_budget.saturating_sub(self.safety_margin_tokens)
+    }
+}
+
+/// Authentication mode configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthModeConfig {
+    /// API key authentication - supports all features
+    ApiKey,
+    /// OAuth authentication (Claude Code CLI) - limited features
+    OAuth,
+}
+
+impl Default for AuthModeConfig {
+    fn default() -> Self {
+        Self::OAuth
     }
 }
 
 impl LlmConfig {
-    pub fn get_insight_model(&self) -> &str {
-        self.insight_model.as_deref().unwrap_or(&self.default_model)
+    pub fn performance_model(&self) -> &str {
+        self.performance_model.as_deref().unwrap_or(&self.default_model)
     }
 
-    pub fn get_validation_model(&self) -> &str {
-        self.validation_model.as_deref().unwrap_or(&self.default_model)
+    pub fn fast_model(&self) -> &str {
+        self.fast_model.as_deref().unwrap_or(&self.default_model)
+    }
+
+    pub fn model_for_phase(&self, phase: &str) -> &str {
+        match phase {
+            "project_detection" | "convention_inference" => self.fast_model(),
+            "constraint_extraction" => self.performance_model(),
+            "generation" | "verification" => &self.default_model,
+            _ => &self.default_model,
+        }
     }
 }
 
@@ -1084,6 +1190,7 @@ impl AnalysisDepth {
 /// Configuration for insight extraction components
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct InsightConfig {
     /// Mistake finder configuration
     pub mistakes: MistakeFinderConfig,
@@ -1097,17 +1204,6 @@ pub struct InsightConfig {
     pub scoring: ScoringConfig,
 }
 
-impl Default for InsightConfig {
-    fn default() -> Self {
-        Self {
-            mistakes: MistakeFinderConfig::default(),
-            constraints: ConstraintDetectionConfig::default(),
-            domain: DomainAnalysisConfig::default(),
-            classification: ClassificationConfig::default(),
-            scoring: ScoringConfig::default(),
-        }
-    }
-}
 
 /// Mistake finder configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1255,10 +1351,10 @@ impl Default for ClassificationConfig {
             enable_tier_classification: true,
             enable_artifact_routing: true,
             enable_llm_classification: true,
-            llm_model: "claude-haiku-4-5".to_string(),
+            llm_model: "claude-haiku-4-5-20251001".to_string(),
             llm_batch_size: 10,
             llm_confidence_threshold: 0.8,
-            llm_fallback_model: "claude-sonnet-4-5".to_string(),
+            llm_fallback_model: "claude-sonnet-4-5-20250929".to_string(),
             cache_ttl_hours: 24,
             cache_max_entries: 1000,
         }
@@ -1571,19 +1667,12 @@ impl Default for ProjectConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct OutputConfig {
     pub dir: Option<std::path::PathBuf>,
     pub agents: OutputAgentConfig,
 }
 
-impl Default for OutputConfig {
-    fn default() -> Self {
-        Self {
-            dir: None,
-            agents: OutputAgentConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1871,19 +1960,19 @@ impl Default for RefinementConfig {
             strategy_retry_limit: 3,
             oscillation_strict_passes: 3,
             oscillation_lenient_passes: 2,
-            oscillation_stability_variance: 0.05,
-            oscillation_variance_window: 5,
+            oscillation_stability_variance: 0.03,
+            oscillation_variance_window: 3,
             enable_rollback: true,
             rollback_threshold: 0.1,
             max_rollbacks: 3,
             post_convergence_verification: true,
             post_convergence_passes: 2,
-            max_convergence_detections: 5,
+            max_convergence_detections: 3,
             dimension_thresholds: DimensionThresholds::default(),
             min_improvement_per_iteration: 0.01,
             detect_oscillation: true,
-            oscillation_window: 5,
-            oscillation_min_amplitude: 0.05,
+            oscillation_window: 3,
+            oscillation_min_amplitude: 0.03,
             quality_acceptance_delta: 0.05,
         }
     }
@@ -2081,6 +2170,7 @@ impl Default for RuleQualityConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ProjectSpecificQuality {
     pub cli: ProjectTypeQuality,
     pub library: ProjectTypeQuality,
@@ -2092,20 +2182,6 @@ pub struct ProjectSpecificQuality {
     pub auto: ProjectTypeQuality,
 }
 
-impl Default for ProjectSpecificQuality {
-    fn default() -> Self {
-        Self {
-            cli: ProjectTypeQuality::default(),
-            library: ProjectTypeQuality::default(),
-            backend: ProjectTypeQuality::default(),
-            frontend: ProjectTypeQuality::default(),
-            monorepo: ProjectTypeQuality::default(),
-            agent: ProjectTypeQuality::default(),
-            hybrid: ProjectTypeQuality::default(),
-            auto: ProjectTypeQuality::default(),
-        }
-    }
-}
 
 impl ProjectSpecificQuality {
     pub fn get_for_type(&self, project_type: ProjectType) -> &ProjectTypeQuality {
@@ -2150,6 +2226,162 @@ impl Default for DeepReviewConfig {
             min_evidence_ratio: 0.5,
         }
     }
+}
+
+// =============================================================================
+// VALIDATION CONFIG - Multi-Layer Validation System
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidationConfig {
+    pub enabled: bool,
+    pub layers: ValidationLayerConfigs,
+    pub clean_pass: CleanPassConfig,
+    pub semantic_context: SemanticContextValidationConfig,
+    pub value_assessment: ValueAssessmentConfig,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            layers: ValidationLayerConfigs::default(),
+            clean_pass: CleanPassConfig::default(),
+            semantic_context: SemanticContextValidationConfig::default(),
+            value_assessment: ValueAssessmentConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidationLayerConfigs {
+    pub format_enabled: bool,
+    pub evidence_enabled: bool,
+    pub semantic_context_enabled: bool,
+    pub value_assessment_enabled: bool,
+    pub cross_artifact_enabled: bool,
+    pub early_exit_on_critical: bool,
+}
+
+impl Default for ValidationLayerConfigs {
+    fn default() -> Self {
+        Self {
+            format_enabled: true,
+            evidence_enabled: true,
+            semantic_context_enabled: true,
+            value_assessment_enabled: true,
+            cross_artifact_enabled: true,
+            early_exit_on_critical: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CleanPassConfig {
+    pub require_zero_issues: bool,
+    pub consecutive_passes: usize,
+    pub max_attempts: usize,
+    pub reset_on_error: bool,
+    pub reset_on_critical: bool,
+}
+
+impl Default for CleanPassConfig {
+    fn default() -> Self {
+        Self {
+            require_zero_issues: true,
+            consecutive_passes: 2,
+            max_attempts: 10,
+            reset_on_error: true,
+            reset_on_critical: true,
+        }
+    }
+}
+
+impl CleanPassConfig {
+    /// Build reset severities vector from config flags
+    pub fn reset_severities(&self) -> Vec<crate::pipeline::validation::LayerIssueSeverity> {
+        use crate::pipeline::validation::LayerIssueSeverity;
+        let mut severities = Vec::new();
+        if self.reset_on_critical {
+            severities.push(LayerIssueSeverity::Critical);
+        }
+        if self.reset_on_error {
+            severities.push(LayerIssueSeverity::Error);
+        }
+        severities
+    }
+
+    pub fn for_preset(preset: ConfigPreset) -> Self {
+        match preset {
+            ConfigPreset::Quick => Self {
+                consecutive_passes: 1,
+                max_attempts: 5,
+                ..Default::default()
+            },
+            ConfigPreset::Standard => Self::default(),
+            ConfigPreset::Thorough => Self::default(),
+            ConfigPreset::Exhaustive => Self {
+                consecutive_passes: 3,
+                max_attempts: 15,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SemanticContextValidationConfig {
+    pub enabled: bool,
+    pub context_lines: usize,
+    pub min_similarity: f32,
+    pub max_refs_per_artifact: usize,
+    pub cache_context: bool,
+}
+
+impl Default for SemanticContextValidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            context_lines: 5,
+            min_similarity: 0.7,
+            max_refs_per_artifact: 10,
+            cache_context: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ValueAssessmentConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub reject_tier1: bool,
+    #[serde(default = "default_min_mistake_prevention")]
+    pub min_mistake_prevention: f32,
+    #[serde(default = "default_min_discoverability")]
+    pub min_discoverability: f32,
+    #[serde(default = "default_true")]
+    pub use_few_shot: bool,
+    #[serde(default = "default_few_shot_count")]
+    pub few_shot_examples_count: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_min_mistake_prevention() -> f32 {
+    0.4
+}
+fn default_min_discoverability() -> f32 {
+    0.3
+}
+fn default_few_shot_count() -> usize {
+    3
 }
 
 // =============================================================================
@@ -2492,8 +2724,21 @@ impl Default for UsabilityConfig {
             check_completeness: true,
             max_complexity_score: 0.7,
             min_usability_score: 0.7,
-            max_context_tokens: 50_000,
+            // 0 = auto-compute from ContextConfig based on model
+            max_context_tokens: 0,
             thresholds: UsabilityThresholds::default(),
+        }
+    }
+}
+
+impl UsabilityConfig {
+    /// Get effective max context tokens (auto-compute if 0)
+    pub fn effective_max_context_tokens(&self, model_id: &str, context_config: &ContextWindowConfig) -> usize {
+        if self.max_context_tokens > 0 {
+            self.max_context_tokens
+        } else {
+            // Use ~25% of available context for artifact content validation
+            (context_config.available_for_content(model_id) as f32 * 0.25) as usize
         }
     }
 }
@@ -2639,51 +2884,6 @@ impl Default for AgentGenerationConfig {
             require_domain_expertise: true,
             default_tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
         }
-    }
-}
-
-// =============================================================================
-// PHASE MODEL CONFIG
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PhaseModelConfig {
-    pub understanding: Option<String>,
-    pub insight_extraction: Option<String>,
-    pub generation: Option<String>,
-    pub validation: Option<String>,
-    pub refinement: Option<String>,
-}
-
-impl Default for PhaseModelConfig {
-    fn default() -> Self {
-        Self {
-            understanding: None,
-            insight_extraction: None,
-            generation: None,
-            validation: None,
-            refinement: None,
-        }
-    }
-}
-
-impl PhaseModelConfig {
-    pub fn get_model(&self, phase: &str, default: &str) -> String {
-        match phase {
-            "understanding" => self.understanding.clone(),
-            "insight_extraction" => self.insight_extraction.clone(),
-            "generation" => self.generation.clone(),
-            "validation" => self.validation.clone(),
-            "refinement" => self.refinement.clone(),
-            _ => None,
-        }
-        .unwrap_or_else(|| default.to_string())
-    }
-
-    /// Create a PhaseProviderConfig with model and timeout for provider factory
-    pub fn new(model: &str, timeout_secs: u64) -> PhaseProviderConfig {
-        PhaseProviderConfig::new(model, timeout_secs)
     }
 }
 
@@ -3005,16 +3205,6 @@ impl Config {
         }
     }
 
-    pub fn phase_model(&self) -> PhaseModelConfig {
-        PhaseModelConfig {
-            understanding: Some(self.llm.default_model.clone()),
-            insight_extraction: self.llm.insight_model.clone(),
-            generation: Some(self.llm.default_model.clone()),
-            validation: self.llm.validation_model.clone(),
-            refinement: Some(self.llm.default_model.clone()),
-        }
-    }
-
     pub fn evidence_depth(&self) -> EvidenceDepth {
         match self.analysis.depth {
             AnalysisDepth::Fast => EvidenceDepth::Minimal,
@@ -3313,7 +3503,7 @@ mod tests {
         ConfigPreset::Thorough.apply(&mut config);
         assert_eq!(config.value.min_overall, 0.7);
         assert_eq!(config.convergence.max_iterations, 50);
-        assert!(config.llm.insight_model.is_some());
+        assert!(config.llm.performance_model.is_some());
 
         ConfigPreset::Exhaustive.apply(&mut config);
         assert_eq!(config.value.min_overall, 0.8);
@@ -3408,5 +3598,52 @@ mod tests {
         assert_eq!(all.len(), 4);
         assert!(all.contains(&ArtifactType::ClaudeMd));
         assert!(all.contains(&ArtifactType::Rules));
+    }
+
+    // =========================================================================
+    // Cross-field validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_clean_pass_max_attempts_validation() {
+        let mut config = Config::default();
+
+        // Valid: max_attempts >= consecutive_passes
+        config.validation.clean_pass.max_attempts = 5;
+        config.validation.clean_pass.consecutive_passes = 2;
+        assert!(config.validate().is_ok());
+
+        // Invalid: max_attempts < consecutive_passes
+        config.validation.clean_pass.max_attempts = 1;
+        config.validation.clean_pass.consecutive_passes = 3;
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("max_attempts"));
+    }
+
+    #[test]
+    fn test_convergence_passes_vs_iterations() {
+        let mut config = Config::default();
+
+        // Valid: consecutive_passes <= max_iterations
+        config.convergence.consecutive_passes = 2;
+        config.convergence.max_iterations = 10;
+        assert!(config.validate().is_ok());
+
+        // Invalid: consecutive_passes > max_iterations
+        config.convergence.consecutive_passes = 15;
+        config.convergence.max_iterations = 10;
+        let result = config.validate();
+        assert!(result.is_err());
+        // Check that the error mentions the constraint violation
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("consecutive_passes") || err_msg.contains("max_iterations"),
+            "Error should mention convergence constraint: {}",
+            err_msg
+        );
     }
 }

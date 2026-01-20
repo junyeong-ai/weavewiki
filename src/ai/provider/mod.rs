@@ -23,6 +23,7 @@ pub use circuit_breaker::{
 };
 pub use openai::OpenAiProvider;
 
+// Note: Context window constants removed - use ModelRegistry instead
 #[cfg(feature = "claude-agent")]
 pub use claude_agent::ClaudeAgentProvider;
 
@@ -162,10 +163,6 @@ pub type SharedProvider = Arc<dyn LlmProvider + Send + Sync>;
 // =============================================================================
 
 /// Configuration for LLM providers
-///
-/// Note: API keys are handled securely - they are never serialized to output
-/// and are redacted in debug output. Each provider converts the key to
-/// SecretString internally for runtime protection.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Provider type: "claude-agent", "openai"
@@ -176,8 +173,7 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     /// Temperature for LLM generation (0.0 = deterministic, 1.0 = creative)
     pub temperature: f32,
-    /// API key (for OpenAI, Anthropic, etc.)
-    /// Never serialized to output for security
+    /// API key - never serialized for security
     #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     /// API base URL (for custom endpoints)
@@ -186,6 +182,9 @@ pub struct ProviderConfig {
     /// Maximum tokens to generate
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
+    /// Enable 1M extended context (only claude-sonnet-4-5-20250929)
+    #[serde(default)]
+    pub extended_context: bool,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -198,6 +197,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("api_base", &self.api_base)
             .field("max_tokens", &self.max_tokens)
+            .field("extended_context", &self.extended_context)
             .finish()
     }
 }
@@ -216,6 +216,7 @@ impl Default for ProviderConfig {
             api_key: None,
             api_base: None,
             max_tokens: 4096,
+            extended_context: false,
         }
     }
 }
@@ -259,6 +260,21 @@ pub async fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> 
     }
 }
 
+/// Create a provider for a specific model (for task-based model selection)
+///
+/// This allows creating providers for different models on demand,
+/// useful for routing high-intelligence tasks to Opus while keeping
+/// standard tasks on Sonnet.
+#[cfg(feature = "claude-agent")]
+pub async fn create_provider_for_model(
+    base_config: &ProviderConfig,
+    model: &str,
+) -> Result<SharedProvider> {
+    let mut config = base_config.clone();
+    config.model = Some(model.to_string());
+    create_provider(&config).await
+}
+
 /// Create a shared provider (async for API consistency when claude-agent feature disabled)
 #[cfg(not(feature = "claude-agent"))]
 pub async fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> {
@@ -270,3 +286,15 @@ pub async fn create_provider(config: &ProviderConfig) -> Result<SharedProvider> 
         ))),
     }
 }
+
+/// Create a provider for a specific model (non-claude-agent version)
+#[cfg(not(feature = "claude-agent"))]
+pub async fn create_provider_for_model(
+    base_config: &ProviderConfig,
+    model: &str,
+) -> Result<SharedProvider> {
+    let mut config = base_config.clone();
+    config.model = Some(model.to_string());
+    create_provider(&config).await
+}
+

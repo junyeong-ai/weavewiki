@@ -1,12 +1,10 @@
 //! Hybrid Classifier
 //!
-//! Combines structural rules and LLM-based classification for optimal accuracy.
+//! Combines structural rules and LLM-based classification.
 //! Strategy:
 //! 1. Fast structural checks for clear-cut cases
 //! 2. LLM classification for ambiguous cases
 //! 3. Caching to reduce repeated LLM calls
-//!
-//! This approach balances speed, cost, and accuracy.
 
 use std::sync::Arc;
 
@@ -15,43 +13,56 @@ use tracing::{debug, trace};
 use crate::ai::LlmProvider;
 use crate::config::Config;
 
-use super::knowledge_classifier::{KnowledgeClassifier, TierClassification};
 use super::llm_classifier::{ClassificationResult, DefaultLlmClassifier, LlmClassifier};
-use super::types::Insight;
+use super::types::{
+    text_contains_any, ArtifactClassification, ExtractedInsight, Insight, InsightCategory,
+    TierClassification,
+};
 use super::value_scorer::ValueScore;
-use super::ExtractedInsight;
 
-// =============================================================================
-// Hybrid Classification Strategy
-// =============================================================================
-
-/// Decision about which classification method to use
+/// Classification strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationStrategy {
-    /// Use structural rules only (fast, deterministic)
     Structural,
-    /// Use LLM classification (accurate, slower)
     Llm,
-    /// Use structural as primary, LLM for verification
     Hybrid,
 }
 
-/// Hybrid classifier combining structural and LLM approaches
+/// Hybrid classifier combining structural rules and LLM
 pub struct HybridClassifier {
-    /// Structural keyword-based classifier
-    structural: KnowledgeClassifier,
-    /// LLM-based classifier
     llm: Option<DefaultLlmClassifier>,
-    /// Configuration
     config: Arc<Config>,
-    /// Strategy to use
     strategy: ClassificationStrategy,
+    tier0_patterns: Vec<String>,
+    tier2_patterns: Vec<String>,
+    tier3_patterns: Vec<String>,
 }
 
 impl HybridClassifier {
-    /// Create a new hybrid classifier
     pub fn new(provider: Arc<dyn LlmProvider>, config: Arc<Config>) -> Self {
-        let structural = KnowledgeClassifier::new(Arc::clone(&config));
+        let tier0_patterns = config
+            .tiers
+            .tier0
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+
+        let tier2_patterns = config
+            .tiers
+            .tier2
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+
+        let tier3_patterns = config
+            .tiers
+            .tier3
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
 
         let llm = if config.insight.classification.enable_llm_classification {
             Some(DefaultLlmClassifier::new(
@@ -69,24 +80,50 @@ impl HybridClassifier {
         };
 
         Self {
-            structural,
             llm,
             config,
             strategy,
+            tier0_patterns,
+            tier2_patterns,
+            tier3_patterns,
         }
     }
 
-    /// Create a classifier that only uses structural rules (no LLM)
     pub fn structural_only(config: Arc<Config>) -> Self {
+        let tier0_patterns = config
+            .tiers
+            .tier0
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+
+        let tier2_patterns = config
+            .tiers
+            .tier2
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+
+        let tier3_patterns = config
+            .tiers
+            .tier3
+            .keywords
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+
         Self {
-            structural: KnowledgeClassifier::new(Arc::clone(&config)),
             llm: None,
             config,
             strategy: ClassificationStrategy::Structural,
+            tier0_patterns,
+            tier2_patterns,
+            tier3_patterns,
         }
     }
 
-    /// Classify a single insight
     pub async fn classify(&self, insight: &Insight) -> ClassificationResult {
         match self.strategy {
             ClassificationStrategy::Structural => self.classify_structural(insight),
@@ -95,7 +132,6 @@ impl HybridClassifier {
         }
     }
 
-    /// Classify multiple insights (batch)
     pub async fn classify_batch(
         &self,
         insights: &[Insight],
@@ -114,21 +150,19 @@ impl HybridClassifier {
         }
     }
 
-    /// Structural-only classification
     fn classify_structural(&self, insight: &Insight) -> ClassificationResult {
-        let tier = self.structural.classify_tier(insight);
-        let artifact = self.structural.classify_artifact(insight);
+        let tier = self.classify_tier(insight);
+        let artifact = self.classify_artifact(insight);
 
         ClassificationResult {
             tier,
             artifact,
             tier_confidence: self.structural_confidence(tier),
-            artifact_confidence: 0.7, // Structural rules are moderately confident
+            artifact_confidence: 0.7,
             reasoning: None,
         }
     }
 
-    /// LLM-only classification
     async fn classify_llm(&self, insight: &Insight) -> ClassificationResult {
         if let Some(ref llm) = self.llm {
             match llm.classify(insight).await {
@@ -143,12 +177,9 @@ impl HybridClassifier {
         }
     }
 
-    /// Hybrid classification: structural first, LLM for ambiguous cases
     async fn classify_hybrid(&self, insight: &Insight) -> ClassificationResult {
-        // Step 1: Get structural classification
         let structural_result = self.classify_structural(insight);
 
-        // Step 2: Determine if LLM is needed
         if !self.needs_llm_verification(&structural_result, insight) {
             trace!(
                 insight_id = %insight.id,
@@ -158,12 +189,10 @@ impl HybridClassifier {
             return structural_result;
         }
 
-        // Step 3: Use LLM for ambiguous cases
-        if let Some(ref llm) = self.llm {
-            if llm.should_use_llm(insight) {
+        if let Some(ref llm) = self.llm
+            && llm.should_use_llm(insight) {
                 match llm.classify(insight).await {
                     Ok(llm_result) => {
-                        // Merge results: prefer LLM if confident
                         return self.merge_results(structural_result, llm_result);
                     }
                     Err(e) => {
@@ -171,12 +200,10 @@ impl HybridClassifier {
                     }
                 }
             }
-        }
 
         structural_result
     }
 
-    /// Batch LLM classification
     async fn classify_batch_llm(
         &self,
         insights: &[Insight],
@@ -195,20 +222,17 @@ impl HybridClassifier {
         }
     }
 
-    /// Batch hybrid classification
     async fn classify_batch_hybrid(
         &self,
         insights: &[Insight],
         project_context: Option<&str>,
     ) -> Vec<ClassificationResult> {
-        // First pass: structural classification with indices
         let structural_results: Vec<_> = insights
             .iter()
             .enumerate()
             .map(|(idx, i)| (idx, self.classify_structural(i)))
             .collect();
 
-        // Identify indices needing LLM
         let needs_llm_indices: Vec<_> = structural_results
             .iter()
             .filter(|(idx, result)| self.needs_llm_verification(result, &insights[*idx]))
@@ -225,22 +249,18 @@ impl HybridClassifier {
             "Hybrid batch classification"
         );
 
-        // Collect insights that need LLM (by cloning)
         let llm_insights: Vec<Insight> = needs_llm_indices
             .iter()
             .map(|&idx| insights[idx].clone())
             .collect();
 
-        // Get LLM results for ambiguous cases
         let llm_results = self.classify_batch_llm(&llm_insights, project_context).await;
 
-        // Create lookup map for LLM results by index
         let llm_map: std::collections::HashMap<usize, ClassificationResult> = needs_llm_indices
             .into_iter()
             .zip(llm_results.into_iter())
             .collect();
 
-        // Merge results
         structural_results
             .into_iter()
             .map(|(idx, structural)| {
@@ -253,33 +273,261 @@ impl HybridClassifier {
             .collect()
     }
 
-    /// Determine if LLM verification is needed
+    fn classify_tier(&self, insight: &Insight) -> TierClassification {
+        if !self.config.insight.classification.enable_tier_classification {
+            trace!(insight_id = %insight.id, "Tier classification disabled, defaulting to Tier2");
+            return TierClassification::Tier2;
+        }
+
+        let title_lower = insight.title.to_lowercase();
+        let desc_lower = insight.description.to_lowercase();
+        let combined = format!("{} {}", title_lower, desc_lower);
+
+        if self.matches_tier0(&combined) {
+            trace!(insight_id = %insight.id, "Classified as Tier0");
+            return TierClassification::Tier0;
+        }
+
+        if self.matches_tier3(&combined, insight) {
+            trace!(insight_id = %insight.id, "Classified as Tier3");
+            return TierClassification::Tier3;
+        }
+
+        if self.matches_tier2(&combined, insight) {
+            trace!(insight_id = %insight.id, "Classified as Tier2");
+            return TierClassification::Tier2;
+        }
+
+        trace!(insight_id = %insight.id, "Classified as Tier1 (default)");
+        TierClassification::Tier1
+    }
+
+    fn classify_artifact(&self, insight: &Insight) -> ArtifactClassification {
+        if !self.config.insight.classification.enable_artifact_routing {
+            trace!(insight_id = %insight.id, "Artifact routing disabled, defaulting to ClaudeMd");
+            return ArtifactClassification::ClaudeMd;
+        }
+
+        if self.is_rule_material(insight) {
+            trace!(insight_id = %insight.id, "Classified as Rules");
+            return ArtifactClassification::Rules;
+        }
+
+        if self.is_skill_material(insight) {
+            trace!(insight_id = %insight.id, "Classified as Skills");
+            return ArtifactClassification::Skills;
+        }
+
+        if self.is_agent_material(insight) {
+            trace!(insight_id = %insight.id, "Classified as Agents");
+            return ArtifactClassification::Agents;
+        }
+
+        trace!(insight_id = %insight.id, "Classified as ClaudeMd (default)");
+        ArtifactClassification::ClaudeMd
+    }
+
+    fn matches_tier0(&self, text: &str) -> bool {
+        if self.tier0_patterns.iter().any(|p| text.contains(p)) {
+            return true;
+        }
+
+        const BUILTIN_TIER0: &[&str] = &[
+            "use best practices",
+            "follow conventions",
+            "write clean code",
+            "write tests",
+            "handle errors",
+            "npm install",
+            "cargo build",
+            "git commit",
+            "docker run",
+            "pip install",
+            "use typescript",
+            "prefer async/await",
+            "use descriptive names",
+            "add comments",
+            "follow dry principle",
+            "avoid magic numbers",
+        ];
+
+        text_contains_any(text, BUILTIN_TIER0)
+    }
+
+    fn matches_tier3(&self, text: &str, insight: &Insight) -> bool {
+        if self.tier3_patterns.iter().any(|p| text.contains(p)) {
+            return true;
+        }
+
+        match insight.category {
+            InsightCategory::SecurityConstraint | InsightCategory::Compliance => return true,
+            InsightCategory::TechnicalConstraint
+                if insight.severity == Some("critical".to_string()) =>
+            {
+                return true;
+            }
+            InsightCategory::BusinessRule if insight.prevention_info.is_some() => return true,
+            _ => {}
+        }
+
+        const BUILTIN_TIER3: &[&str] = &[
+            "must",
+            "never",
+            "always",
+            "critical",
+            "required",
+            "forbidden",
+            "mandatory",
+            "breaks if",
+            "fails when",
+            "race condition",
+            "security",
+            "compliance",
+            "regulation",
+            "sla",
+            "production",
+            "data loss",
+            "injection",
+            "authentication",
+            "authorization",
+            "deadlock",
+            "memory leak",
+        ];
+
+        if text_contains_any(text, BUILTIN_TIER3) {
+            return true;
+        }
+
+        !insight.evidence.is_empty() && insight.prevention_info.is_some()
+    }
+
+    fn matches_tier2(&self, text: &str, insight: &Insight) -> bool {
+        match insight.category {
+            InsightCategory::ArchitectureIntent | InsightCategory::DomainKnowledge => return true,
+            InsightCategory::TechnicalConstraint if !insight.evidence.is_empty() => return true,
+            _ => {}
+        }
+
+        if self.tier2_patterns.iter().any(|p| text.contains(p)) {
+            return true;
+        }
+
+        const BUILTIN_TIER2: &[&str] = &[
+            "should",
+            "prefer",
+            "recommend",
+            "architecture",
+            "design",
+            "workflow",
+        ];
+
+        if text_contains_any(text, BUILTIN_TIER2) {
+            return true;
+        }
+
+        !insight.evidence.is_empty()
+    }
+
+    fn is_rule_material(&self, insight: &Insight) -> bool {
+        const RULE_KEYWORDS: &[&str] = &[
+            "must", "never", "always", "forbidden", "required", "constraint", "rule", "policy",
+            "enforce", "mandate", "prohibit",
+        ];
+
+        match insight.category {
+            InsightCategory::TechnicalConstraint
+            | InsightCategory::SecurityConstraint
+            | InsightCategory::PerformanceConstraint
+            | InsightCategory::Compliance => return true,
+            _ => {}
+        }
+
+        let text = format!("{} {}", insight.title, insight.description).to_lowercase();
+        text_contains_any(&text, RULE_KEYWORDS)
+    }
+
+    fn is_skill_material(&self, insight: &Insight) -> bool {
+        const SKILL_KEYWORDS: &[&str] = &[
+            "how to",
+            "step",
+            "procedure",
+            "checklist",
+            "workflow",
+            "guide",
+            "tutorial",
+            "when to",
+            "add new",
+            "create",
+            "implement",
+            "extend",
+            "modify",
+        ];
+
+        if matches!(
+            insight.category,
+            InsightCategory::DomainKnowledge | InsightCategory::BusinessRule
+        ) {
+            return false;
+        }
+
+        let text = format!("{} {}", insight.title, insight.description).to_lowercase();
+        text_contains_any(&text, SKILL_KEYWORDS)
+    }
+
+    fn is_agent_material(&self, insight: &Insight) -> bool {
+        const AGENT_KEYWORDS: &[&str] = &[
+            "expert",
+            "specialist",
+            "domain",
+            "business",
+            "industry",
+            "regulatory",
+            "compliance",
+            "finance",
+            "medical",
+            "legal",
+        ];
+
+        if matches!(
+            insight.category,
+            InsightCategory::DomainKnowledge | InsightCategory::BusinessRule
+        ) {
+            return true;
+        }
+
+        let text = format!("{} {}", insight.title, insight.description).to_lowercase();
+        text_contains_any(&text, AGENT_KEYWORDS)
+    }
+
     fn needs_llm_verification(&self, result: &ClassificationResult, insight: &Insight) -> bool {
-        // High confidence structural results don't need LLM
         if result.tier_confidence >= 0.9 {
             return false;
         }
 
-        // Tier 0 and Tier 3 should be verified by LLM if not confident
-        if matches!(result.tier, TierClassification::Tier0 | TierClassification::Tier3) {
+        if matches!(
+            result.tier,
+            TierClassification::Tier0 | TierClassification::Tier3
+        ) {
             return result.tier_confidence < 0.8;
         }
 
-        // Medium-length content with Tier 1/2 classification might be misclassified
         let text_len = insight.title.len() + insight.description.len();
         if text_len > 100 && text_len < 500 && matches!(result.tier, TierClassification::Tier1) {
             return true;
         }
 
-        // Has evidence but classified as low value - verify
-        if !insight.evidence.is_empty() && matches!(result.tier, TierClassification::Tier0 | TierClassification::Tier1) {
+        if !insight.evidence.is_empty()
+            && matches!(
+                result.tier,
+                TierClassification::Tier0 | TierClassification::Tier1
+            )
+        {
             return true;
         }
 
         false
     }
 
-    /// Merge structural and LLM results
     fn merge_results(
         &self,
         structural: ClassificationResult,
@@ -287,43 +535,30 @@ impl HybridClassifier {
     ) -> ClassificationResult {
         let confidence_threshold = self.config.insight.classification.llm_confidence_threshold;
 
-        // If LLM is highly confident, use its result
         if llm.tier_confidence >= confidence_threshold {
             return llm;
         }
 
-        // If structural is more confident, use it
         if structural.tier_confidence > llm.tier_confidence {
             return structural;
         }
 
-        // Otherwise, prefer LLM (even with lower confidence, it's more nuanced)
         llm
     }
 
-    /// Calculate confidence score for structural classification
     fn structural_confidence(&self, tier: TierClassification) -> f32 {
-        // Structural rules are most confident about extreme cases
         match tier {
-            TierClassification::Tier0 => 0.85, // Pretty sure this is generic
-            TierClassification::Tier3 => 0.8,  // Keywords indicate high value
-            TierClassification::Tier2 => 0.6,  // Medium confidence
-            TierClassification::Tier1 => 0.5,  // Low confidence (default)
+            TierClassification::Tier0 => 0.85,
+            TierClassification::Tier3 => 0.8,
+            TierClassification::Tier2 => 0.6,
+            TierClassification::Tier1 => 0.5,
         }
     }
 
-    /// Get duplicate similarity threshold
     pub fn duplicate_threshold(&self) -> f32 {
-        self.structural.duplicate_threshold()
+        self.config.insight.classification.duplicate_similarity_threshold
     }
-}
 
-// =============================================================================
-// Extended ExtractedInsight Creation
-// =============================================================================
-
-impl HybridClassifier {
-    /// Create an ExtractedInsight with classification
     pub async fn create_extracted_insight(
         &self,
         insight: Insight,
@@ -340,51 +575,10 @@ impl HybridClassifier {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{LlmProvider, LlmResponse, ResponseMetadata, ResponseTiming, TokenUsage};
-    use crate::pipeline::insight::knowledge_classifier::ArtifactClassification;
-    use crate::pipeline::insight::types::{InsightCategory, InsightSource};
-    use crate::types::Result;
-    use async_trait::async_trait;
-
-    struct MockProvider;
-
-    #[async_trait]
-    impl LlmProvider for MockProvider {
-        async fn generate(&self, _prompt: &str, _schema: &serde_json::Value) -> Result<LlmResponse> {
-            Ok(LlmResponse {
-                content: serde_json::json!({
-                    "tier": 2,
-                    "artifact": "rules",
-                    "tier_confidence": 0.85,
-                    "artifact_confidence": 0.8,
-                    "reasoning": "Test reasoning"
-                }),
-                usage: TokenUsage::default(),
-                cost_usd: 0.0,
-                timing: ResponseTiming::default(),
-                metadata: ResponseMetadata::default(),
-            })
-        }
-
-        async fn health_check(&self) -> Result<bool> {
-            Ok(true)
-        }
-
-        fn name(&self) -> &str {
-            "mock"
-        }
-
-        fn model(&self) -> &str {
-            "mock-model"
-        }
-    }
+    use crate::pipeline::insight::types::InsightSource;
 
     fn create_test_insight(title: &str, description: &str) -> Insight {
         Insight {
@@ -403,7 +597,6 @@ mod tests {
     fn test_structural_only_classifier() {
         let config = Arc::new(Config::default());
         let classifier = HybridClassifier::structural_only(config);
-
         assert_eq!(classifier.strategy, ClassificationStrategy::Structural);
     }
 
@@ -418,7 +611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_structural_classification() {
+    async fn test_tier0_classification() {
         let config = Arc::new(Config::default());
         let classifier = HybridClassifier::structural_only(config);
 
@@ -428,24 +621,68 @@ mod tests {
         );
 
         let result = classifier.classify(&insight).await;
-        // Should be rejected as Tier 0 (generic advice)
         assert_eq!(result.tier, TierClassification::Tier0);
     }
 
     #[tokio::test]
-    async fn test_hybrid_classification_with_evidence() {
+    async fn test_tier3_classification() {
         let config = Arc::new(Config::default());
-        let classifier = HybridClassifier::new(Arc::new(MockProvider), config);
+        let classifier = HybridClassifier::structural_only(config);
 
         let mut insight = create_test_insight(
-            "Database Connection Rule",
-            "Must use connection pool for all database operations",
+            "Authentication Required",
+            "Must validate JWT tokens on all protected endpoints",
         );
-        insight.evidence = vec!["src/db.rs:42".to_string()];
+        insight.category = InsightCategory::SecurityConstraint;
+        insight.prevention_info = Some("Use auth middleware".to_string());
+        insight.evidence = vec!["src/auth.rs".to_string()];
 
         let result = classifier.classify(&insight).await;
-        // Should have reasonable confidence
-        assert!(result.tier_confidence > 0.5);
+        assert_eq!(result.tier, TierClassification::Tier3);
+    }
+
+    #[tokio::test]
+    async fn test_rule_classification() {
+        let config = Arc::new(Config::default());
+        let classifier = HybridClassifier::structural_only(config);
+
+        let insight = create_test_insight(
+            "Database Connection",
+            "Must use connection pool, never create direct connections",
+        );
+
+        let result = classifier.classify(&insight).await;
+        assert_eq!(result.artifact, ArtifactClassification::Rules);
+    }
+
+    #[tokio::test]
+    async fn test_skill_classification() {
+        let config = Arc::new(Config::default());
+        let classifier = HybridClassifier::structural_only(config);
+
+        let mut insight = create_test_insight(
+            "Adding New Endpoint",
+            "How to add a new API endpoint: step 1, step 2...",
+        );
+        insight.category = InsightCategory::ArchitectureIntent;
+
+        let result = classifier.classify(&insight).await;
+        assert_eq!(result.artifact, ArtifactClassification::Skills);
+    }
+
+    #[tokio::test]
+    async fn test_agent_classification() {
+        let config = Arc::new(Config::default());
+        let classifier = HybridClassifier::structural_only(config);
+
+        let mut insight = create_test_insight(
+            "Payment Processing Expert",
+            "Domain expert knowledge about payment processing and compliance",
+        );
+        insight.category = InsightCategory::DomainKnowledge;
+
+        let result = classifier.classify(&insight).await;
+        assert_eq!(result.artifact, ArtifactClassification::Agents);
     }
 
     #[test]
@@ -453,7 +690,6 @@ mod tests {
         let config = Arc::new(Config::default());
         let classifier = HybridClassifier::structural_only(config);
 
-        // High confidence result doesn't need LLM
         let high_conf = ClassificationResult {
             tier: TierClassification::Tier2,
             artifact: ArtifactClassification::ClaudeMd,
@@ -464,7 +700,6 @@ mod tests {
         let insight = create_test_insight("Test", "Description");
         assert!(!classifier.needs_llm_verification(&high_conf, &insight));
 
-        // Low confidence Tier 3 needs verification
         let low_conf_tier3 = ClassificationResult {
             tier: TierClassification::Tier3,
             artifact: ArtifactClassification::Rules,

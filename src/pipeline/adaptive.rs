@@ -24,7 +24,6 @@ use super::analysis::{
     multi_agent::{AnalysisContext, MultiAgentAnalyzer},
 };
 use super::context::VerifiedFileRegistry;
-use super::generation::insight_driven::{GenerationContext, InsightDrivenGenerator};
 
 use super::generation::path_rules::{ClaudeMdGenerator, PathRulesGenerator};
 use super::phases::{
@@ -34,6 +33,7 @@ use super::phases::{
     output_router::{self, OutputPlan},
     project_detection::{self, ProjectDetection},
 };
+use super::enrichment::{EnrichedPlan, EnrichmentEngine};
 use super::reference_extractor::ReferenceExtractor;
 use super::refinement::RefinementEngine;
 use super::validation::{
@@ -52,6 +52,7 @@ pub struct AdaptivePipelineOutput {
     pub deep_analysis: Option<DeepAnalysisResult>,
     pub synthesis: Option<SynthesizedAnalysis>,
     pub output_plan: OutputPlan,
+    pub enriched_plan: Option<EnrichedPlan>,
     pub tier_filter_result: TierFilterResult,
     pub consistency_result: ConsistencyResult,
     pub cross_validation_result: CrossValidationResult,
@@ -322,6 +323,32 @@ impl AdaptivePipeline {
             "Output planned"
         );
 
+        // Phase 5.5: Enrichment - Bridge synthesis findings to generation
+        let enrichment_engine = EnrichmentEngine::new(
+            self.config.quality().minimum_quality,
+        );
+        let enriched_plan = enrichment_engine.enrich(
+            output_plan.clone(),
+            synthesis.as_ref(),
+            &constraints,
+        );
+        tracing::info!(
+            total_constraints = enriched_plan.coverage.total_constraints,
+            covered = enriched_plan.coverage.covered_constraints,
+            coverage_ratio = format!("{:.1}%", enriched_plan.coverage.coverage_ratio * 100.0),
+            suggested_artifacts = enriched_plan.suggested_artifacts.len(),
+            "Enrichment complete"
+        );
+
+        // Log coverage warning if below threshold
+        if !enrichment_engine.meets_coverage_threshold(&enriched_plan.coverage) {
+            tracing::warn!(
+                coverage = format!("{:.1}%", enriched_plan.coverage.coverage_ratio * 100.0),
+                uncovered = enriched_plan.coverage.uncovered.len(),
+                "Constraint coverage below threshold - some constraints may not appear in output"
+            );
+        }
+
         // Phase 6: Draft Generation
         let project_name = self
             .project_root
@@ -343,9 +370,9 @@ impl AdaptivePipeline {
             PathRulesGenerator::generate(&output_plan, monorepo.as_ref(), &conventions, &constraints)?;
 
         let skills = self
-            .generate_skills(&output_plan, &constraints, &file_registry, &conventions, synthesis.as_ref())
+            .generate_skills_with_enrichment(&enriched_plan, &constraints, &file_registry, &conventions, synthesis.as_ref())
             .await?;
-        let agents = self.generate_agents(&output_plan, &detection, monorepo.as_ref()).await?;
+        let agents = self.generate_agents_with_enrichment(&enriched_plan, &detection, monorepo.as_ref()).await?;
 
         tracing::info!(
             skills = skills.len(),
@@ -426,6 +453,7 @@ impl AdaptivePipeline {
             deep_analysis,
             synthesis,
             output_plan,
+            enriched_plan: Some(enriched_plan),
             tier_filter_result: tier_result,
             consistency_result,
             cross_validation_result,
@@ -686,35 +714,35 @@ impl AdaptivePipeline {
         Ok(Some(deep_result))
     }
 
-    async fn generate_skills(
+    /// Generate skills with enriched constraints from synthesis
+    async fn generate_skills_with_enrichment(
         &self,
-        plan: &OutputPlan,
+        enriched_plan: &EnrichedPlan,
         constraints: &ExtractedConstraints,
         file_registry: &VerifiedFileRegistry,
-        conventions: &InferredConventions,
+        _conventions: &InferredConventions,
         synthesis: Option<&SynthesizedAnalysis>,
     ) -> Result<Vec<Skill>> {
-        // Use InsightDrivenGenerator if enabled
-        if self.config.quality_loop().insight_driven.use_llm_decisions {
-            return self.generate_skills_insight_driven(
-                plan, constraints, file_registry, conventions, synthesis
-            ).await;
-        }
-
         let mut skills = Vec::new();
 
-        for planned in &plan.skills_plan.planned_skills {
+        for planned in &enriched_plan.plan.skills_plan.planned_skills {
+            // Get enriched constraints for this skill
+            let skill_constraints = enriched_plan
+                .skill_constraints
+                .get(&planned.name)
+                .cloned()
+                .unwrap_or_default();
+
             let workflow = constraints
                 .complex_workflows
                 .iter()
                 .find(|w| to_kebab_case(&w.name) == planned.name);
 
-            let body = if let Some(w) = workflow {
+            let mut body = if let Some(w) = workflow {
                 let mut body = format!("## {}\n\n", w.name);
                 body.push_str(&format!("{}\n\n", w.description));
                 body.push_str("### Steps\n");
                 for step in &w.steps {
-                    // Validate file references before adding them
                     let valid_files: Vec<_> = step
                         .files_involved
                         .iter()
@@ -729,14 +757,6 @@ impl AdaptivePipeline {
                         ));
                     } else {
                         body.push_str(&format!("{}. {}\n", step.order, step.action));
-                        // Log skipped invalid references for debugging
-                        if !step.files_involved.is_empty() {
-                            tracing::debug!(
-                                step = step.action,
-                                invalid_refs = ?step.files_involved,
-                                "Skipped invalid file references in skill"
-                            );
-                        }
                     }
                 }
                 if !w.gotchas.is_empty() {
@@ -750,6 +770,35 @@ impl AdaptivePipeline {
                 format!("## {}\n\n{}", planned.name, planned.trigger)
             };
 
+            // Inject enriched constraints into skill body
+            if !skill_constraints.is_empty() {
+                body.push_str("\n### Critical Constraints\n");
+                for constraint in &skill_constraints {
+                    body.push_str(&format!("- {}\n", constraint.format_for_skill()));
+                }
+            }
+
+            // Add module context from synthesis if available
+            if let Some(synth) = synthesis {
+                let relevant_modules: Vec<_> = synth
+                    .modules
+                    .iter()
+                    .filter(|m| {
+                        let name_lower = planned.name.to_lowercase();
+                        m.name.to_lowercase().contains(&name_lower)
+                            || name_lower.contains(&m.name.to_lowercase())
+                    })
+                    .take(2)
+                    .collect();
+
+                if !relevant_modules.is_empty() {
+                    body.push_str("\n### Related Modules\n");
+                    for module in relevant_modules {
+                        body.push_str(&format!("- @{}: {}\n", module.path, module.responsibility));
+                    }
+                }
+            }
+
             let skill = Skill::new(&planned.name, &planned.trigger, body)
                 .with_user_invocable(true);
 
@@ -759,57 +808,24 @@ impl AdaptivePipeline {
         Ok(skills)
     }
 
-    async fn generate_skills_insight_driven(
+    /// Generate agents with enriched internal knowledge from synthesis
+    async fn generate_agents_with_enrichment(
         &self,
-        plan: &OutputPlan,
-        constraints: &ExtractedConstraints,
-        file_registry: &VerifiedFileRegistry,
-        conventions: &InferredConventions,
-        synthesis: Option<&SynthesizedAnalysis>,
-    ) -> Result<Vec<Skill>> {
-        let generator = InsightDrivenGenerator::new(
-            Arc::clone(&self.provider),
-            file_registry.clone(),
-            self.config.quality_loop().insight_driven.clone(),
-        );
-
-        let mut skills = Vec::new();
-
-        for planned in &plan.skills_plan.planned_skills {
-            let context = GenerationContext {
-                name: &planned.name,
-                module_path: None, // Could be enhanced to map planned skills to modules
-                conventions,
-                constraints,
-                synthesis,
-            };
-
-            match generator.generate_skill(&context).await? {
-                Some(skill) => skills.push(skill),
-                None => {
-                    // InsightDrivenGenerator decided this skill has insufficient value
-                    tracing::debug!(
-                        skill = planned.name,
-                        "Skipped skill generation due to low value assessment"
-                    );
-                }
-            }
-        }
-
-        Ok(skills)
-    }
-
-    async fn generate_agents(
-        &self,
-        plan: &OutputPlan,
+        enriched_plan: &EnrichedPlan,
         detection: &ProjectDetection,
         monorepo: Option<&MonorepoAnalysis>,
     ) -> Result<Vec<Agent>> {
         let mut agents = Vec::new();
 
-        for planned in &plan.agents_plan.planned_agents {
+        for planned in &enriched_plan.plan.agents_plan.planned_agents {
+            // Get enriched knowledge for this agent
+            let knowledge = enriched_plan
+                .agent_knowledge
+                .get(&planned.name)
+                .cloned();
+
             let agent = self
-                .build_agent(&planned.name, &planned.role, detection, monorepo)
+                .build_agent_with_knowledge(&planned.name, &planned.role, detection, monorepo, knowledge)
                 .await?;
             agents.push(agent);
         }
@@ -817,17 +833,28 @@ impl AdaptivePipeline {
         Ok(agents)
     }
 
-    async fn build_agent(
+    /// Build agent with injected internal knowledge
+    async fn build_agent_with_knowledge(
         &self,
         name: &str,
         role: &str,
         detection: &ProjectDetection,
         monorepo: Option<&MonorepoAnalysis>,
+        knowledge: Option<super::enrichment::AgentInternalKnowledge>,
     ) -> Result<Agent> {
         let (model, tools) = self.determine_agent_config(name, role);
-        let prompt = self
-            .generate_agent_prompt_with_llm(role, detection, monorepo)
-            .await?;
+
+        // Generate prompt with injected internal knowledge
+        let prompt = if let Some(ref k) = knowledge
+            && k.is_substantial()
+        {
+            // Use enriched knowledge directly
+            self.build_enriched_agent_prompt(role, detection, monorepo, k)
+        } else {
+            // Fallback to LLM generation
+            self.generate_agent_prompt_with_llm(role, detection, monorepo)
+                .await?
+        };
 
         let mut agent = Agent::new(name, role, prompt).with_model(model);
 
@@ -836,6 +863,35 @@ impl AdaptivePipeline {
         }
 
         Ok(agent)
+    }
+
+    /// Build agent prompt with enriched internal knowledge
+    fn build_enriched_agent_prompt(
+        &self,
+        role: &str,
+        detection: &ProjectDetection,
+        _monorepo: Option<&MonorepoAnalysis>,
+        knowledge: &super::enrichment::AgentInternalKnowledge,
+    ) -> String {
+        let project_type = detection.primary_type.as_str();
+        let langs: Vec<_> = detection
+            .languages
+            .iter()
+            .map(|l| l.language.as_str())
+            .collect();
+
+        let mut prompt = format!(
+            "## Description\n\
+            {role} specialist for {project_type} ({langs}) with deep internal project knowledge.\n\n",
+            role = role,
+            project_type = project_type,
+            langs = langs.join(", "),
+        );
+
+        // Add the enriched internal knowledge section
+        prompt.push_str(&knowledge.format_as_prompt_section());
+
+        prompt
     }
 
     fn determine_agent_config(&self, name: &str, role: &str) -> (AgentModel, Vec<String>) {

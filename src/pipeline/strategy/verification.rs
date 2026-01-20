@@ -8,7 +8,7 @@ use crate::config::SemanticDimensionWeights;
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::pipeline::patterns::{
     ACTIONABLE_PATTERN, FILE_LINE_REF, FILE_REF, GENERIC_PATTERN,
-    count_tier1_patterns, count_value_indicators,
+    count_generic_patterns, count_value_indicators,
 };
 
 /// Result of verifying whether a strategy resolved its targeted issue
@@ -404,33 +404,33 @@ impl PostStrategyVerifier {
         }
     }
 
-    /// Verify tier 1 content removal
+    /// Verify generic content removal
     fn verify_tier1_removal(&self, before: &str, after: &str) -> VerificationResult {
-        let before_tier1 = count_tier1_patterns(before);
-        let after_tier1 = count_tier1_patterns(after);
+        let before_generic = count_generic_patterns(before);
+        let after_generic = count_generic_patterns(after);
 
         let metrics = VerificationMetrics::new(
-            "tier1_patterns",
-            before_tier1 as f32,
-            after_tier1 as f32,
-            0.0, // Should be 0
+            "generic_patterns",
+            before_generic as f32,
+            after_generic as f32,
+            0.0,
         );
 
-        if after_tier1 < before_tier1 {
+        if after_generic < before_generic {
             VerificationResult {
-                resolved: after_tier1 == 0,
-                quality_delta: (before_tier1 - after_tier1) as f32 * 0.1,
-                details: format!("Tier 1 patterns: {} → {}", before_tier1, after_tier1),
+                resolved: after_generic == 0,
+                quality_delta: (before_generic - after_generic) as f32 * 0.1,
+                details: format!("Generic patterns: {} → {}", before_generic, after_generic),
                 metrics,
             }
-        } else if after_tier1 == 0 {
-            VerificationResult::success(0.0, "No Tier 1 content")
+        } else if after_generic == 0 {
+            VerificationResult::success(0.0, "No generic content")
                 .with_metrics(metrics)
         } else {
             VerificationResult {
                 resolved: false,
                 quality_delta: 0.0,
-                details: format!("Tier 1 content remains: {}", after_tier1),
+                details: format!("Generic content remains: {}", after_generic),
                 metrics,
             }
         }

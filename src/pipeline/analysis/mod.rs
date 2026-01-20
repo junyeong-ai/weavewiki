@@ -40,7 +40,8 @@ pub use top_down::{
 
 pub use reconciliation::{
     AnalysisClaim, BidirectionalReconciler, ClaimSource, ConflictCategory, FileRef,
-    ReconciledAnalysis, ReconciliationConfig, ReconciliationConflict, ResolutionDecision,
+    MergeQualityResult, ReconciledAnalysis, ReconciliationConfig, ReconciliationConflict,
+    ResolutionDecision,
 };
 
 pub use ast_enrichment::{

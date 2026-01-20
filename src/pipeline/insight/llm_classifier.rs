@@ -21,8 +21,7 @@ use crate::ai::LlmProvider;
 use crate::config::Config;
 use crate::types::Result;
 
-use super::types::Insight;
-use super::{ArtifactClassification, TierClassification};
+use super::types::{ArtifactClassification, Insight, TierClassification};
 
 // =============================================================================
 // Core Types
@@ -183,12 +182,11 @@ impl ClassificationCache {
         let key = CacheKey::from_insight(insight);
         let entries = self.entries.read().ok()?;
 
-        if let Some(entry) = entries.get(&key) {
-            if entry.created_at.elapsed() < self.ttl {
+        if let Some(entry) = entries.get(&key)
+            && entry.created_at.elapsed() < self.ttl {
                 trace!(insight_id = %insight.id, "Cache hit");
                 return Some(entry.result.clone());
             }
-        }
         None
     }
 
@@ -253,9 +251,7 @@ impl ClassificationCache {
 pub struct DefaultLlmClassifier {
     provider: Arc<dyn LlmProvider>,
     cache: ClassificationCache,
-    config: Arc<Config>,
     batch_size: usize,
-    confidence_threshold: f32,
 }
 
 impl DefaultLlmClassifier {
@@ -268,8 +264,6 @@ impl DefaultLlmClassifier {
                 llm_config.cache_max_entries,
             ),
             batch_size: llm_config.llm_batch_size,
-            confidence_threshold: llm_config.llm_confidence_threshold,
-            config,
         }
     }
 

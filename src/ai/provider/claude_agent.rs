@@ -1,151 +1,259 @@
 //! Claude Agent SDK Provider
 //!
 //! Direct API integration using the claude-agent SDK with OAuth support.
-//! Uses Claude Code CLI OAuth for seamless authentication.
+//! Supports 1M extended context window via BetaFeature::Context1M (API key only).
+//!
+//! Context Window Behavior:
+//! - OAuth (Claude Code CLI): Always uses standard context (200K for Sonnet/Opus)
+//! - API Key: Can enable extended context (1M) for supported models
 
 #[cfg(feature = "claude-agent")]
 mod inner {
     use async_trait::async_trait;
-    use claude_agent::client::CreateMessageRequest;
+    use claude_agent::client::{
+        BetaFeature, CreateMessageRequest, ProviderConfig as SdkProviderConfig,
+    };
     use claude_agent::{Auth, Client, Message, OAuthConfig};
     use serde_json::Value;
     use std::time::Instant;
 
+    use crate::ai::model_capabilities::{AuthMode, ModelRegistry};
     use crate::ai::provider::{
         LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, TokenUsage,
     };
-    use crate::constants::provider::{
-        CLAUDE_AGENT_MAX_TOKENS, HEALTH_CHECK_MAX_TOKENS, claude as claude_constants,
-    };
+    use crate::constants::provider::{CLAUDE_AGENT_MAX_TOKENS, HEALTH_CHECK_MAX_TOKENS};
+
+    const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
     use crate::types::Result;
 
-    /// Claude Agent SDK Provider
-    ///
-    /// Uses the claude-agent crate for direct API access with OAuth support.
-    /// Authentication priority:
-    /// 1. Claude Code CLI OAuth (if logged in via `claude login`)
-    /// 2. ANTHROPIC_API_KEY environment variable
-    /// 3. Explicit API key
     pub struct ClaudeAgentProvider {
         client: Client,
         model: String,
         max_tokens: usize,
+        extended_context: bool,
+        auth_mode: AuthMode,
     }
 
     impl ClaudeAgentProvider {
-        /// Create provider using Claude Code CLI OAuth
-        /// Requires prior login via `claude login`
-        pub async fn from_cli(model: &str) -> Result<Self> {
-            let client = Client::builder()
-                .auth(Auth::ClaudeCli)
-                .await
-                .map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!(
-                        "Claude CLI auth failed: {e}. Run 'claude login' first."
-                    ))
-                })?
-                .oauth_config(OAuthConfig::default())
-                .build()
-                .await
-                .map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
-                })?;
-
-            Ok(Self {
-                client,
-                model: model.to_string(),
-                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
-            })
+        /// Get effective context window based on model and auth mode
+        pub fn context_window(&self) -> u64 {
+            let registry = ModelRegistry::global();
+            let caps = registry.get_or_default(&self.model);
+            caps.effective_context_window(self.auth_mode, self.extended_context)
         }
 
-        /// Create provider with automatic auth detection
-        /// Tries CLI OAuth first, falls back to environment variable
-        pub async fn from_env(model: &str) -> Result<Self> {
-            // Try CLI OAuth first
-            if let Ok(provider) = Self::from_cli(model).await {
-                tracing::info!("Using Claude Code CLI OAuth authentication");
-                return Ok(provider);
-            }
-
-            // Fallback to environment variable
-            tracing::info!("CLI OAuth not available, trying ANTHROPIC_API_KEY");
-            let client = Client::builder()
-                .auth(Auth::FromEnv)
-                .await
-                .map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!(
-                        "Auth failed: {e}. Run 'claude login' or set ANTHROPIC_API_KEY."
-                    ))
-                })?
-                .build()
-                .await
-                .map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
-                })?;
-
-            Ok(Self {
-                client,
-                model: model.to_string(),
-                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
-            })
+        pub fn is_extended_context(&self) -> bool {
+            self.extended_context
         }
 
-        /// Create provider with explicit API key
-        pub async fn with_api_key(api_key: &str, model: &str) -> Result<Self> {
-            let client = Client::builder()
-                .auth(Auth::ApiKey(api_key.to_string()))
-                .await
-                .map_err(|e| crate::types::ClaudegenError::Config(format!("Auth failed: {e}")))?
-                .build()
-                .await
-                .map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
-                })?;
-
-            Ok(Self {
-                client,
-                model: model.to_string(),
-                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
-            })
+        pub fn auth_mode(&self) -> AuthMode {
+            self.auth_mode
         }
 
-        /// Create provider from ProviderConfig
-        pub async fn from_config(config: &ProviderConfig) -> Result<Self> {
-            let model = config
-                .model
-                .as_deref()
-                .unwrap_or(claude_constants::DEFAULT_MODEL);
-
-            // Priority: explicit API key > CLI OAuth > environment
-            let auth = if let Some(api_key) = &config.api_key {
-                Auth::ApiKey(api_key.clone())
+        /// Check if extended context is available for this model with current auth mode
+        pub fn extended_available(&self) -> bool {
+            let registry = ModelRegistry::global();
+            if let Some(caps) = registry.get(&self.model) {
+                caps.extended_available(self.auth_mode)
             } else {
-                Auth::ClaudeCli
-            };
+                false
+            }
+        }
 
+        /// Check if model supports extended context (requires API key)
+        pub fn supports_extended_context(model: &str) -> bool {
+            let registry = ModelRegistry::global();
+            if let Some(caps) = registry.get(model) {
+                caps.extended_context_window.is_some()
+            } else {
+                false
+            }
+        }
+
+        async fn build_client(
+            auth: Auth,
+            api_key: Option<&str>,
+            extended_context: bool,
+        ) -> Result<Client> {
             let mut builder = Client::builder().auth(auth).await.map_err(|e| {
                 crate::types::ClaudegenError::Config(format!(
                     "Auth failed: {e}. Run 'claude login' or set ANTHROPIC_API_KEY."
                 ))
             })?;
 
-            // Add OAuth config for CLI auth
-            if config.api_key.is_none() {
+            if api_key.is_none() {
                 builder = builder.oauth_config(OAuthConfig::default());
             }
 
-            let client = builder.build().await.map_err(|e| {
+            if extended_context {
+                let sdk_config = SdkProviderConfig::default().with_beta(BetaFeature::Context1M);
+                builder = builder.config(sdk_config);
+            }
+
+            builder.build().await.map_err(|e| {
                 crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
-            })?;
+            })
+        }
+
+        /// Create provider with extended context (1M)
+        /// NOTE: Extended context requires API key authentication.
+        /// OAuth (Claude Code CLI) does not support extended context.
+        pub async fn with_extended_context(model: &str) -> Result<Self> {
+            if !Self::supports_extended_context(model) {
+                let registry = ModelRegistry::global();
+                let supported: Vec<_> = registry
+                    .model_ids()
+                    .into_iter()
+                    .filter(|id| Self::supports_extended_context(id))
+                    .collect();
+                return Err(crate::types::ClaudegenError::Config(format!(
+                    "Model {model} does not support extended context. Supported models: {:?}",
+                    supported
+                )));
+            }
+
+            // Extended context requires API key, not OAuth
+            let client = Self::build_client(Auth::FromEnv, None, true).await?;
+            let registry = ModelRegistry::global();
+            let caps = registry.get_or_default(model);
+            let context_window = caps.effective_context_window(AuthMode::ApiKey, true);
+
+            tracing::info!(
+                model,
+                context_window,
+                "Created provider with extended context (API key required)"
+            );
+
+            Ok(Self {
+                client,
+                model: model.to_string(),
+                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
+                extended_context: true,
+                auth_mode: AuthMode::ApiKey,
+            })
+        }
+
+        /// Create provider using Claude Code CLI OAuth
+        /// NOTE: OAuth does not support extended context (limited to 200K)
+        pub async fn from_cli(model: &str) -> Result<Self> {
+            let client = Self::build_client(Auth::ClaudeCli, None, false).await?;
+            let registry = ModelRegistry::global();
+            let caps = registry.get_or_default(model);
+            let context_window = caps.effective_context_window(AuthMode::OAuth, false);
+
+            tracing::debug!(
+                model,
+                context_window,
+                "Created OAuth provider (extended context not available)"
+            );
+
+            Ok(Self {
+                client,
+                model: model.to_string(),
+                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
+                extended_context: false,
+                auth_mode: AuthMode::OAuth,
+            })
+        }
+
+        /// Create provider from environment (prefers OAuth, falls back to API key)
+        pub async fn from_env(model: &str) -> Result<Self> {
+            if let Ok(provider) = Self::from_cli(model).await {
+                tracing::info!(
+                    context_window = provider.context_window(),
+                    "Using Claude Code CLI OAuth (200K context)"
+                );
+                return Ok(provider);
+            }
+
+            tracing::info!("CLI OAuth not available, trying ANTHROPIC_API_KEY");
+            let client = Self::build_client(Auth::FromEnv, None, false).await?;
+            let registry = ModelRegistry::global();
+            let caps = registry.get_or_default(model);
+            let context_window = caps.effective_context_window(AuthMode::ApiKey, false);
+
+            tracing::info!(
+                context_window,
+                "Using API key authentication"
+            );
+
+            Ok(Self {
+                client,
+                model: model.to_string(),
+                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
+                extended_context: false,
+                auth_mode: AuthMode::ApiKey,
+            })
+        }
+
+        /// Create provider with explicit API key
+        pub async fn with_api_key(api_key: &str, model: &str) -> Result<Self> {
+            let client =
+                Self::build_client(Auth::ApiKey(api_key.to_string()), Some(api_key), false).await?;
+
+            Ok(Self {
+                client,
+                model: model.to_string(),
+                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
+                extended_context: false,
+                auth_mode: AuthMode::ApiKey,
+            })
+        }
+
+        /// Create provider with explicit API key and extended context
+        pub async fn with_api_key_extended(api_key: &str, model: &str) -> Result<Self> {
+            if !Self::supports_extended_context(model) {
+                return Err(crate::types::ClaudegenError::Config(format!(
+                    "Model {model} does not support extended context"
+                )));
+            }
+
+            let client =
+                Self::build_client(Auth::ApiKey(api_key.to_string()), Some(api_key), true).await?;
+
+            Ok(Self {
+                client,
+                model: model.to_string(),
+                max_tokens: CLAUDE_AGENT_MAX_TOKENS,
+                extended_context: true,
+                auth_mode: AuthMode::ApiKey,
+            })
+        }
+
+        /// Create provider from configuration
+        pub async fn from_config(config: &ProviderConfig) -> Result<Self> {
+            let model = config
+                .model
+                .as_deref()
+                .unwrap_or(DEFAULT_MODEL);
+
+            let (auth, auth_mode) = if let Some(api_key) = &config.api_key {
+                (Auth::ApiKey(api_key.clone()), AuthMode::ApiKey)
+            } else {
+                (Auth::ClaudeCli, AuthMode::OAuth)
+            };
+
+            // Extended context only available with API key
+            let use_extended = config.extended_context && auth_mode == AuthMode::ApiKey;
+            if config.extended_context && auth_mode == AuthMode::OAuth {
+                tracing::warn!(
+                    "Extended context requested but OAuth doesn't support it. Using standard context."
+                );
+            }
+
+            let client =
+                Self::build_client(auth, config.api_key.as_deref(), use_extended)
+                    .await?;
 
             Ok(Self {
                 client,
                 model: model.to_string(),
                 max_tokens: config.max_tokens,
+                extended_context: use_extended,
+                auth_mode,
             })
         }
 
-        /// Set max tokens for responses
         pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
             self.max_tokens = max_tokens;
             self
@@ -234,9 +342,12 @@ mod inner {
     }
 }
 
+// Re-export ClaudeAgentProvider
+// Note: Context window constants removed - use ModelRegistry instead
 #[cfg(feature = "claude-agent")]
 pub use inner::ClaudeAgentProvider;
 
+// Stub for when claude-agent feature is disabled
 #[cfg(not(feature = "claude-agent"))]
 pub struct ClaudeAgentProvider;
 
@@ -244,13 +355,17 @@ pub struct ClaudeAgentProvider;
 impl ClaudeAgentProvider {
     pub async fn from_env(_model: &str) -> crate::types::Result<Self> {
         Err(crate::types::ClaudegenError::Config(
-            "claude-agent feature not enabled".to_string(),
+            "claude-agent feature not enabled. Enable it in Cargo.toml or use API key.".to_string(),
         ))
     }
 
     pub async fn from_config(_config: &super::ProviderConfig) -> crate::types::Result<Self> {
         Err(crate::types::ClaudegenError::Config(
-            "claude-agent feature not enabled".to_string(),
+            "claude-agent feature not enabled. Enable it in Cargo.toml or use API key.".to_string(),
         ))
+    }
+
+    pub fn context_window(&self) -> u64 {
+        200_000 // Default fallback
     }
 }

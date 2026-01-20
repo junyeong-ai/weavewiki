@@ -24,15 +24,6 @@ pub mod provider {
     pub const CLAUDE_AGENT_MAX_TOKENS: usize = 8192;
     pub const HEALTH_CHECK_MAX_TOKENS: u32 = 10;
     pub const RATE_LIMIT_MAX_DELAY_SECS: u64 = 300;
-
-    pub mod openai {
-        pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-        pub const DEFAULT_MODEL: &str = "gpt-4-turbo-preview";
-    }
-
-    pub mod claude {
-        pub const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
-    }
 }
 
 pub mod validation {

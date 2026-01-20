@@ -4,7 +4,8 @@
 //! 1. Analysis Quality Gate: Ensure analysis confidence meets threshold
 //! 2. Generation Quality Gate: Ensure semantic/structural quality meets threshold
 //! 3. Evidence Quality Gate: Validate all file references against source
-//! 4. Deep Review Gate: Two-pass verification for quality guarantee
+//! 4. 5-Layer Validation Pipeline: Format → Evidence → Semantic → Value → Cross-Artifact
+//! 5. Clean Pass Guarantee: N consecutive passes with zero issues
 //!
 //! Durable Execution Features:
 //! - Periodic checkpointing for crash recovery
@@ -27,6 +28,7 @@ use super::checkpoint::{
 };
 use super::context::VerifiedFileRegistry;
 use super::deep_review::{DeepReviewEngine, ReviewArtifacts, TwoPassResult};
+use super::validation::{CleanPassStatus, FailureReason, ValidationPipeline, ValidationResults};
 
 #[derive(Debug, Clone)]
 pub struct QualityLoopResult {
@@ -37,6 +39,8 @@ pub struct QualityLoopResult {
     pub gaps_discovered: Vec<DiscoveredGap>,
     pub deep_review_passed: bool,
     pub deep_review_attempts: u32,
+    pub validation_results: Option<ValidationResults>,
+    pub clean_pass_status: CleanPassStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -78,11 +82,10 @@ impl QualityLoop {
 
     pub async fn run(&self) -> Result<QualityLoopResult> {
         // Check for crash recovery if durable execution is enabled
-        if self.config.performance.resume_on_crash {
-            if let Some(result) = self.try_recover().await? {
+        if self.config.performance.resume_on_crash
+            && let Some(result) = self.try_recover().await? {
                 return Ok(result);
             }
-        }
 
         // Initialize checkpoint manager for durable execution
         let mut checkpoint_manager = if self.config.performance.checkpoint_interval_minutes > 0 {
@@ -125,7 +128,7 @@ impl QualityLoop {
                 Ok(None)
             }
             RecoveryResult::Recovered(checkpoint) => {
-                self.resume_from_checkpoint(checkpoint).await
+                self.resume_from_checkpoint(*checkpoint).await
             }
         }
     }
@@ -143,9 +146,9 @@ impl QualityLoop {
         );
 
         // If we have generated artifacts from a previous run, try to use them
-        if let Some(ref claude_md) = checkpoint.generated_artifacts.claude_md {
-            if checkpoint.current_phase == PipelinePhase::DeepReview
-                || checkpoint.current_phase == PipelinePhase::Finalization
+        if let Some(ref claude_md) = checkpoint.generated_artifacts.claude_md
+            && (checkpoint.current_phase == PipelinePhase::DeepReview
+                || checkpoint.current_phase == PipelinePhase::Finalization)
             {
                 tracing::info!(
                     phase = ?checkpoint.current_phase,
@@ -186,7 +189,6 @@ impl QualityLoop {
                     }
                 }
             }
-        }
 
         // For phases before deep review or if artifacts are incomplete,
         // we need to re-run the pipeline. Log what we recovered.
@@ -348,12 +350,21 @@ impl QualityLoop {
                     (true, 0)
                 };
 
-                if deep_review_passed {
+                // Run 5-layer validation pipeline
+                let validation_result = self
+                    .run_validation_pipeline(&result)
+                    .await?;
+
+                let clean_pass_status = validation_result.1;
+                let validation_passed = matches!(clean_pass_status, CleanPassStatus::Converged { .. });
+
+                if deep_review_passed && validation_passed {
                     tracing::info!(
                         iteration = outer_iter + 1,
                         quality = format!("{:.1}%", result.quality_score * 100.0),
                         deep_review_attempts,
-                        "Quality loop converged successfully"
+                        clean_passes = ?clean_pass_status,
+                        "Quality loop converged with clean pass guarantee"
                     );
 
                     checkpoint.current_phase = PipelinePhase::Finalization;
@@ -369,12 +380,16 @@ impl QualityLoop {
                         gaps_discovered,
                         deep_review_passed,
                         deep_review_attempts,
+                        validation_results: Some(validation_result.0),
+                        clean_pass_status,
                     });
                 } else {
                     tracing::warn!(
                         iteration = outer_iter + 1,
                         deep_review_attempts,
-                        "Deep review failed, continuing refinement"
+                        deep_review_passed,
+                        validation_passed,
+                        "Review/validation incomplete, continuing refinement"
                     );
                 }
             }
@@ -415,6 +430,11 @@ impl QualityLoop {
                 (true, 0)
             };
 
+        // Run final validation pipeline
+        let (validation_results, clean_pass_status) = self
+            .run_validation_pipeline(&final_result)
+            .await?;
+
         Ok(QualityLoopResult {
             output: final_result,
             outer_iterations: loop_config.max_iterations,
@@ -423,6 +443,8 @@ impl QualityLoop {
             gaps_discovered,
             deep_review_passed,
             deep_review_attempts,
+            validation_results: Some(validation_results),
+            clean_pass_status,
         })
     }
 
@@ -461,6 +483,11 @@ impl QualityLoop {
                 (true, 0)
             };
 
+        // Run validation pipeline
+        let (validation_results, clean_pass_status) = self
+            .run_validation_pipeline(&result)
+            .await?;
+
         Ok(QualityLoopResult {
             output: result,
             outer_iterations: 1,
@@ -469,6 +496,8 @@ impl QualityLoop {
             gaps_discovered: Vec::new(),
             deep_review_passed,
             deep_review_attempts,
+            validation_results: Some(validation_results),
+            clean_pass_status,
         })
     }
 
@@ -544,6 +573,92 @@ impl QualityLoop {
                 .map(|r| (r.name.clone(), r.to_markdown()))
                 .collect(),
         }
+    }
+
+    async fn run_validation_pipeline(
+        &self,
+        result: &AdaptivePipelineOutput,
+    ) -> Result<(ValidationResults, CleanPassStatus)> {
+        if !self.config.validation.enabled {
+            tracing::debug!("Validation pipeline disabled, skipping");
+            return Ok((ValidationResults::new(), CleanPassStatus::Converged { passes: 0 }));
+        }
+
+        let file_registry = self.get_file_registry().await?;
+
+        let mut pipeline = ValidationPipeline::new(
+            Arc::clone(&self.provider),
+            self.config.validation.clone(),
+            self.config.quality().clone(),
+            self.config.project.project_type,
+            file_registry,
+            &self.project_root,
+        );
+
+        // Run validation iterations until clean pass converged or max attempts
+        let max_attempts = self.config.validation.clean_pass.max_attempts;
+        let required_passes = self.config.validation.clean_pass.consecutive_passes;
+
+        tracing::info!(
+            required_passes,
+            max_attempts,
+            "Starting 5-layer validation pipeline"
+        );
+
+        for attempt in 0..max_attempts {
+            let validation_results = pipeline
+                .validate(&result.plugin, &result.claude_md)
+                .await?;
+
+            let status = pipeline.record_validation_attempt(&validation_results);
+
+            tracing::info!(
+                attempt = attempt + 1,
+                total_issues = validation_results.total_issues,
+                errors = validation_results.error_issues(),
+                status = ?status,
+                "Validation attempt completed"
+            );
+
+            match status {
+                CleanPassStatus::Converged { passes } => {
+                    tracing::info!(
+                        passes,
+                        "Clean pass guarantee achieved"
+                    );
+                    return Ok((validation_results, status));
+                }
+                CleanPassStatus::Failed { reason } => {
+                    if matches!(reason, FailureReason::MaxAttemptsReached) {
+                        tracing::warn!(
+                            "Max validation attempts reached without convergence"
+                        );
+                    } else {
+                        tracing::warn!(
+                            reason = ?reason,
+                            "Validation failed"
+                        );
+                    }
+                    return Ok((validation_results, status));
+                }
+                CleanPassStatus::InProgress { streak, required } => {
+                    tracing::debug!(
+                        streak,
+                        required,
+                        "Clean pass in progress"
+                    );
+                    // Continue to next attempt
+                }
+            }
+        }
+
+        // Return final state if loop completes without convergence
+        let final_results = pipeline
+            .validate(&result.plugin, &result.claude_md)
+            .await?;
+        let final_status = pipeline.clean_pass_status();
+
+        Ok((final_results, final_status))
     }
 
     fn escalate_analysis_depth(&self, mut config: Config) -> Config {
@@ -649,19 +764,5 @@ struct EvidenceCheckResult {
 }
 
 fn extract_file_refs(content: &str) -> Vec<String> {
-    use std::sync::LazyLock;
-    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"@([a-zA-Z0-9_/.-]+(?::\d+)?)").expect("Invalid file ref regex")
-    });
-
-    RE.captures_iter(content)
-        .filter_map(|cap| cap.get(1))
-        .map(|m| {
-            m.as_str()
-                .split(':')
-                .next()
-                .unwrap_or(m.as_str())
-                .to_string()
-        })
-        .collect()
+    super::patterns::extract_file_refs(content)
 }

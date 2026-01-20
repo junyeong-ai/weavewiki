@@ -14,7 +14,8 @@ use super::{
     LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, TokenUsage,
 };
 use crate::ai::validation::extract_json_from_response;
-use crate::constants::provider::openai as openai_constants;
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_MODEL: &str = "gpt-4o";
 use crate::types::{ClaudegenError, Result};
 
 /// OpenAI API Provider with secure API key handling
@@ -54,11 +55,11 @@ impl OpenAiProvider {
 
         let api_base = config
             .api_base
-            .unwrap_or_else(|| openai_constants::DEFAULT_BASE_URL.to_string());
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let model = config
             .model
-            .unwrap_or_else(|| openai_constants::DEFAULT_MODEL.to_string());
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))

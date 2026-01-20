@@ -4,7 +4,7 @@
 //! Uses bidirectional feedback system with multi-dimensional validation.
 //! Integrates learning history for strategy optimization.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crate::types::{Agent, Result, Rule, Skill};
 use super::analysis::architectural_analyzer::{
     ArchitecturalAnalyzer, StructuralValidationResult,
 };
-use super::convergence::ConvergenceChecker;
+use super::convergence::{ConvergenceChecker, ConvergencePath, ConvergenceReport, Improvement};
 use super::context::VerifiedFileRegistry;
 use super::feedback::{AggregatedFeedback, FeedbackAggregator};
 use super::learning::{LearningHistory, StrategyOutcome as LearningOutcome};
@@ -24,7 +24,7 @@ use super::patterns;
 use super::phases::output_router::OutputPlan;
 use super::strategy::{IssueKind as StrategyIssueKind, StrategyContext, StrategyOutcome, StrategyRotator};
 use super::validation::{
-    cross_artifact::CrossArtifactValidator,
+    cross_artifact::{CrossArtifactResult, CrossArtifactValidator},
     cross_validation::{CrossValidationResult, CrossValidator},
     quality_validator::QualityValidator,
     semantic_validator::{
@@ -32,7 +32,7 @@ use super::validation::{
         SemanticQualityResult, SemanticValidator,
     },
     tier_filter::{self, ItemType, Tier1Violation},
-    usability::UsabilityValidator,
+    usability::{UsabilityResult, UsabilityValidator},
 };
 
 #[derive(Debug, Clone)]
@@ -100,6 +100,230 @@ struct RefinementSnapshot {
     rules: Vec<Rule>,
     quality: f32,
     iteration: usize,
+}
+
+const MAX_TRAJECTORY_SIZE: usize = 100;
+
+/// Configuration context for refinement loop (immutable during iteration)
+struct RefinementConfig {
+    max_iterations: usize,
+    min_iterations: usize,
+    target_quality: f32,
+    stagnation_patience: usize,
+    stagnation_threshold: f32,
+    require_all_dimensions: bool,
+    issues_per_iteration: usize,
+    strategy_retry_limit: usize,
+    oscillation_strict_passes: usize,
+    oscillation_lenient_passes: usize,
+    oscillation_stability_variance: f32,
+    oscillation_variance_window: usize,
+    enable_rollback: bool,
+    rollback_threshold: f32,
+    max_rollbacks: usize,
+    post_convergence_verification: bool,
+    post_convergence_passes_required: usize,
+    max_convergence_detections: usize,
+    min_quality_for_value_exit: f32,
+}
+
+impl RefinementConfig {
+    fn from_config(config: &Config) -> Self {
+        let refinement = config.refinement();
+        let target_quality = config.quality().target_score;
+        Self {
+            max_iterations: refinement.max_iterations,
+            min_iterations: refinement.min_iterations,
+            target_quality,
+            stagnation_patience: refinement.stagnation_patience,
+            stagnation_threshold: refinement.stagnation_threshold,
+            require_all_dimensions: refinement.require_all_dimensions,
+            issues_per_iteration: refinement.issues_per_iteration,
+            strategy_retry_limit: refinement.strategy_retry_limit,
+            oscillation_strict_passes: refinement.oscillation_strict_passes,
+            oscillation_lenient_passes: refinement.oscillation_lenient_passes,
+            oscillation_stability_variance: refinement.oscillation_stability_variance,
+            oscillation_variance_window: refinement.oscillation_variance_window,
+            enable_rollback: refinement.enable_rollback,
+            rollback_threshold: refinement.rollback_threshold,
+            max_rollbacks: refinement.max_rollbacks,
+            post_convergence_verification: refinement.post_convergence_verification,
+            post_convergence_passes_required: refinement.post_convergence_passes,
+            max_convergence_detections: refinement.max_convergence_detections,
+            min_quality_for_value_exit: target_quality * 0.9,
+        }
+    }
+}
+
+/// Mutable state tracked across refinement iterations
+struct IterationState {
+    prev_quality: Option<f32>,
+    stagnation_count: usize,
+    last_structural_result: Option<StructuralValidationResult>,
+    strategy_failures: HashMap<String, usize>,
+    last_semantic_result: Option<SemanticQualityResult>,
+    quality_trajectory: VecDeque<f32>,
+    critical_improvements: Vec<Improvement>,
+    best_state: Option<RefinementSnapshot>,
+    rollback_count: usize,
+    consecutive_convergence_passes: usize,
+    total_convergence_detections: usize,
+    tier3_trajectory: VecDeque<usize>,
+}
+
+impl IterationState {
+    fn new() -> Self {
+        Self {
+            prev_quality: None,
+            stagnation_count: 0,
+            last_structural_result: None,
+            strategy_failures: HashMap::new(),
+            last_semantic_result: None,
+            quality_trajectory: VecDeque::with_capacity(MAX_TRAJECTORY_SIZE),
+            critical_improvements: Vec::new(),
+            best_state: None,
+            rollback_count: 0,
+            consecutive_convergence_passes: 0,
+            total_convergence_detections: 0,
+            tier3_trajectory: VecDeque::with_capacity(10),
+        }
+    }
+
+    fn record_quality(&mut self, quality: f32) {
+        if self.quality_trajectory.len() >= MAX_TRAJECTORY_SIZE {
+            self.quality_trajectory.pop_front();
+        }
+        self.quality_trajectory.push_back(quality);
+    }
+
+    fn record_tier3(&mut self, count: usize) {
+        if self.tier3_trajectory.len() >= 10 {
+            self.tier3_trajectory.pop_front();
+        }
+        self.tier3_trajectory.push_back(count);
+    }
+
+    fn decay_strategy_failures(&mut self) {
+        for failures in self.strategy_failures.values_mut() {
+            *failures = failures.saturating_sub(1);
+        }
+        self.strategy_failures.retain(|_, &mut v| v > 0);
+    }
+}
+
+/// Collection of validators created at refinement start
+struct Validators {
+    semantic: Option<SemanticValidator>,
+    quality: Option<QualityValidator>,
+    structural: Option<ArchitecturalAnalyzer>,
+    cross_artifact: Option<CrossArtifactValidator>,
+    usability: Option<UsabilityValidator>,
+}
+
+impl Validators {
+    fn new(config: &Config, provider: &Arc<dyn LlmProvider>, project_root: &PathBuf) -> Self {
+        let semantic_config = config.semantic_validation();
+        let use_ai_validation = semantic_config.use_ai_validation;
+
+        let semantic = if !use_ai_validation {
+            Some(SemanticValidator::new(semantic_config.clone(), project_root))
+        } else {
+            None
+        };
+
+        let quality = if use_ai_validation {
+            Some(QualityValidator::new(Arc::clone(provider), &semantic_config))
+        } else {
+            None
+        };
+
+        let structural_config = config.structural_validation();
+        let structural = if structural_config.enabled {
+            Some(ArchitecturalAnalyzer::new(structural_config))
+        } else {
+            None
+        };
+
+        let cross_artifact_config = config.cross_artifact();
+        let cross_artifact = if cross_artifact_config.enabled {
+            Some(CrossArtifactValidator::new(
+                cross_artifact_config.min_coherence_score,
+                cross_artifact_config.max_overlap_ratio,
+            ))
+        } else {
+            None
+        };
+
+        let usability_config = config.usability();
+        let usability = if usability_config.enabled {
+            Some(
+                UsabilityValidator::new(crate::config::ProjectType::default())
+                    .with_config(usability_config),
+            )
+        } else {
+            None
+        };
+
+        Self { semantic, quality, structural, cross_artifact, usability }
+    }
+
+    async fn run_semantic(
+        &self,
+        skills: &[Skill],
+        agents: &[Agent],
+        rules: &[Rule],
+        claude_md: &crate::types::ProjectMemory,
+        project_context: &str,
+    ) -> Result<SemanticQualityResult> {
+        if let Some(ref qv) = self.quality {
+            qv.validate(skills, agents, rules, claude_md, project_context).await
+        } else {
+            self.semantic
+                .as_ref()
+                .expect("semantic_validator required when ai_validation disabled")
+                .validate(skills, agents, rules, claude_md)
+                .await
+        }
+    }
+
+    async fn run_structural(
+        &self,
+        file_registry: &VerifiedFileRegistry,
+        skills: &[Skill],
+        agents: &[Agent],
+        rules: &[Rule],
+        claude_md: &crate::types::ProjectMemory,
+    ) -> Result<Option<StructuralValidationResult>> {
+        if let Some(ref analyzer) = self.structural {
+            Ok(Some(analyzer.validate(file_registry, skills, agents, rules, claude_md).await?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn run_cross_artifact(
+        &self,
+        skills: &[Skill],
+        agents: &[Agent],
+        rules: &[Rule],
+        claude_md: &crate::types::ProjectMemory,
+    ) -> Option<CrossArtifactResult> {
+        self.cross_artifact
+            .as_ref()
+            .map(|v| v.validate(skills, agents, rules, claude_md))
+    }
+
+    fn run_usability(
+        &self,
+        skills: &[Skill],
+        agents: &[Agent],
+        rules: &[Rule],
+        claude_md: &crate::types::ProjectMemory,
+    ) -> Option<UsabilityResult> {
+        self.usability
+            .as_ref()
+            .map(|v| v.validate(skills, agents, rules, claude_md))
+    }
 }
 
 pub struct RefinementEngine {
@@ -211,153 +435,41 @@ impl RefinementEngine {
         claude_md: &crate::types::ProjectMemory,
         output_plan: &OutputPlan,
     ) -> Result<RefinementResult> {
-        let refinement_config = self.config.refinement().clone();
-        let max_iterations = refinement_config.max_iterations;
-        let min_iterations = refinement_config.min_iterations;
-        let target_quality = self.config.quality().target_score;
-        let stagnation_patience = refinement_config.stagnation_patience;
-        let stagnation_threshold = refinement_config.stagnation_threshold;
-        let require_all_dimensions = refinement_config.require_all_dimensions;
-        let issues_per_iteration = refinement_config.issues_per_iteration;
-        let strategy_retry_limit = refinement_config.strategy_retry_limit;
-        let oscillation_strict_passes = refinement_config.oscillation_strict_passes;
-        let oscillation_lenient_passes = refinement_config.oscillation_lenient_passes;
-        let oscillation_stability_variance = refinement_config.oscillation_stability_variance;
-        let oscillation_variance_window = refinement_config.oscillation_variance_window;
-
-        let claude_md_content = claude_md.to_markdown();
-        let semantic_config = self.config.semantic_validation();
-        let use_ai_validation = semantic_config.use_ai_validation;
-
-        // Create only the validator that will be used
-        let semantic_validator = if !use_ai_validation {
-            Some(SemanticValidator::new(semantic_config.clone(), &self.project_root))
-        } else {
-            None
-        };
-
-        let quality_validator = if use_ai_validation {
-            Some(QualityValidator::new(
-                Arc::clone(&self.provider),
-                &semantic_config,
-            ))
-        } else {
-            None
-        };
-
+        let cfg = RefinementConfig::from_config(&self.config);
+        let validators = Validators::new(&self.config, &self.provider, &self.project_root);
         let file_registry = match &self.file_registry {
             Some(r) => r.clone(),
             None => VerifiedFileRegistry::build(&self.project_root).await?,
         };
+        let project_context = format!("Project root: {}", self.project_root.display());
+        let claude_md_content = claude_md.to_markdown();
+        let mut state = IterationState::new();
 
-        // Create structural analyzer for module coverage validation
-        let structural_config = self.config.structural_validation();
-        let structural_analyzer = if structural_config.enabled {
-            Some(ArchitecturalAnalyzer::new(structural_config))
-        } else {
-            None
-        };
+        for iteration in 0..cfg.max_iterations {
+            state.decay_strategy_failures();
 
-        // Create cross-artifact validator for coherence checking
-        let cross_artifact_config = self.config.cross_artifact();
-        let cross_artifact_validator = if cross_artifact_config.enabled {
-            Some(CrossArtifactValidator::new(
-                cross_artifact_config.min_coherence_score,
-                cross_artifact_config.max_overlap_ratio,
-            ))
-        } else {
-            None
-        };
-
-        // Create usability validator for AI coding effectiveness
-        let usability_config = self.config.usability();
-        let usability_validator = if usability_config.enabled {
-            Some(
-                UsabilityValidator::new(crate::config::ProjectType::default())
-                    .with_config(usability_config),
-            )
-        } else {
-            None
-        };
-
-        let project_context = format!(
-            "Project root: {}",
-            self.project_root.display()
-        );
-
-        let mut prev_quality: Option<f32> = None;
-        let mut stagnation_count = 0;
-        let mut last_structural_result: Option<StructuralValidationResult> = None;
-        let mut strategy_failures: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut last_semantic_result: Option<SemanticQualityResult> = None;
-
-        // Track quality trajectory for convergence reporting
-        // Use VecDeque with bounded size to prevent unbounded memory growth
-        const MAX_TRAJECTORY_SIZE: usize = 100;
-        let mut quality_trajectory: VecDeque<f32> = VecDeque::with_capacity(MAX_TRAJECTORY_SIZE);
-        let mut critical_improvements: Vec<super::convergence::Improvement> = Vec::new();
-
-        // Rollback state tracking
-        let enable_rollback = refinement_config.enable_rollback;
-        let rollback_threshold = refinement_config.rollback_threshold;
-        let max_rollbacks = refinement_config.max_rollbacks;
-        let mut best_state: Option<RefinementSnapshot> = None;
-        let mut rollback_count = 0;
-
-        // Post-convergence verification tracking
-        let post_convergence_verification = refinement_config.post_convergence_verification;
-        let post_convergence_passes_required = refinement_config.post_convergence_passes;
-        let mut consecutive_convergence_passes = 0;
-        let mut total_convergence_detections = 0; // Track total to detect oscillation around threshold
-        let max_convergence_detections = refinement_config.max_convergence_detections;
-
-        for iteration in 0..max_iterations {
-            // Decay failure counts to allow strategy retry after cooldown
-            for failures in strategy_failures.values_mut() {
-                *failures = failures.saturating_sub(1);
-            }
-            // Remove entries with zero failures to keep map clean
-            strategy_failures.retain(|_, &mut v| v > 0);
-
+            // Phase 1: Tier filtering
             let tier_result = tier_filter::filter(&skills, &agents, &rules, &claude_md_content);
             let tier1_violations = tier_result.tier1_violations;
             skills = tier_result.filtered_content.skills;
             agents = tier_result.filtered_content.agents;
             rules = tier_result.filtered_content.rules;
 
+            // Phase 2: Run all validations
             let cv_result = self.assess_quality(&skills, &agents, &rules, claude_md, output_plan);
+            let semantic_result = validators
+                .run_semantic(&skills, &agents, &rules, claude_md, &project_context)
+                .await?;
+            let structural_result = validators
+                .run_structural(&file_registry, &skills, &agents, &rules, claude_md)
+                .await?;
+            if structural_result.is_some() {
+                state.last_structural_result = structural_result.clone();
+            }
+            let cross_artifact_result = validators.run_cross_artifact(&skills, &agents, &rules, claude_md);
+            let usability_result = validators.run_usability(&skills, &agents, &rules, claude_md);
 
-            // Use AI validation if enabled, otherwise use static pattern matching
-            let semantic_result = if let Some(ref qv) = quality_validator {
-                qv.validate(&skills, &agents, &rules, claude_md, &project_context)
-                    .await?
-            } else {
-                // semantic_validator is guaranteed to be Some when quality_validator is None
-                semantic_validator
-                    .as_ref()
-                    .expect("semantic_validator required when ai_validation disabled")
-                    .validate(&skills, &agents, &rules, claude_md)
-                    .await?
-            };
-
-            // Run structural validation for module coverage
-            let structural_result = if let Some(ref analyzer) = structural_analyzer {
-                let result = analyzer
-                    .validate(&file_registry, &skills, &agents, &rules, claude_md)
-                    .await?;
-                last_structural_result = Some(result.clone());
-                Some(result)
-            } else {
-                None
-            };
-
-            // Run cross-artifact validation for coherence
-            let cross_artifact_result = cross_artifact_validator.as_ref().map(|validator| validator.validate(&skills, &agents, &rules, claude_md));
-
-            // Run usability validation for AI coding effectiveness
-            let usability_result = usability_validator.as_ref().map(|validator| validator.validate(&skills, &agents, &rules, claude_md));
-
-            // Aggregate feedback from all validation sources
+            // Phase 3: Aggregate feedback
             let aggregated_feedback = self.feedback_aggregator.aggregate(
                 &semantic_result,
                 structural_result.as_ref(),
@@ -366,31 +478,68 @@ impl RefinementEngine {
                 Some(&cv_result),
             );
 
-            // Use unified quality calculation from FeedbackAggregator
-            // This combines semantic, structural, cross-artifact, and usability dimensions
             let surface_quality = cv_result.quality_score;
             let semantic_quality = semantic_result.overall_score;
             let combined_quality = aggregated_feedback.overall_score;
 
-            // Track quality trajectory for convergence analysis
-            // Maintain bounded size to prevent memory growth
-            if quality_trajectory.len() >= MAX_TRAJECTORY_SIZE {
-                quality_trajectory.pop_front();
-            }
-            quality_trajectory.push_back(combined_quality);
+            state.record_quality(combined_quality);
 
-            // Rollback logic: save best state and rollback if quality degrades significantly
-            if enable_rollback {
-                // Save best state when quality improves significantly
-                // Minimum 2% improvement required to avoid excessive cloning on small fluctuations
+            // Phase 4: Value-based termination check
+            let tier3_count = count_tier3_value(&skills, &agents, &rules, claude_md);
+            state.record_tier3(tier3_count);
+
+            const VALUE_PLATEAU_WINDOW: usize = 3;
+            if state.tier3_trajectory.len() >= VALUE_PLATEAU_WINDOW
+                && combined_quality >= cfg.min_quality_for_value_exit
+            {
+                let recent: Vec<usize> = state.tier3_trajectory.iter().rev().take(VALUE_PLATEAU_WINDOW).copied().collect();
+                let max_recent = recent.iter().max().copied().unwrap_or(0);
+                let min_recent = recent.iter().min().copied().unwrap_or(0);
+                if max_recent == min_recent && tier3_count > 0 {
+                    tracing::info!(
+                        iteration = iteration + 1,
+                        tier3_count,
+                        quality = format!("{:.1}%", combined_quality * 100.0),
+                        "Value-based early exit: Tier3 content plateaued"
+                    );
+
+                    let report = self.build_success_report(
+                        ConvergencePath::ValuePlateau,
+                        iteration + 1,
+                        &state,
+                        &semantic_result,
+                        structural_result.as_ref(),
+                        cross_artifact_result.as_ref(),
+                        usability_result.as_ref(),
+                    );
+                    self.persist_learning().await;
+
+                    return Ok(RefinementResult {
+                        skills: skills.clone(),
+                        agents: agents.clone(),
+                        rules: rules.clone(),
+                        iterations: iteration + 1,
+                        converged: true,
+                        final_quality: combined_quality,
+                        semantic_quality: Some(semantic_result),
+                        structural_quality: structural_result,
+                        aggregated_feedback: Some(aggregated_feedback),
+                        learning_summary: Some(self.learning_history.get_progress_summary()),
+                        convergence_report: Some(report),
+                    });
+                }
+            }
+
+            // Phase 5: Rollback logic
+            if cfg.enable_rollback {
                 const SNAPSHOT_MIN_IMPROVEMENT: f32 = 0.02;
-                let should_save = match &best_state {
-                    None => true, // Always save first snapshot
-                    Some(state) => combined_quality >= state.quality + SNAPSHOT_MIN_IMPROVEMENT,
+                let should_save = match &state.best_state {
+                    None => true,
+                    Some(s) => combined_quality >= s.quality + SNAPSHOT_MIN_IMPROVEMENT,
                 };
 
                 if should_save {
-                    best_state = Some(RefinementSnapshot {
+                    state.best_state = Some(RefinementSnapshot {
                         skills: skills.clone(),
                         agents: agents.clone(),
                         rules: rules.clone(),
@@ -399,27 +548,25 @@ impl RefinementEngine {
                     });
                 }
 
-                // Check for significant quality degradation (only after first iteration)
-                if let (Some(state), Some(_)) = (&best_state, prev_quality) {
-                    let degradation = state.quality - combined_quality;
-                    if degradation > rollback_threshold && rollback_count < max_rollbacks {
+                if let (Some(best), Some(_)) = (&state.best_state, state.prev_quality) {
+                    let degradation = best.quality - combined_quality;
+                    if degradation > cfg.rollback_threshold && state.rollback_count < cfg.max_rollbacks {
                         tracing::warn!(
                             iteration = iteration + 1,
                             current = format!("{:.1}%", combined_quality * 100.0),
-                            best = format!("{:.1}%", state.quality * 100.0),
+                            best = format!("{:.1}%", best.quality * 100.0),
                             degradation = format!("{:.1}%", degradation * 100.0),
                             "Quality degraded significantly, rolling back to iteration {}",
-                            state.iteration
+                            best.iteration
                         );
 
-                        skills = state.skills.clone();
-                        agents = state.agents.clone();
-                        rules = state.rules.clone();
-                        rollback_count += 1;
+                        skills = best.skills.clone();
+                        agents = best.agents.clone();
+                        rules = best.rules.clone();
+                        state.rollback_count += 1;
 
-                        // Force strategy escalation after rollback
                         self.strategy_rotator.escalate();
-                        strategy_failures.clear();
+                        state.strategy_failures.clear();
                         continue;
                     }
                 }
@@ -464,7 +611,7 @@ impl RefinementEngine {
                 );
             }
 
-            // Log aggregated feedback score
+            // Phase 6: Logging
             tracing::info!(
                 iteration = iteration + 1,
                 surface = format!("{:.1}%", surface_quality * 100.0),
@@ -472,12 +619,11 @@ impl RefinementEngine {
                 combined = format!("{:.1}%", combined_quality * 100.0),
                 aggregated = format!("{:.1}%", aggregated_feedback.overall_score * 100.0),
                 dimensions = dimension_status,
-                target = format!("{:.1}%", target_quality * 100.0),
+                target = format!("{:.1}%", cfg.target_quality * 100.0),
                 "Quality assessment"
             );
 
-            // Convergence: Use unified ConvergenceChecker for consistent quality evaluation
-            // Build dimensions status for checker (reused later in reports)
+            // Phase 7: Convergence checking
             let dimensions_for_check = build_dimensions_status(
                 &semantic_result,
                 structural_result.as_ref(),
@@ -486,12 +632,10 @@ impl RefinementEngine {
                 &self.config.refinement().dimension_thresholds,
             );
 
-            // Count issues that need addressing (estimate from semantic result)
             let issues_estimate = semantic_result.suggestions.len()
                 + if semantic_result.passed { 0 } else { 1 };
 
-            // Use centralized ConvergenceChecker for unified metrics
-            let convergence_checker = ConvergenceChecker::new(target_quality, require_all_dimensions);
+            let convergence_checker = ConvergenceChecker::new(cfg.target_quality, cfg.require_all_dimensions);
             let convergence_path = convergence_checker.check(
                 combined_quality,
                 &dimensions_for_check,
@@ -500,60 +644,52 @@ impl RefinementEngine {
             );
 
             let converged = convergence_path.is_some();
-            let meets_target = combined_quality >= target_quality;
+            let meets_target = combined_quality >= cfg.target_quality;
 
-            // Note: iteration is 0-indexed, so add 1 for human-readable count
-            if iteration + 1 >= min_iterations && converged {
-                consecutive_convergence_passes += 1;
-                total_convergence_detections += 1;
+            if iteration + 1 >= cfg.min_iterations && converged {
+                state.consecutive_convergence_passes += 1;
+                state.total_convergence_detections += 1;
 
-                // Detect oscillation around convergence threshold
-                // CRITICAL FIX: Require stricter verification during oscillation
-                // Previous logic was too lenient (>= 1 pass), now requires:
-                // 1. At least 3 consecutive passes OR
-                // 2. Quality variance in window below 2%
-                if total_convergence_detections > max_convergence_detections
-                    && consecutive_convergence_passes < post_convergence_passes_required
+                // Oscillation detection with stricter verification
+                if state.total_convergence_detections > cfg.max_convergence_detections
+                    && state.consecutive_convergence_passes < cfg.post_convergence_passes_required
                 {
-                    // Calculate quality variance in recent window for stability check
-                    let quality_variance = if quality_trajectory.len() >= 3 {
-                        let recent: Vec<f32> = quality_trajectory
+                    let quality_variance = if state.quality_trajectory.len() >= 3 {
+                        let recent: Vec<f32> = state.quality_trajectory
                             .iter()
                             .copied()
-                            .skip(quality_trajectory.len().saturating_sub(oscillation_variance_window))
+                            .skip(state.quality_trajectory.len().saturating_sub(cfg.oscillation_variance_window))
                             .collect();
                         calculate_quality_variance(&recent)
                     } else {
-                        1.0 // High variance if not enough data
+                        1.0
                     };
 
-                    // Stricter verification: need N+ passes OR (lenient passes + low variance)
-                    let oscillation_verification_ok = !post_convergence_verification
-                        || consecutive_convergence_passes >= oscillation_strict_passes
-                        || (consecutive_convergence_passes >= oscillation_lenient_passes
-                            && quality_variance < oscillation_stability_variance);
+                    let oscillation_verification_ok = !cfg.post_convergence_verification
+                        || state.consecutive_convergence_passes >= cfg.oscillation_strict_passes
+                        || (state.consecutive_convergence_passes >= cfg.oscillation_lenient_passes
+                            && quality_variance < cfg.oscillation_stability_variance);
 
                     if oscillation_verification_ok {
                         tracing::warn!(
                             iteration = iteration + 1,
-                            total_convergence_detections,
-                            consecutive_passes = consecutive_convergence_passes,
+                            total_convergence_detections = state.total_convergence_detections,
+                            consecutive_passes = state.consecutive_convergence_passes,
                             quality = format!("{:.1}%", combined_quality * 100.0),
-                            "Convergence oscillation detected: quality unstable around threshold, accepting with reduced verification"
+                            "Convergence oscillation detected: accepting with reduced verification"
                         );
 
-                        // Use best_state if it's better than current state
                         let (final_skills, final_agents, final_rules, final_quality) =
-                            if let Some(ref state) = best_state {
-                                if state.quality > combined_quality {
+                            if let Some(ref best) = state.best_state {
+                                if best.quality > combined_quality {
                                     tracing::info!(
                                         current = format!("{:.1}%", combined_quality * 100.0),
-                                        best = format!("{:.1}%", state.quality * 100.0),
-                                        best_iteration = state.iteration,
-                                        "Using best state from iteration {} instead of oscillating current state",
-                                        state.iteration
+                                        best = format!("{:.1}%", best.quality * 100.0),
+                                        best_iteration = best.iteration,
+                                        "Using best state from iteration {}",
+                                        best.iteration
                                     );
-                                    (state.skills.clone(), state.agents.clone(), state.rules.clone(), state.quality)
+                                    (best.skills.clone(), best.agents.clone(), best.rules.clone(), best.quality)
                                 } else {
                                     (skills, agents, rules, combined_quality)
                                 }
@@ -561,32 +697,23 @@ impl RefinementEngine {
                                 (skills, agents, rules, combined_quality)
                             };
 
-                        let dimensions_status = build_dimensions_status(
+                        let report = self.build_success_report(
+                            ConvergencePath::OscillationSettled,
+                            iteration + 1,
+                            &state,
                             &semantic_result,
                             structural_result.as_ref(),
                             cross_artifact_result.as_ref(),
                             usability_result.as_ref(),
-                            &self.config.refinement().dimension_thresholds,
                         );
-                        let report = super::convergence::ConvergenceReport::success(
-                            super::convergence::ConvergencePath::OscillationSettled,
-                            iteration + 1,
-                            Vec::from(quality_trajectory.clone()),
-                            dimensions_status,
-                            critical_improvements.clone(),
-                        );
-
-                        // Persist learning patterns for future sessions
-                        if let Err(e) = self.learning_history.persist(&self.project_root).await {
-                            tracing::error!(error = %e, "Failed to persist learning patterns - data may be lost");
-                        }
+                        self.persist_learning().await;
 
                         return Ok(RefinementResult {
                             skills: final_skills,
                             agents: final_agents,
                             rules: final_rules,
                             iterations: iteration + 1,
-                            converged: true, // Accepting as converged despite oscillation
+                            converged: true,
                             final_quality,
                             semantic_quality: Some(semantic_result),
                             structural_quality: structural_result,
@@ -597,54 +724,41 @@ impl RefinementEngine {
                     } else {
                         tracing::debug!(
                             iteration = iteration + 1,
-                            consecutive_passes = consecutive_convergence_passes,
-                            "Oscillation detected but waiting for at least one verification pass"
+                            consecutive_passes = state.consecutive_convergence_passes,
+                            "Oscillation detected but waiting for verification pass"
                         );
                     }
                 }
 
-                // Post-convergence verification: require multiple consecutive passes
-                let verification_passed = if post_convergence_verification {
-                    consecutive_convergence_passes >= post_convergence_passes_required
-                } else {
-                    true
-                };
+                let verification_passed = !cfg.post_convergence_verification
+                    || state.consecutive_convergence_passes >= cfg.post_convergence_passes_required;
 
                 if verification_passed {
                     tracing::info!(
                         iteration = iteration + 1,
                         combined = format!("{:.1}%", combined_quality * 100.0),
                         dimensions = dimension_status,
-                        consecutive_passes = consecutive_convergence_passes,
+                        consecutive_passes = state.consecutive_convergence_passes,
                         "Convergence achieved: all quality targets met with verification"
                     );
 
-                    let dimensions_status = build_dimensions_status(
+                    let path = determine_convergence_path(
+                        meets_target,
+                        dimensions_for_check.all_passed(cfg.require_all_dimensions),
+                        cfg.require_all_dimensions,
+                        aggregated_feedback.converged,
+                        0,
+                    );
+                    let report = self.build_success_report(
+                        path,
+                        iteration + 1,
+                        &state,
                         &semantic_result,
                         structural_result.as_ref(),
                         cross_artifact_result.as_ref(),
                         usability_result.as_ref(),
-                        &self.config.refinement().dimension_thresholds,
                     );
-                    let path = determine_convergence_path(
-                        meets_target,
-                        dimensions_for_check.all_passed(require_all_dimensions),
-                        require_all_dimensions,
-                        aggregated_feedback.converged,
-                        0,
-                    );
-                    let report = super::convergence::ConvergenceReport::success(
-                        path,
-                        iteration + 1,
-                        Vec::from(quality_trajectory.clone()),
-                        dimensions_status,
-                        critical_improvements.clone(),
-                    );
-
-                    // Persist learning patterns for future sessions
-                    if let Err(e) = self.learning_history.persist(&self.project_root).await {
-                        tracing::error!(error = %e, "Failed to persist learning patterns - data may be lost");
-                    }
+                    self.persist_learning().await;
 
                     return Ok(RefinementResult {
                         skills,
@@ -662,90 +776,80 @@ impl RefinementEngine {
                 } else {
                     tracing::debug!(
                         iteration = iteration + 1,
-                        consecutive_passes = consecutive_convergence_passes,
-                        required = post_convergence_passes_required,
+                        consecutive_passes = state.consecutive_convergence_passes,
+                        required = cfg.post_convergence_passes_required,
                         "Convergence detected, continuing verification loop"
                     );
                 }
             } else {
-                // Reset consecutive passes if convergence is lost
-                consecutive_convergence_passes = 0;
+                state.consecutive_convergence_passes = 0;
             }
 
-            // CRITICAL FIX: Separate oscillation and stagnation detection into distinct states
-            // Previous implementation had collision where both could trigger escalate() independently
+            // Phase 8: Oscillation and stagnation detection state machine
             let refinement_cfg = self.config.refinement();
-            if let Some(prev) = prev_quality {
+            if let Some(prev) = state.prev_quality {
                 let delta = (combined_quality - prev).abs();
                 let improved = combined_quality > prev + refinement_cfg.min_improvement_per_iteration;
 
-                // Detect oscillation state
                 let is_oscillating = refinement_cfg.detect_oscillation
-                    && quality_trajectory.len() >= refinement_cfg.oscillation_window
+                    && state.quality_trajectory.len() >= refinement_cfg.oscillation_window
                     && {
-                        let window: Vec<f32> = quality_trajectory
+                        let window: Vec<f32> = state.quality_trajectory
                             .iter()
                             .copied()
-                            .skip(quality_trajectory.len().saturating_sub(refinement_cfg.oscillation_window))
+                            .skip(state.quality_trajectory.len().saturating_sub(refinement_cfg.oscillation_window))
                             .collect();
                         detect_oscillation(&window, refinement_cfg.oscillation_min_amplitude)
                     };
 
-                // Detect stagnation state
-                let is_stagnating = delta < stagnation_threshold || !improved;
+                let is_stagnating = delta < cfg.stagnation_threshold || !improved;
 
-                // State machine: handle combinations properly without collision
                 match (is_oscillating, is_stagnating) {
                     (true, true) => {
-                        // Both oscillating AND stagnating: most severe - force regeneration
                         tracing::warn!(
                             iteration = iteration + 1,
                             "Oscillation + Stagnation detected: forcing full regeneration"
                         );
                         self.strategy_rotator.force_regeneration();
-                        strategy_failures.clear();
-                        stagnation_count = 0;
+                        state.strategy_failures.clear();
+                        state.stagnation_count = 0;
                     }
                     (true, false) => {
-                        // Oscillating only: quality is bouncing, need strategy change
                         tracing::warn!(
                             iteration = iteration + 1,
                             window_size = refinement_cfg.oscillation_window,
                             "Oscillation detected: quality bouncing, escalating strategy"
                         );
                         self.strategy_rotator.escalate();
-                        strategy_failures.clear();
-                        stagnation_count = 0;
+                        state.strategy_failures.clear();
+                        state.stagnation_count = 0;
                     }
                     (false, true) => {
-                        // Stagnating only: increment patience counter
-                        stagnation_count += 1;
+                        state.stagnation_count += 1;
                         tracing::debug!(
                             delta = format!("{:.3}", delta),
-                            stagnation_count,
-                            patience = stagnation_patience,
+                            stagnation_count = state.stagnation_count,
+                            patience = cfg.stagnation_patience,
                             "Quality improvement stalled"
                         );
 
-                        // Only act when patience is exhausted - always escalate
-                        if stagnation_count >= stagnation_patience {
+                        if state.stagnation_count >= cfg.stagnation_patience {
                             tracing::info!(
                                 iteration = iteration + 1,
                                 "Stagnation patience exhausted: escalating to stronger strategies"
                             );
                             self.strategy_rotator.escalate();
-                            strategy_failures.clear();
-                            stagnation_count = 0;
+                            state.strategy_failures.clear();
+                            state.stagnation_count = 0;
                         }
                     }
                     (false, false) => {
-                        // Normal progress: reset stagnation counter
-                        stagnation_count = 0;
+                        state.stagnation_count = 0;
                     }
                 }
             }
-            prev_quality = Some(combined_quality);
-            last_semantic_result = Some(semantic_result.clone());
+            state.prev_quality = Some(combined_quality);
+            state.last_semantic_result = Some(semantic_result.clone());
 
             let mut issues = self.identify_issues_with_semantic(
                 &cv_result,
@@ -761,49 +865,33 @@ impl RefinementEngine {
             // Re-sort issues after adding structural ones
             issues.sort_by(|a, b| b.severity.cmp(&a.severity));
 
-            if issues.is_empty() && iteration >= min_iterations {
-                // Enforce minimum quality threshold even when no issues found
-                let quality_acceptable = meets_target ||
-                    (!require_all_dimensions && combined_quality >= target_quality * 0.9);
+            // Phase 9: Check for no issues remaining
+            if issues.is_empty() && iteration >= cfg.min_iterations {
+                let quality_acceptable = meets_target
+                    || (!cfg.require_all_dimensions && combined_quality >= cfg.target_quality * 0.9);
 
-                if (converged || !require_all_dimensions) && quality_acceptable {
-                    // NoIssuesRemaining also needs to respect post-convergence verification
-                    // to ensure the "no issues" state is stable
-                    let no_issues_verification_passed = if post_convergence_verification {
-                        // For NoIssuesRemaining, we use consecutive_convergence_passes
-                        // which gets incremented when converged is true
-                        consecutive_convergence_passes >= post_convergence_passes_required
-                    } else {
-                        true
-                    };
+                if (converged || !cfg.require_all_dimensions) && quality_acceptable {
+                    let no_issues_verification_passed = !cfg.post_convergence_verification
+                        || state.consecutive_convergence_passes >= cfg.post_convergence_passes_required;
 
                     if no_issues_verification_passed {
                         tracing::info!(
                             iteration = iteration + 1,
                             quality = format!("{:.1}%", combined_quality * 100.0),
-                            consecutive_passes = consecutive_convergence_passes,
+                            consecutive_passes = state.consecutive_convergence_passes,
                             "No issues found, refinement complete with verification"
                         );
 
-                        let dimensions_status = build_dimensions_status(
+                        let report = self.build_success_report(
+                            ConvergencePath::NoIssuesRemaining,
+                            iteration + 1,
+                            &state,
                             &semantic_result,
                             structural_result.as_ref(),
                             cross_artifact_result.as_ref(),
                             usability_result.as_ref(),
-                            &self.config.refinement().dimension_thresholds,
                         );
-                        let report = super::convergence::ConvergenceReport::success(
-                            super::convergence::ConvergencePath::NoIssuesRemaining,
-                            iteration + 1,
-                            Vec::from(quality_trajectory.clone()),
-                            dimensions_status,
-                            critical_improvements.clone(),
-                        );
-
-                        // Persist learning patterns for future sessions
-                        if let Err(e) = self.learning_history.persist(&self.project_root).await {
-                            tracing::error!(error = %e, "Failed to persist learning patterns - data may be lost");
-                        }
+                        self.persist_learning().await;
 
                         return Ok(RefinementResult {
                             skills,
@@ -821,22 +909,22 @@ impl RefinementEngine {
                     } else {
                         tracing::debug!(
                             iteration = iteration + 1,
-                            consecutive_passes = consecutive_convergence_passes,
-                            required = post_convergence_passes_required,
+                            consecutive_passes = state.consecutive_convergence_passes,
+                            required = cfg.post_convergence_passes_required,
                             "No issues found but waiting for verification passes"
                         );
                     }
                 } else if !quality_acceptable {
-                    // Quality below threshold despite no issues - need to continue refinement
                     tracing::debug!(
                         iteration = iteration + 1,
                         quality = format!("{:.1}%", combined_quality * 100.0),
-                        target = format!("{:.1}%", target_quality * 100.0),
-                        "No issues found but quality below minimum threshold, continuing refinement"
+                        target = format!("{:.1}%", cfg.target_quality * 100.0),
+                        "No issues found but quality below minimum threshold, continuing"
                     );
                 }
             }
 
+            // Phase 10: Apply refinements
             let (new_skills, new_agents, new_rules, iter_improvements) = self
                 .apply_refinements_with_strategies(
                     skills,
@@ -844,11 +932,12 @@ impl RefinementEngine {
                     rules,
                     &issues,
                     &semantic_result,
+                    &aggregated_feedback,
                     &file_registry,
                     iteration,
-                    issues_per_iteration,
-                    strategy_retry_limit,
-                    &mut strategy_failures,
+                    cfg.issues_per_iteration,
+                    cfg.strategy_retry_limit,
+                    &mut state.strategy_failures,
                     combined_quality,
                 )
                 .await?;
@@ -856,44 +945,36 @@ impl RefinementEngine {
             skills = new_skills;
             agents = new_agents;
             rules = new_rules;
-            critical_improvements.extend(iter_improvements);
+            state.critical_improvements.extend(iter_improvements);
         }
 
+        // Final quality assessment after max iterations
         let final_cv = self.assess_quality(&skills, &agents, &rules, claude_md, output_plan);
-        let final_semantic = if let Some(ref qv) = quality_validator {
-            qv.validate(&skills, &agents, &rules, claude_md, &project_context)
-                .await?
-        } else {
-            semantic_validator
-                .as_ref()
-                .expect("semantic_validator required when ai_validation disabled")
-                .validate(&skills, &agents, &rules, claude_md)
-                .await?
-        };
+        let final_semantic = validators
+            .run_semantic(&skills, &agents, &rules, claude_md, &project_context)
+            .await?;
 
-        // Use unified FeedbackAggregator for final quality calculation
         let final_aggregated = self.feedback_aggregator.aggregate(
             &final_semantic,
-            last_structural_result.as_ref(),
+            state.last_structural_result.as_ref(),
             None,
             None,
             Some(&final_cv),
         );
         let final_quality = final_aggregated.overall_score;
 
-        // CRITICAL: Recover best_state if it's better than the final state
-        // This ensures we don't return a degraded state when max iterations is reached
+        // Recover best_state if it's better than the final state
         let (output_skills, output_agents, output_rules, output_quality) =
-            if let Some(ref state) = best_state {
-                if state.quality > final_quality {
+            if let Some(ref best) = state.best_state {
+                if best.quality > final_quality {
                     tracing::info!(
                         final_quality = format!("{:.1}%", final_quality * 100.0),
-                        best_quality = format!("{:.1}%", state.quality * 100.0),
-                        best_iteration = state.iteration,
-                        "Max iterations reached: using best state from iteration {} instead of final degraded state",
-                        state.iteration
+                        best_quality = format!("{:.1}%", best.quality * 100.0),
+                        best_iteration = best.iteration,
+                        "Max iterations reached: using best state from iteration {}",
+                        best.iteration
                     );
-                    (state.skills.clone(), state.agents.clone(), state.rules.clone(), state.quality)
+                    (best.skills.clone(), best.agents.clone(), best.rules.clone(), best.quality)
                 } else {
                     (skills, agents, rules, final_quality)
                 }
@@ -902,7 +983,7 @@ impl RefinementEngine {
             };
 
         tracing::warn!(
-            iterations = max_iterations,
+            iterations = cfg.max_iterations,
             quality = format!("{:.1}%", output_quality * 100.0),
             semantic = format!("{:.1}%", final_semantic.overall_score * 100.0),
             dimensions = format!(
@@ -916,16 +997,14 @@ impl RefinementEngine {
             "Max iterations reached"
         );
 
-        // Build convergence failure report
         let dimensions_status = build_dimensions_status(
             &final_semantic,
-            last_structural_result.as_ref(),
-            None, // No cross-artifact result available at this point
-            None, // No usability result available at this point
+            state.last_structural_result.as_ref(),
+            None,
+            None,
             &self.config.refinement().dimension_thresholds,
         );
 
-        // Populate remaining issues from semantic validation results
         let remaining_issues: Vec<super::convergence::RemainingIssue> = final_semantic
             .issues
             .iter()
@@ -934,35 +1013,64 @@ impl RefinementEngine {
                 category: format!("{:?}", issue.category),
                 severity: format!("{:?}", issue.severity),
                 description: issue.description.clone(),
-                attempts: max_iterations, // All issues have been attempted for max iterations
+                attempts: cfg.max_iterations,
             })
             .collect();
 
-        let report = super::convergence::ConvergenceReport::failure(
-            max_iterations,
-            Vec::from(quality_trajectory),
+        let report = ConvergenceReport::failure(
+            cfg.max_iterations,
+            Vec::from(state.quality_trajectory.clone()),
             dimensions_status,
             remaining_issues,
         );
 
-        // Persist learning patterns for future sessions
-        if let Err(e) = self.learning_history.persist(&self.project_root).await {
-            tracing::error!(error = %e, "Failed to persist learning patterns - data may be lost");
-        }
+        self.persist_learning().await;
 
         Ok(RefinementResult {
             skills: output_skills,
             agents: output_agents,
             rules: output_rules,
-            iterations: max_iterations,
+            iterations: cfg.max_iterations,
             converged: false,
             final_quality: output_quality,
-            semantic_quality: last_semantic_result.or(Some(final_semantic)),
-            structural_quality: last_structural_result,
+            semantic_quality: state.last_semantic_result.or(Some(final_semantic)),
+            structural_quality: state.last_structural_result,
             aggregated_feedback: None,
             learning_summary: Some(self.learning_history.get_progress_summary()),
             convergence_report: Some(report),
         })
+    }
+
+    fn build_success_report(
+        &self,
+        path: ConvergencePath,
+        iteration: usize,
+        state: &IterationState,
+        semantic_result: &SemanticQualityResult,
+        structural_result: Option<&StructuralValidationResult>,
+        cross_artifact_result: Option<&CrossArtifactResult>,
+        usability_result: Option<&UsabilityResult>,
+    ) -> ConvergenceReport {
+        let dimensions_status = build_dimensions_status(
+            semantic_result,
+            structural_result,
+            cross_artifact_result,
+            usability_result,
+            &self.config.refinement().dimension_thresholds,
+        );
+        ConvergenceReport::success(
+            path,
+            iteration,
+            Vec::from(state.quality_trajectory.clone()),
+            dimensions_status,
+            state.critical_improvements.clone(),
+        )
+    }
+
+    async fn persist_learning(&self) {
+        if let Err(e) = self.learning_history.persist(&self.project_root).await {
+            tracing::error!(error = %e, "Failed to persist learning patterns - data may be lost");
+        }
     }
 
     fn assess_quality(
@@ -1206,6 +1314,7 @@ impl RefinementEngine {
         mut rules: Vec<Rule>,
         issues: &[RefinementIssue],
         semantic_result: &SemanticQualityResult,
+        aggregated_feedback: &AggregatedFeedback,
         file_registry: &VerifiedFileRegistry,
         iteration: usize,
         issues_per_iteration: usize,
@@ -1295,10 +1404,18 @@ impl RefinementEngine {
                 }
             }
 
+            // Extract validation feedback from aggregated feedback for targeted refinement
+            let validation_feedback = Some(super::strategy::ValidationFeedback {
+                missing_modules: aggregated_feedback.analysis_feedback.missing_modules.clone(),
+                weak_coverage_areas: aggregated_feedback.analysis_feedback.weak_coverage_areas.clone(),
+                module_constraints: aggregated_feedback.analysis_feedback.refinement_hints.clone(),
+            });
+
             let context = StrategyContext {
                 file_registry,
                 issue_description: format_issue_description(&issue.issue),
                 suggestions,
+                validation_feedback,
             };
 
             // Track quality before/after for learning history
@@ -1677,6 +1794,39 @@ fn calculate_quality_variance(window: &[f32]) -> f32 {
         .map(|&x| (x - mean).powi(2))
         .sum::<f32>() / window.len() as f32;
     variance.sqrt() // Return standard deviation as "variance" measure
+}
+
+/// Counts Tier3 (high-value) indicators across all artifacts.
+/// Tier3 content includes project-specific constraints, hidden gotchas, and domain-specific rules.
+fn count_tier3_value(
+    skills: &[Skill],
+    agents: &[Agent],
+    rules: &[Rule],
+    claude_md: &crate::types::ProjectMemory,
+) -> usize {
+    let mut count = 0;
+
+    // Count Tier3 indicators in skills
+    for skill in skills {
+        count += patterns::count_tier3_indicators(&skill.body);
+    }
+
+    // Count Tier3 indicators in agents
+    for agent in agents {
+        count += patterns::count_tier3_indicators(&agent.prompt);
+    }
+
+    // Count Tier3 indicators in rules
+    for rule in rules {
+        let content = rule.content.join("\n");
+        count += patterns::count_tier3_indicators(&content);
+    }
+
+    // Count Tier3 indicators in CLAUDE.md content
+    let claude_md_content = claude_md.to_markdown();
+    count += patterns::count_tier3_indicators(&claude_md_content);
+
+    count
 }
 
 /// Detects oscillation pattern in quality trajectory.

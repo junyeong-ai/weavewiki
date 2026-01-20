@@ -79,6 +79,8 @@ pub enum ConvergencePath {
     MaxIterations,
     /// Quality oscillated around threshold but stabilized
     OscillationSettled,
+    /// Tier3 content generation plateaued with acceptable quality
+    ValuePlateau,
 }
 
 impl ConvergencePath {
@@ -90,6 +92,7 @@ impl ConvergencePath {
             Self::NoIssuesRemaining => "no_issues_remaining",
             Self::MaxIterations => "max_iterations",
             Self::OscillationSettled => "oscillation_settled",
+            Self::ValuePlateau => "value_plateau",
         }
     }
 }

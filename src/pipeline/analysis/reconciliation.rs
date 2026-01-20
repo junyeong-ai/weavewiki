@@ -19,6 +19,8 @@ pub struct ReconciliationConfig {
     pub file_line_ref_weight: f32,
     pub code_parsing_weight: f32,
     pub llm_inference_weight: f32,
+    pub min_merge_confidence: f32,
+    pub max_unresolved_conflicts: usize,
 }
 
 impl Default for ReconciliationConfig {
@@ -30,8 +32,18 @@ impl Default for ReconciliationConfig {
             file_line_ref_weight: 0.8,
             code_parsing_weight: 0.7,
             llm_inference_weight: 0.5,
+            min_merge_confidence: 0.7,
+            max_unresolved_conflicts: 3,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeQualityResult {
+    pub passed: bool,
+    pub confidence: f32,
+    pub unresolved_count: usize,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +304,41 @@ impl BidirectionalReconciler {
         let unresolved_penalty = result.unresolved_conflicts.len() as f32 * 0.1;
         let iteration_penalty = result.reconciliation_count as f32 * 0.02;
         (base - unresolved_penalty - iteration_penalty).clamp(0.0, 1.0)
+    }
+
+    pub fn verify_merge_quality(&self, result: &ReconciledAnalysis) -> MergeQualityResult {
+        let mut issues = Vec::new();
+
+        if result.confidence < self.config.min_merge_confidence {
+            issues.push(format!(
+                "Merge confidence {:.2} below threshold {:.2}",
+                result.confidence, self.config.min_merge_confidence
+            ));
+        }
+
+        if result.unresolved_conflicts.len() > self.config.max_unresolved_conflicts {
+            issues.push(format!(
+                "{} unresolved conflicts exceed max {}",
+                result.unresolved_conflicts.len(),
+                self.config.max_unresolved_conflicts
+            ));
+        }
+
+        for conflict in &result.unresolved_conflicts {
+            if matches!(conflict.category, ConflictCategory::Architecture | ConflictCategory::Dependency) {
+                issues.push(format!(
+                    "Critical {:?} conflict unresolved: {}",
+                    conflict.category, conflict.claim_a.content
+                ));
+            }
+        }
+
+        MergeQualityResult {
+            passed: issues.is_empty(),
+            confidence: result.confidence,
+            unresolved_count: result.unresolved_conflicts.len(),
+            issues,
+        }
     }
 }
 

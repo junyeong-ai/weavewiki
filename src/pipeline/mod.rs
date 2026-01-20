@@ -18,6 +18,7 @@ pub mod checkpoint;
 pub mod context;
 pub mod convergence;
 pub mod deep_review;
+pub mod enrichment;
 pub mod feedback;
 pub mod feedback_loop;
 pub mod generation;
@@ -34,19 +35,22 @@ pub mod validation;
 
 pub use adaptive::{AdaptivePipeline, AdaptivePipelineOutput};
 pub use analysis::{DeepAnalysisResult, DeepAnalyzer};
+pub use enrichment::{
+    AgentInternalKnowledge, ConstraintCoverage, EnrichedConstraint, EnrichedPlan,
+    EnrichmentEngine,
+};
 pub use checkpoint::{CheckpointManager, CrashRecovery, ExecutionCheckpoint, PipelinePhase, RecoveryResult};
 pub use context::{ProjectContext, VerifiedFileRegistry};
 pub use convergence::{ConvergencePath, ConvergenceReport};
 pub use deep_review::{DeepReviewEngine, DeepReviewResult, ReviewArtifacts, TwoPassResult};
 pub use feedback::{AggregatedFeedback, FeedbackAggregator};
 pub use learning::{LearningHistory, ProgressSummary};
-pub use phase_provider::{Phase, PhaseProviderFactory};
 pub use quality_loop::{QualityLoop, QualityLoopResult};
 pub use refinement::{RefinementEngine, RefinementResult};
 pub use strategy::{RefinementStrategy, StrategyRotator};
 pub use feedback_loop::{FeedbackLoop, FeedbackLoopConfig, VerifiedAnalysis};
 pub use insight::{
     ArtifactClassification, ArtifactInsights, ExtractedInsight, ExtractionStats,
-    InsightContext, InsightEngine, InsightExtractionResult, KnowledgeClassifier,
-    MistakeFinder, PotentialMistake, TierClassification, ValueScore, ValueScorer,
+    HybridClassifier, InsightContext, InsightEngine, InsightExtractionResult, MistakeFinder,
+    PotentialMistake, TierClassification, ValueScore, ValueScorer,
 };
