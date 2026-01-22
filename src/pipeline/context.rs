@@ -187,6 +187,33 @@ pub struct ClaudegenContext {
 
     /// Session ID for persistence
     session_id: Option<String>,
+
+    /// Iteration counter for refinement loops
+    iteration_count: usize,
+
+    /// Key abstractions extracted from analysis
+    key_abstractions: Vec<KeyAbstraction>,
+}
+
+/// Key abstraction found during analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyAbstraction {
+    pub name: String,
+    pub kind: String,
+    pub file_ref: String,
+    pub description: String,
+    pub usage_notes: Vec<String>,
+}
+
+/// Context statistics for reporting
+#[derive(Debug, Clone, Default)]
+pub struct ContextStats {
+    pub tier3_count: usize,
+    pub abstraction_count: usize,
+    pub convention_count: usize,
+    pub has_detection: bool,
+    pub has_synthesis: bool,
+    pub iteration_count: usize,
 }
 
 impl ClaudegenContext {
@@ -197,6 +224,8 @@ impl ClaudegenContext {
             tier_classification: TierTracker::new(),
             analysis_results: AnalysisResults::new(),
             session_id: None,
+            iteration_count: 0,
+            key_abstractions: Vec::new(),
         }
     }
 
@@ -216,12 +245,51 @@ impl ClaudegenContext {
         self.session_id.as_deref()
     }
 
-    // ── Tier Classification ────────────────────────────────────────────────
+    // ── Analysis Results ──────────────────────────────────────────────────
 
     /// Set analysis results
     pub fn set_analysis(&mut self, results: AnalysisResults) {
         self.analysis_results = results;
     }
+
+    /// Set project detection
+    pub fn set_detection(&mut self, detection: ProjectDetection) {
+        self.analysis_results.detection = Some(detection);
+    }
+
+    /// Set inferred conventions
+    pub fn set_conventions(&mut self, conventions: InferredConventions) {
+        self.analysis_results.conventions = Some(conventions);
+    }
+
+    /// Set extracted constraints
+    pub fn set_constraints(&mut self, constraints: ExtractedConstraints) {
+        self.analysis_results.constraints = Some(constraints);
+    }
+
+    /// Set deep analysis results
+    pub fn set_deep_analysis(&mut self, analysis: DeepAnalysisResult) {
+        // Extract key abstractions from deep analysis
+        self.key_abstractions = analysis.key_abstractions.iter().map(|a| KeyAbstraction {
+            name: a.name.clone(),
+            kind: format!("{:?}", a.kind),
+            file_ref: a.file.clone(),
+            description: a.description.clone(),
+            usage_notes: a.usage_notes.clone(),
+        }).collect();
+        self.analysis_results.deep_analysis = Some(analysis);
+    }
+
+    /// Set synthesis results
+    pub fn set_synthesis(&mut self, synthesis: super::analysis::SynthesizedAnalysis) {
+        self.analysis_results.synthesis = Some(SynthesizedAnalysis {
+            summary: format!("Confidence: {:.2}", synthesis.confidence.overall),
+            key_insights: synthesis.modules.iter().map(|m| m.name.clone()).collect(),
+            critical_paths: synthesis.deep.constraints.iter().map(|c| c.description.clone()).collect(),
+        });
+    }
+
+    // ── Tier Classification ────────────────────────────────────────────────
 
     /// Get analysis results
     pub fn analysis(&self) -> &AnalysisResults {
@@ -374,6 +442,60 @@ impl ClaudegenContext {
         self.tier_classification.tier1_rejected.extend(other.tier_classification.tier1_rejected.clone());
         self.tier_classification.tier2_conventions.extend(other.tier_classification.tier2_conventions.clone());
         self.tier_classification.tier3_constraints.extend(other.tier_classification.tier3_constraints.clone());
+        self.key_abstractions.extend(other.key_abstractions.clone());
+
+        // Merge analysis results if not set
+        if other.analysis_results.detection.is_some() && self.analysis_results.detection.is_none() {
+            self.analysis_results.detection = other.analysis_results.detection.clone();
+        }
+        if other.analysis_results.conventions.is_some() && self.analysis_results.conventions.is_none() {
+            self.analysis_results.conventions = other.analysis_results.conventions.clone();
+        }
+        if other.analysis_results.constraints.is_some() && self.analysis_results.constraints.is_none() {
+            self.analysis_results.constraints = other.analysis_results.constraints.clone();
+        }
+        if other.analysis_results.deep_analysis.is_some() && self.analysis_results.deep_analysis.is_none() {
+            self.analysis_results.deep_analysis = other.analysis_results.deep_analysis.clone();
+        }
+        if other.analysis_results.synthesis.is_some() && self.analysis_results.synthesis.is_none() {
+            self.analysis_results.synthesis = other.analysis_results.synthesis.clone();
+        }
+    }
+
+    // ── Iteration Tracking ────────────────────────────────────────────────
+
+    /// Increment iteration count
+    pub fn increment_iteration(&mut self) {
+        self.iteration_count += 1;
+    }
+
+    /// Get iteration count
+    pub fn iteration_count(&self) -> usize {
+        self.iteration_count
+    }
+
+    // ── Accessors ─────────────────────────────────────────────────────────
+
+    /// Get tier3 constraints (items)
+    pub fn tier3_items(&self) -> &[Constraint] {
+        &self.tier_classification.tier3_constraints
+    }
+
+    /// Get key abstractions
+    pub fn key_abstractions(&self) -> &[KeyAbstraction] {
+        &self.key_abstractions
+    }
+
+    /// Get context statistics
+    pub fn stats(&self) -> ContextStats {
+        ContextStats {
+            tier3_count: self.tier_classification.tier3_constraints.len(),
+            abstraction_count: self.key_abstractions.len(),
+            convention_count: self.tier_classification.tier2_conventions.len(),
+            has_detection: self.analysis_results.detection.is_some(),
+            has_synthesis: self.analysis_results.synthesis.is_some(),
+            iteration_count: self.iteration_count,
+        }
     }
 }
 

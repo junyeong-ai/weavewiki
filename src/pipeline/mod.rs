@@ -8,7 +8,7 @@
 //! - Phase 5: Generation (search-based artifact creation)
 //! - Phase 6: Validation (LLM-as-Judge quality assurance)
 
-pub mod accumulative_context;
+// accumulative_context module removed - replaced by ClaudegenContext in context.rs
 pub mod adaptive;
 pub mod analysis;
 pub mod checkpoint;
@@ -73,9 +73,9 @@ pub use insight::{
     HybridClassifier, InsightContext, InsightEngine, InsightExtractionResult, MistakeFinder,
     PotentialMistake, TierClassification, ValueScore, ValueScorer,
 };
-pub use accumulative_context::{
-    AccumulativeContext, AbstractionSummary, ContextStats, ContextSummary,
-    FileGotcha, Tier, Tier3Category, Tier3Item,
+// ClaudegenContext types exported from context module
+pub use context::{
+    KeyAbstraction, ContextStats,
 };
 pub use analysis::language_analyzer::{
     LanguageAnalyzerRegistry, LanguageAnalysisResult, LanguageConstraint, LanguageGotcha,

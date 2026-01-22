@@ -33,14 +33,12 @@ use super::phases::{
     output_router::{self, OutputPlan},
     project_detection::{self, ProjectDetection},
 };
+use super::context::ClaudegenContext;
 use super::enrichment::{EnrichedPlan, EnrichmentEngine};
 use super::reference_extractor::ReferenceExtractor;
 use super::refinement::RefinementEngine;
 use super::validation::{
-    cross_validation, CrossValidationResult,
-    project_consistency::{self, ConsistencyResult},
-    semantic_validator::SemanticQualityResult,
-    tier_filter::{self, TierFilterResult},
+    ConsistencyResult, CrossValidationResult, SemanticQualityResult, TierFilterResult,
 };
 
 #[derive(Debug, Clone)]
@@ -60,6 +58,7 @@ pub struct AdaptivePipelineOutput {
     pub quality_score: f32,
     pub refinement_iterations: usize,
     pub refinement_converged: bool,
+    pub context: ClaudegenContext,
 }
 
 pub struct AdaptivePipeline {
@@ -126,8 +125,12 @@ impl AdaptivePipeline {
 
         tracing::info!(project = ?self.project_root, "Starting adaptive pipeline");
 
+        // Initialize ClaudegenContext for zero information loss
+        let mut ctx = ClaudegenContext::new(&self.project_root);
+
         // Phase 1: Project Detection
         let detection = self.detect_project().await?;
+        ctx.set_detection(detection.clone());
         tracing::info!(
             project_type = ?detection.primary_type,
             is_monorepo = detection.is_monorepo,
@@ -158,7 +161,7 @@ impl AdaptivePipeline {
         );
 
         // Phase 2.5: Deep Analysis (if enabled) with timeout
-        let analysis_timeout = Duration::from_secs(self.config.network().analysis_phase_timeout_secs);
+        let analysis_timeout = Duration::from_secs(self.config.timeout().analysis_phase_timeout_secs);
         let deep_analysis = with_timeout(
             analysis_timeout,
             self.run_deep_analysis(&detection),
@@ -278,6 +281,14 @@ impl AdaptivePipeline {
             (None, None)
         };
 
+        // Populate ClaudegenContext with deep analysis and synthesis
+        if let Some(ref deep) = deep_analysis {
+            ctx.set_deep_analysis(deep.clone());
+        }
+        if let Some(ref synth) = synthesis {
+            ctx.set_synthesis(synth.clone());
+        }
+
         // Log synthesis insights if available
         if let Some(ref synth) = synthesis
             && !synth.modules.is_empty() {
@@ -289,6 +300,7 @@ impl AdaptivePipeline {
 
         // Phase 3: Convention Inference
         let conventions = self.infer_conventions(&detection).await?;
+        ctx.set_conventions(conventions.clone());
         tracing::info!(
             architecture = %conventions.architecture.pattern_name,
             patterns = conventions.patterns.len(),
@@ -299,6 +311,7 @@ impl AdaptivePipeline {
         let constraints = self
             .extract_constraints(&detection, &conventions, synthesis.as_ref())
             .await?;
+        ctx.set_constraints(constraints.clone());
         tracing::info!(
             anti_patterns = constraints.anti_patterns.len(),
             hidden_deps = constraints.hidden_dependencies.len(),
@@ -357,12 +370,13 @@ impl AdaptivePipeline {
             .unwrap_or("project")
             .to_string();
 
-        let claude_md = ClaudeMdGenerator::generate_with_synthesis(
+        let claude_md = ClaudeMdGenerator::generate_with_enrichment(
             &output_plan,
             &detection,
             &conventions,
             &constraints,
             &project_name,
+            Some(&enriched_plan),
             synthesis.as_ref(),
         )?;
 
@@ -404,10 +418,10 @@ impl AdaptivePipeline {
         let agents = refinement_result.agents;
         let rules = refinement_result.rules;
 
-        // Phase 8: Final Validation
-        let tier_result = tier_filter::filter(&skills, &agents, &rules, &claude_md.to_markdown());
+        // Phase 8: Final Validation (simplified - actual validation via LLM Judge)
+        let tier_result = TierFilterResult::evaluate(&skills, &agents, &rules, &claude_md.to_markdown());
 
-        let consistency_result = project_consistency::check(
+        let consistency_result = ConsistencyResult::check(
             detection.primary_type,
             detection.is_monorepo,
             &skills,
@@ -415,11 +429,7 @@ impl AdaptivePipeline {
             &rules,
         );
 
-        let cross_validation_result = cross_validation::validate(
-            &self.config.cross_validation(),
-            &self.config.quality(),
-            &self.project_root,
-            &output_plan,
+        let cross_validation_result = CrossValidationResult::validate(
             &skills,
             &agents,
             &rules,
@@ -445,6 +455,16 @@ impl AdaptivePipeline {
             rules: rules.clone(),
         };
 
+        // Log accumulated context stats
+        let ctx_stats = ctx.stats();
+        tracing::info!(
+            tier3_items = ctx_stats.tier3_count,
+            abstractions = ctx_stats.abstraction_count,
+            conventions = ctx_stats.convention_count,
+            iterations = ctx_stats.iteration_count,
+            "ClaudegenContext populated"
+        );
+
         Ok(AdaptivePipelineOutput {
             claude_md,
             plugin,
@@ -461,6 +481,7 @@ impl AdaptivePipeline {
             quality_score,
             refinement_iterations: refinement_result.iterations,
             refinement_converged: refinement_result.converged,
+            context: ctx,
         })
     }
 
@@ -473,7 +494,7 @@ impl AdaptivePipeline {
     }
 
     async fn infer_conventions(&self, detection: &ProjectDetection) -> Result<InferredConventions> {
-        let max_samples = self.config.few_shots().max_examples;
+        let max_samples = self.config.few_shot.max_examples;
         convention_inference::infer(&self.project_root, detection, self.provider.clone(), max_samples).await
     }
 
@@ -572,7 +593,8 @@ impl AdaptivePipeline {
             languages: detection.languages.iter().map(|l| l.language.clone()).collect(),
         };
 
-        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider));
+        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
+            .with_timeout(self.config.multi_agent.specialist_timeout_secs);
 
         let result = multi_analyzer.analyze(context).await?;
         let deep_result = multi_analyzer.to_deep_analysis_result(result);
@@ -697,7 +719,8 @@ impl AdaptivePipeline {
             languages: detection.languages.iter().map(|l| l.language.clone()).collect(),
         };
 
-        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider));
+        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
+            .with_timeout(self.config.multi_agent.specialist_timeout_secs);
 
         let result = multi_analyzer.analyze(context).await?;
 

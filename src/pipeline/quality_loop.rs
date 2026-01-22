@@ -22,13 +22,48 @@ use crate::ai::{with_timeout, LlmProvider};
 use crate::config::{AnalysisDepth, Config};
 use crate::types::Result;
 
+use super::context::ClaudegenContext;
 use super::adaptive::{AdaptivePipeline, AdaptivePipelineOutput};
 use super::checkpoint::{
-    CheckpointManager, CrashRecovery, ExecutionCheckpoint, PipelinePhase, RecoveryResult,
+    CheckpointManager, CrashRecovery, ExecutionCheckpoint, GeneratedArtifacts, PipelinePhase,
+    QualitySnapshot, RecoveryResult,
 };
 use super::context::VerifiedFileRegistry;
 use super::deep_review::{DeepReviewEngine, ReviewArtifacts, TwoPassResult};
-use super::validation::{CleanPassStatus, FailureReason, ValidationPipeline, ValidationResults};
+// Simplified: ValidationPipeline replaced with LLM Judge in quality module
+
+/// Simplified clean pass status
+#[derive(Debug, Clone)]
+pub enum CleanPassStatus {
+    InProgress { streak: usize, required: usize },
+    Converged { passes: usize },
+    Failed { reason: FailureReason },
+}
+
+/// Simplified failure reason
+#[derive(Debug, Clone)]
+pub enum FailureReason {
+    MaxAttemptsReached,
+    QualityBelow { score: f32, threshold: f32 },
+}
+
+/// Simplified validation results
+#[derive(Debug, Clone, Default)]
+pub struct ValidationResults {
+    pub total_issues: usize,
+    pub error_count: usize,
+    pub warning_count: usize,
+}
+
+impl ValidationResults {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn error_issues(&self) -> usize {
+        self.error_count
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct QualityLoopResult {
@@ -89,7 +124,7 @@ impl QualityLoop {
 
         // Initialize checkpoint manager for durable execution
         let mut checkpoint_manager = if self.config.performance.checkpoint_interval_minutes > 0 {
-            let manager = CheckpointManager::new(&self.project_root, &self.config.execution());
+            let manager = CheckpointManager::new(&self.project_root, self.config.timeout());
             manager.initialize().await?;
             manager.acquire_lock().await?;
             Some(manager)
@@ -108,7 +143,7 @@ impl QualityLoop {
     }
 
     async fn try_recover(&self) -> Result<Option<QualityLoopResult>> {
-        let manager = CheckpointManager::new(&self.project_root, &self.config.execution());
+        let manager = CheckpointManager::new(&self.project_root, self.config.timeout());
         let recovery = CrashRecovery::new(manager);
 
         match recovery.attempt_recovery().await? {
@@ -226,6 +261,13 @@ impl QualityLoop {
         let mut checkpoint = ExecutionCheckpoint::new();
         checkpoint.budget_remaining = self.config.budget.total_tokens;
 
+        // Track best result across iterations
+        let mut best_result: Option<AdaptivePipelineOutput> = None;
+        let mut best_quality: f32 = 0.0;
+
+        // Accumulate context across iterations for zero information loss
+        let mut ctx = ClaudegenContext::new(&self.project_root);
+
         for outer_iter in 0..loop_config.max_iterations {
             checkpoint.current_phase = PipelinePhase::Analysis;
             checkpoint.phase_progress = outer_iter as f32 / loop_config.max_iterations as f32;
@@ -238,17 +280,86 @@ impl QualityLoop {
             tracing::info!(
                 iteration = outer_iter + 1,
                 max = loop_config.max_iterations,
+                config_depth = ?current_config.analysis.depth,
                 "Quality loop iteration starting"
             );
 
+            // Create pipeline with current config (may have escalated depth)
             let pipeline = AdaptivePipeline::new(
                 self.project_root.clone(),
                 Arc::clone(&self.provider),
                 current_config.clone(),
             );
 
-            let timeout = Duration::from_secs(self.config.network().timeout_ms / 1000);
+            let timeout = Duration::from_secs(self.config.timeout().quality_loop_timeout_secs);
             let result = with_timeout(timeout, pipeline.run(), "quality_loop").await?;
+
+            // Update checkpoint with generated artifacts and quality history
+            checkpoint.generated_artifacts = GeneratedArtifacts {
+                claude_md: Some(result.claude_md.to_markdown()),
+                skills: result
+                    .plugin
+                    .skills
+                    .iter()
+                    .filter_map(|s| {
+                        serde_json::to_string(s).ok().map(|json| (s.name.clone(), json))
+                    })
+                    .collect(),
+                agents: result
+                    .plugin
+                    .agents
+                    .iter()
+                    .filter_map(|a| {
+                        serde_json::to_string(a).ok().map(|json| (a.name.clone(), json))
+                    })
+                    .collect(),
+                rules: result
+                    .rules
+                    .iter()
+                    .filter_map(|r| {
+                        serde_json::to_string(r).ok().map(|json| (r.name.clone(), json))
+                    })
+                    .collect(),
+            };
+            checkpoint.quality_history.push(QualitySnapshot {
+                timestamp: chrono::Utc::now(),
+                iteration: outer_iter,
+                semantic_score: result.semantic_quality.as_ref().map(|q| q.overall_score).unwrap_or(0.0),
+                evidence_score: result.cross_validation_result.evidence_traceability.coverage_score,
+                overall_score: result.quality_score,
+            });
+            checkpoint.refinement_iteration = result.refinement_iterations;
+            checkpoint.current_phase = PipelinePhase::Refinement;
+
+            // Save checkpoint after each pipeline run
+            if let Some(manager) = checkpoint_manager.as_mut() {
+                let _ = manager.save_checkpoint(&checkpoint).await;
+            }
+
+            // Merge context from this iteration (accumulate across iterations)
+            ctx.merge_from(&result.context);
+            ctx.increment_iteration();
+
+            // Track best result and write output after each improvement
+            if result.quality_score > best_quality {
+                best_quality = result.quality_score;
+                // Clone the result and replace its context with the accumulated context
+                let mut best = result.clone();
+                best.context = ctx.clone();
+                best_result = Some(best);
+
+                // Write output files after each quality improvement
+                tracing::info!(
+                    iteration = outer_iter + 1,
+                    quality = format!("{:.1}%", result.quality_score * 100.0),
+                    accumulated_tier3 = ctx.tier3_items().len(),
+                    accumulated_abstractions = ctx.key_abstractions().len(),
+                    "New best quality - writing output files with accumulated context"
+                );
+                if let Err(e) = self.write_result_output(&result).await {
+                    tracing::warn!(error = %e, "Failed to write output files");
+                }
+            }
 
             let analysis_confidence = result
                 .synthesis
@@ -283,9 +394,31 @@ impl QualityLoop {
                     iteration_found: outer_iter,
                 });
 
-                current_config = self.escalate_analysis_depth(current_config);
-                analysis_rerun_count += 1;
-                continue;
+                if let Some(escalated) = self.try_escalate_analysis_depth(current_config.clone()) {
+                    current_config = escalated;
+                    analysis_rerun_count += 1;
+                    continue;
+                } else if let Some(best) = best_result {
+                    // At max depth, return best result we have
+                    tracing::info!(
+                        quality = format!("{:.1}%", best_quality * 100.0),
+                        "At maximum depth, returning best result"
+                    );
+                    return Ok(QualityLoopResult {
+                        output: best,
+                        outer_iterations: outer_iter + 1,
+                        analysis_rerun_count,
+                        final_confidence: analysis_confidence,
+                        gaps_discovered,
+                        deep_review_passed: false,
+                        deep_review_attempts: 0,
+                        validation_results: None,
+                        clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                    });
+                } else {
+                    analysis_rerun_count += 1;
+                    continue;
+                }
             }
 
             if synthesis_confidence < loop_config.target_score {
@@ -305,9 +438,31 @@ impl QualityLoop {
                     iteration_found: outer_iter,
                 });
 
-                current_config = self.escalate_analysis_depth(current_config);
-                analysis_rerun_count += 1;
-                continue;
+                if let Some(escalated) = self.try_escalate_analysis_depth(current_config.clone()) {
+                    current_config = escalated;
+                    analysis_rerun_count += 1;
+                    continue;
+                } else if let Some(best) = best_result {
+                    // At max depth, return best result we have
+                    tracing::info!(
+                        quality = format!("{:.1}%", best_quality * 100.0),
+                        "At maximum depth (synthesis), returning best result"
+                    );
+                    return Ok(QualityLoopResult {
+                        output: best,
+                        outer_iterations: outer_iter + 1,
+                        analysis_rerun_count,
+                        final_confidence: synthesis_confidence,
+                        gaps_discovered,
+                        deep_review_passed: false,
+                        deep_review_attempts: 0,
+                        validation_results: None,
+                        clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                    });
+                } else {
+                    analysis_rerun_count += 1;
+                    continue;
+                }
             }
 
             let evidence_check = self.validate_evidence(&result).await;
@@ -330,9 +485,31 @@ impl QualityLoop {
                 }
 
                 if evidence_check.gaps.len() >= 5 {
-                    current_config = self.escalate_analysis_depth(current_config);
-                    analysis_rerun_count += 1;
-                    continue;
+                    if let Some(escalated) = self.try_escalate_analysis_depth(current_config.clone()) {
+                        current_config = escalated;
+                        analysis_rerun_count += 1;
+                        continue;
+                    } else if let Some(best) = best_result.clone() {
+                        // At max depth, return best result we have
+                        tracing::info!(
+                            quality = format!("{:.1}%", best_quality * 100.0),
+                            "At maximum depth (evidence), returning best result"
+                        );
+                        return Ok(QualityLoopResult {
+                            output: best,
+                            outer_iterations: outer_iter + 1,
+                            analysis_rerun_count,
+                            final_confidence: analysis_confidence,
+                            gaps_discovered,
+                            deep_review_passed: false,
+                            deep_review_attempts: 0,
+                            validation_results: None,
+                            clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                        });
+                    } else {
+                        analysis_rerun_count += 1;
+                        continue;
+                    }
                 }
             }
 
@@ -404,17 +581,39 @@ impl QualityLoop {
 
         tracing::warn!(
             iterations = loop_config.max_iterations,
-            "Quality loop reached max iterations"
+            best_quality = format!("{:.1}%", best_quality * 100.0),
+            "Quality loop reached max iterations, using best result"
         );
 
-        let pipeline = AdaptivePipeline::new(
+        // If we have a best result, use it instead of running another pipeline
+        if let Some(best) = best_result {
+            let final_confidence = best
+                .synthesis
+                .as_ref()
+                .map(|s| s.confidence.overall)
+                .unwrap_or(0.0);
+
+            return Ok(QualityLoopResult {
+                output: best,
+                outer_iterations: loop_config.max_iterations,
+                analysis_rerun_count,
+                final_confidence,
+                gaps_discovered,
+                deep_review_passed: false,
+                deep_review_attempts: 0,
+                validation_results: None,
+                clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+            });
+        }
+
+        // Fallback: run one more pipeline attempt
+        let fallback_pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
             Arc::clone(&self.provider),
             current_config,
         );
-
-        let timeout = Duration::from_secs(self.config.network().timeout_ms / 1000);
-        let final_result = with_timeout(timeout, pipeline.run(), "quality_loop_final").await?;
+        let timeout = Duration::from_secs(self.config.timeout().quality_loop_timeout_secs);
+        let final_result = with_timeout(timeout, fallback_pipeline.run(), "quality_loop_final").await?;
 
         let final_confidence = final_result
             .synthesis
@@ -465,7 +664,7 @@ impl QualityLoop {
             self.config.clone(),
         );
 
-        let timeout = Duration::from_secs(self.config.network().timeout_ms / 1000);
+        let timeout = Duration::from_secs(self.config.timeout().quality_loop_timeout_secs);
         let result = with_timeout(timeout, pipeline.run(), "single_pass").await?;
 
         let confidence = result
@@ -584,84 +783,47 @@ impl QualityLoop {
             return Ok((ValidationResults::new(), CleanPassStatus::Converged { passes: 0 }));
         }
 
-        let file_registry = self.get_file_registry().await?;
-
-        let mut pipeline = ValidationPipeline::new(
-            Arc::clone(&self.provider),
-            self.config.validation.clone(),
-            self.config.quality().clone(),
-            self.config.project.project_type,
-            file_registry,
-            &self.project_root,
-        );
-
-        // Run validation iterations until clean pass converged or max attempts
-        let max_attempts = self.config.validation.clean_pass.max_attempts;
-        let required_passes = self.config.validation.clean_pass.consecutive_passes;
+        // Simplified validation: use quality score from result
+        let quality_score = result.quality_score;
+        let required_quality = self.config.quality().minimum_quality;
 
         tracing::info!(
-            required_passes,
-            max_attempts,
-            "Starting 5-layer validation pipeline"
+            quality_score,
+            required_quality,
+            "Running simplified validation"
         );
 
-        for attempt in 0..max_attempts {
-            let validation_results = pipeline
-                .validate(&result.plugin, &result.claude_md)
-                .await?;
+        let validation_results = ValidationResults {
+            total_issues: result.tier_filter_result.tier1_count,
+            error_count: if result.tier_filter_result.passed { 0 } else { result.tier_filter_result.tier1_count },
+            warning_count: 0,
+        };
 
-            let status = pipeline.record_validation_attempt(&validation_results);
-
-            tracing::info!(
-                attempt = attempt + 1,
-                total_issues = validation_results.total_issues,
-                errors = validation_results.error_issues(),
-                status = ?status,
-                "Validation attempt completed"
-            );
-
-            match status {
-                CleanPassStatus::Converged { passes } => {
-                    tracing::info!(
-                        passes,
-                        "Clean pass guarantee achieved"
-                    );
-                    return Ok((validation_results, status));
-                }
-                CleanPassStatus::Failed { reason } => {
-                    if matches!(reason, FailureReason::MaxAttemptsReached) {
-                        tracing::warn!(
-                            "Max validation attempts reached without convergence"
-                        );
-                    } else {
-                        tracing::warn!(
-                            reason = ?reason,
-                            "Validation failed"
-                        );
-                    }
-                    return Ok((validation_results, status));
-                }
-                CleanPassStatus::InProgress { streak, required } => {
-                    tracing::debug!(
-                        streak,
-                        required,
-                        "Clean pass in progress"
-                    );
-                    // Continue to next attempt
-                }
+        let status = if quality_score >= required_quality && result.tier_filter_result.passed {
+            CleanPassStatus::Converged { passes: 1 }
+        } else if quality_score < required_quality {
+            CleanPassStatus::Failed {
+                reason: FailureReason::QualityBelow {
+                    score: quality_score,
+                    threshold: required_quality,
+                },
             }
-        }
+        } else {
+            CleanPassStatus::InProgress { streak: 0, required: 1 }
+        };
 
-        // Return final state if loop completes without convergence
-        let final_results = pipeline
-            .validate(&result.plugin, &result.claude_md)
-            .await?;
-        let final_status = pipeline.clean_pass_status();
+        tracing::info!(
+            total_issues = validation_results.total_issues,
+            errors = validation_results.error_count,
+            status = ?status,
+            "Validation completed"
+        );
 
-        Ok((final_results, final_status))
+        Ok((validation_results, status))
     }
 
-    fn escalate_analysis_depth(&self, mut config: Config) -> Config {
+    /// Try to escalate analysis depth. Returns None if already at max depth.
+    fn try_escalate_analysis_depth(&self, mut config: Config) -> Option<Config> {
         let current = &config.analysis.depth;
         let factor = 1.5; // Default escalation factor
 
@@ -676,7 +838,7 @@ impl QualityLoop {
             }
             AnalysisDepth::Complete => {
                 tracing::warn!("Already at maximum depth, cannot escalate further");
-                return config;
+                return None;
             }
         };
 
@@ -691,7 +853,12 @@ impl QualityLoop {
             "Analysis escalated"
         );
 
-        config
+        Some(config)
+    }
+
+    #[allow(dead_code)]
+    fn escalate_analysis_depth(&self, config: Config) -> Config {
+        self.try_escalate_analysis_depth(config.clone()).unwrap_or(config)
     }
 
     async fn validate_evidence(&self, result: &AdaptivePipelineOutput) -> EvidenceCheckResult {
@@ -746,12 +913,16 @@ impl QualityLoop {
     }
 
     pub async fn write_output(&self, result: &QualityLoopResult) -> Result<()> {
+        self.write_result_output(&result.output).await
+    }
+
+    async fn write_result_output(&self, output: &AdaptivePipelineOutput) -> Result<()> {
         let pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
             Arc::clone(&self.provider),
             self.config.clone(),
         );
-        pipeline.write_output(&result.output).await
+        pipeline.write_output(output).await
     }
 }
 
