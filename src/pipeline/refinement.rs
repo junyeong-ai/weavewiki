@@ -20,7 +20,7 @@ use super::quality_assessment::{
     ConvergenceChecker, ConvergencePath, ConvergenceReport, Improvement,
     TerminationDecision, TerminationReason,
 };
-use super::thinking::{ThinkingState, ExtensionTrigger};
+use super::iteration_state::{IterationState as ThinkingLoopState, BudgetExtensionTrigger, IterationRecord};
 use super::context::VerifiedFileRegistry;
 use super::feedback::{AggregatedFeedback, FeedbackAggregator};
 use super::learning::{LearningHistory, StrategyOutcome as LearningOutcome};
@@ -165,8 +165,8 @@ impl RefinementLoopConfig {
 }
 
 /// Mutable state tracked across refinement iterations
-/// Note: quality_trajectory and tier3_trajectory are tracked in ThinkingState
-struct IterationState {
+/// Note: quality_trajectory and tier3_trajectory are tracked in ThinkingLoopState
+struct RefinementState {
     prev_quality: Option<f32>,
     stagnation_count: usize,
     last_structural_result: Option<StructuralValidationResult>,
@@ -179,7 +179,7 @@ struct IterationState {
     total_convergence_detections: usize,
 }
 
-impl IterationState {
+impl RefinementState {
     fn new() -> Self {
         Self {
             prev_quality: None,
@@ -384,8 +384,8 @@ impl RefinementEngine {
         };
         let project_context = format!("Project root: {}", self.project_root.display());
         let claude_md_content = claude_md.to_markdown();
-        let mut state = IterationState::new();
-        let mut thinking = ThinkingState::new(cfg.base_iterations, cfg.max_extension);
+        let mut state = RefinementState::new();
+        let mut thinking = ThinkingLoopState::new(cfg.base_iterations, cfg.max_extension);
 
         while thinking.should_continue() {
             let iteration = thinking.iteration;
@@ -849,13 +849,13 @@ impl RefinementEngine {
 
             // Check if iteration extension is warranted
             if thinking.iteration >= thinking.estimated_total {
-                let extended_quality = thinking.maybe_extend(ExtensionTrigger::QualityImproving {
+                let extended_quality = thinking.maybe_extend(BudgetExtensionTrigger::QualityImproving {
                     min_delta: cfg.quality_improving_delta,
                 });
-                let extended_uncertainty = thinking.maybe_extend(ExtensionTrigger::HighUncertainty {
+                let extended_uncertainty = thinking.maybe_extend(BudgetExtensionTrigger::HighUncertainty {
                     threshold: cfg.high_uncertainty_threshold,
                 });
-                let extended_value = thinking.maybe_extend(ExtensionTrigger::ValueDiscovery);
+                let extended_value = thinking.maybe_extend(BudgetExtensionTrigger::ValueDiscovery);
 
                 if extended_quality || extended_uncertainty || extended_value {
                     tracing::info!(
@@ -887,7 +887,7 @@ impl RefinementEngine {
                 .map(|i| format!("{}:{}", i.item_type, i.item_name))
                 .collect();
 
-            let mut thinking_record = super::thinking::ThinkingRecord::new(iteration, quality_before)
+            let mut thinking_record = IterationRecord::new(iteration, quality_before)
                 .with_quality_after(combined_quality)
                 .with_uncertainty(thinking.uncertainty)
                 .with_strategies(strategies_applied)

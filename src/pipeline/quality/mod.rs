@@ -1,13 +1,17 @@
 mod judge;
 mod judge_convergence;
 mod llm_judge_agent;
-mod thinking;
+mod prompts;
 
 pub use judge::{
     Artifacts, IssueSeverity, JudgeConfig, JudgmentResult, LlmJudge, QualityIssue, Suggestion,
 };
 pub use judge_convergence::{ConvergenceChecker, ConvergenceReason, ConvergenceResult};
-pub use thinking::{Criterion, Issue, ThinkingFramework};
+pub use prompts::{
+    Criterion, Issue, QualityPrompts,
+    // Backward compatibility alias
+    ThinkingFramework,
+};
 
 pub use llm_judge_agent::{
     AgentJudgmentResult, AgentQualityIssue, Artifact, ArtifactType, BatchJudgmentResult,

@@ -34,7 +34,7 @@ pub mod search;
 pub mod storage;
 pub mod strategy;
 pub mod synthesis;
-pub mod thinking;
+pub mod iteration_state;
 pub mod validation;
 
 pub use adaptive::{AdaptivePipeline, AdaptivePipelineOutput};
@@ -56,7 +56,11 @@ pub use learning::{LearningHistory, ProgressSummary};
 pub use quality_loop::{QualityLoop, QualityLoopResult};
 pub use refinement::{RefinementEngine, RefinementResult};
 pub use strategy::{RefinementStrategy, StrategyRotator};
-pub use thinking::{ThinkingState, ThinkingRecord, ExtensionTrigger};
+pub use iteration_state::{
+    IterationState, IterationRecord, BudgetExtensionTrigger, RevisionMeta,
+    // Backward compatibility aliases
+    ThinkingState, ThinkingRecord, ExtensionTrigger,
+};
 pub use insight::{
     ArtifactClassification, ArtifactInsights, ExtractedInsight, ExtractionStats,
     HybridClassifier, InsightContext, InsightEngine, InsightExtractionResult, MistakeFinder,
