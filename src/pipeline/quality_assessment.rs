@@ -251,6 +251,7 @@ pub struct RemainingIssue {
     pub attempts: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct QualityAssessor {
     target_quality: f32,
     quality_floor: f32,
@@ -442,6 +443,178 @@ pub enum ContinueReason {
     Improving,
     NotConverged,
     NeedsMoreThinking,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ConvergenceGuard - Lightweight wrapper for RefinementEngine
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Guard result indicating whether iteration should stop
+#[derive(Debug, Clone)]
+pub struct GuardResult {
+    pub should_stop: bool,
+    pub reason: Option<AssessmentPath>,
+    pub quality: f32,
+}
+
+impl GuardResult {
+    pub fn stop(reason: AssessmentPath, quality: f32) -> Self {
+        Self {
+            should_stop: true,
+            reason: Some(reason),
+            quality,
+        }
+    }
+
+    pub fn continue_iteration(quality: f32) -> Self {
+        Self {
+            should_stop: false,
+            reason: None,
+            quality,
+        }
+    }
+}
+
+/// Convergence guard for RefinementEngine
+///
+/// Provides a simplified interface for checking convergence within
+/// the refinement loop. Wraps QualityAssessor with stateful tracking.
+#[derive(Debug, Clone)]
+pub struct ConvergenceGuard {
+    assessor: QualityAssessor,
+    iteration_count: usize,
+    quality_history: Vec<f32>,
+    plateau_threshold: f32,
+    plateau_window: usize,
+}
+
+impl ConvergenceGuard {
+    pub fn new(target_quality: f32, quality_floor: f32) -> Self {
+        Self {
+            assessor: QualityAssessor::new(target_quality, false)
+                .with_quality_floor(quality_floor),
+            iteration_count: 0,
+            quality_history: Vec::new(),
+            plateau_threshold: 0.01,
+            plateau_window: 3,
+        }
+    }
+
+    pub fn with_early_exit(mut self, threshold: f32) -> Self {
+        self.assessor = self.assessor.with_early_exit(threshold, true);
+        self
+    }
+
+    pub fn with_plateau_detection(mut self, threshold: f32, window: usize) -> Self {
+        self.plateau_threshold = threshold;
+        self.plateau_window = window;
+        self
+    }
+
+    /// Check if refinement should stop
+    pub fn check(&mut self, quality: f32, dimensions: &DimensionsStatus) -> GuardResult {
+        self.iteration_count += 1;
+        self.quality_history.push(quality);
+
+        // Check for plateau (quality not improving)
+        if self.is_plateau() && quality >= self.assessor.quality_floor {
+            return GuardResult::stop(AssessmentPath::OscillationSettled, quality);
+        }
+
+        // Use underlying assessor
+        if let Some(path) = self.assessor.check(quality, dimensions, false, 0) {
+            return GuardResult::stop(path, quality);
+        }
+
+        GuardResult::continue_iteration(quality)
+    }
+
+    /// Check with uncertainty-aware termination
+    pub fn check_with_uncertainty(
+        &mut self,
+        quality: f32,
+        dimensions: &DimensionsStatus,
+        uncertainty: f32,
+        estimated_remaining: usize,
+    ) -> GuardResult {
+        self.iteration_count += 1;
+        self.quality_history.push(quality);
+
+        let is_improving = self.is_improving();
+
+        let decision = self.assessor.check_with_thinking(
+            quality,
+            dimensions,
+            uncertainty,
+            self.iteration_count,
+            self.iteration_count + estimated_remaining,
+            is_improving,
+        );
+
+        match decision {
+            TerminationDecision::Terminate(reason) => {
+                let path = match reason {
+                    TerminationReason::Converged(p) => p,
+                    TerminationReason::EarlyExit { .. } => AssessmentPath::EarlyExit,
+                    TerminationReason::Satisfied => AssessmentPath::QualityTargetMet,
+                    TerminationReason::MaxIterations => AssessmentPath::MaxIterations,
+                };
+                GuardResult::stop(path, quality)
+            }
+            TerminationDecision::Continue(_) => GuardResult::continue_iteration(quality),
+        }
+    }
+
+    /// Check if quality is improving
+    fn is_improving(&self) -> bool {
+        if self.quality_history.len() < 2 {
+            return true;
+        }
+        let len = self.quality_history.len();
+        self.quality_history[len - 1] > self.quality_history[len - 2]
+    }
+
+    /// Check if quality has plateaued
+    fn is_plateau(&self) -> bool {
+        if self.quality_history.len() < self.plateau_window {
+            return false;
+        }
+
+        let window: Vec<f32> = self.quality_history
+            .iter()
+            .rev()
+            .take(self.plateau_window)
+            .copied()
+            .collect();
+
+        let max = window.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min = window.iter().cloned().fold(f32::INFINITY, f32::min);
+
+        (max - min) < self.plateau_threshold
+    }
+
+    /// Get iteration count
+    pub fn iterations(&self) -> usize {
+        self.iteration_count
+    }
+
+    /// Get quality trajectory
+    pub fn quality_history(&self) -> &[f32] {
+        &self.quality_history
+    }
+
+    /// Reset the guard for a new refinement session
+    pub fn reset(&mut self) {
+        self.iteration_count = 0;
+        self.quality_history.clear();
+    }
+}
+
+impl QualityAssessor {
+    /// Expose quality_floor for ConvergenceGuard
+    pub(crate) fn quality_floor(&self) -> f32 {
+        self.quality_floor
+    }
 }
 
 #[cfg(test)]

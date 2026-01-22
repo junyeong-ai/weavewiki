@@ -52,6 +52,8 @@ pub use context::{
 };
 pub use quality_assessment::{
     AssessmentPath, QualityAssessment, QualityAssessor, TerminationDecision, TerminationReason, ContinueReason,
+    // ConvergenceGuard for RefinementEngine
+    ConvergenceGuard, GuardResult,
     // Backward compatibility aliases
     ConvergencePath, ConvergenceReport, ConvergenceChecker as QualityConvergenceChecker,
 };
