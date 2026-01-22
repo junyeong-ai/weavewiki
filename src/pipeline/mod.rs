@@ -44,7 +44,12 @@ pub use enrichment::{
     EnrichmentEngine,
 };
 pub use checkpoint::{CheckpointManager, CrashRecovery, ExecutionCheckpoint, PipelinePhase, RecoveryResult};
-pub use context::{ProjectContext, VerifiedFileRegistry};
+pub use context::{
+    ProjectContext, VerifiedFileRegistry,
+    // ClaudegenContext types
+    ClaudegenContext, ContentTier, TierTracker, AnalysisResults, CompactionPriority,
+    Convention, Constraint, RejectedItem, SynthesizedAnalysis,
+};
 pub use quality_assessment::{
     AssessmentPath, QualityAssessment, QualityAssessor, TerminationDecision, TerminationReason, ContinueReason,
     // Backward compatibility aliases

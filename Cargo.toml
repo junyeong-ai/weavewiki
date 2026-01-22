@@ -15,7 +15,7 @@ claude-agent = ["dep:claude-agent"]
 
 [dependencies]
 # Claude Agent SDK - Direct API access with CLI OAuth support
-claude-agent = { path = "../claude-agent-rs", optional = true, features = ["cli-integration"] }
+claude-agent = { path = "../claude-agent-rs", optional = true, features = ["cli-integration", "jsonl"] }
 
 # Ordered map for consistent YAML output
 indexmap = { version = "2.12", features = ["serde"] }

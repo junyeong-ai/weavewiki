@@ -2,16 +2,384 @@
 //!
 //! Provides verified file registry and project context for refinement pipeline.
 //! Ensures LLM receives accurate file information to prevent hallucinated references.
+//!
+//! ClaudegenContext wraps claude-agent-rs Session with claudegen-specific extensions
+//! for tier classification, analysis results, and compaction priority.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ProjectType;
 use crate::types::Result;
 
+use super::analysis::DeepAnalysisResult;
 use super::phases::{
-    convention_inference::InferredConventions, project_detection::ProjectDetection,
+    constraint_extraction::ExtractedConstraints, convention_inference::InferredConventions,
+    project_detection::ProjectDetection,
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// ClaudegenContext - Wraps claude-agent Session with claudegen extensions
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Content tier classification for quality assessment
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContentTier {
+    /// Generic language/tool knowledge - REJECT
+    Tier1Generic,
+    /// Project conventions - Keep
+    Tier2Convention,
+    /// Hidden constraints, gotchas - Essential
+    Tier3Constraint,
+}
+
+impl ContentTier {
+    pub fn is_rejectable(&self) -> bool {
+        matches!(self, Self::Tier1Generic)
+    }
+
+    pub fn is_essential(&self) -> bool {
+        matches!(self, Self::Tier3Constraint)
+    }
+}
+
+/// Item rejected due to Tier1 (generic) content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectedItem {
+    pub item_type: String,
+    pub name: String,
+    pub reason: String,
+}
+
+/// Extracted convention from the project
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Convention {
+    pub name: String,
+    pub description: String,
+    pub examples: Vec<String>,
+}
+
+/// Extracted constraint (Tier3 - essential)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Constraint {
+    pub name: String,
+    pub description: String,
+    pub evidence: Vec<String>,
+    pub gotcha: Option<String>,
+}
+
+/// Tier classification tracking
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TierTracker {
+    pub tier1_rejected: Vec<RejectedItem>,
+    pub tier2_conventions: Vec<Convention>,
+    pub tier3_constraints: Vec<Constraint>,
+}
+
+impl TierTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_rejected(&mut self, item: RejectedItem) {
+        self.tier1_rejected.push(item);
+    }
+
+    pub fn add_convention(&mut self, conv: Convention) {
+        self.tier2_conventions.push(conv);
+    }
+
+    pub fn add_constraint(&mut self, constraint: Constraint) {
+        self.tier3_constraints.push(constraint);
+    }
+
+    pub fn tier3_count(&self) -> usize {
+        self.tier3_constraints.len()
+    }
+
+    pub fn has_essential_content(&self) -> bool {
+        !self.tier3_constraints.is_empty()
+    }
+}
+
+/// Synthesized analysis results from multiple phases
+#[derive(Debug, Clone, Default)]
+pub struct SynthesizedAnalysis {
+    pub summary: String,
+    pub key_insights: Vec<String>,
+    pub critical_paths: Vec<String>,
+}
+
+/// Aggregated analysis results from pipeline phases
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisResults {
+    pub detection: Option<ProjectDetection>,
+    pub conventions: Option<InferredConventions>,
+    pub constraints: Option<ExtractedConstraints>,
+    pub deep_analysis: Option<DeepAnalysisResult>,
+    pub synthesis: Option<SynthesizedAnalysis>,
+}
+
+impl AnalysisResults {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_detection(mut self, detection: ProjectDetection) -> Self {
+        self.detection = Some(detection);
+        self
+    }
+
+    pub fn with_conventions(mut self, conventions: InferredConventions) -> Self {
+        self.conventions = Some(conventions);
+        self
+    }
+
+    pub fn with_constraints(mut self, constraints: ExtractedConstraints) -> Self {
+        self.constraints = Some(constraints);
+        self
+    }
+
+    pub fn with_deep_analysis(mut self, analysis: DeepAnalysisResult) -> Self {
+        self.deep_analysis = Some(analysis);
+        self
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.detection.is_some()
+            && self.conventions.is_some()
+            && self.constraints.is_some()
+            && self.deep_analysis.is_some()
+    }
+}
+
+/// Compaction priority for context management
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompactionPriority {
+    /// Can be removed first
+    Low,
+    /// Keep if space allows
+    Medium,
+    /// Important to retain
+    High,
+    /// Never remove (Tier3 content)
+    Critical,
+}
+
+/// ClaudegenContext - Wrapper around claude-agent Session with claudegen extensions
+///
+/// Provides:
+/// - Tier classification for content quality assessment
+/// - Aggregated analysis results from pipeline phases
+/// - Compaction priority based on content value
+#[derive(Debug, Clone)]
+pub struct ClaudegenContext {
+    /// Project root path
+    project_root: PathBuf,
+
+    /// Tier classification tracking
+    tier_classification: TierTracker,
+
+    /// Aggregated analysis results
+    analysis_results: AnalysisResults,
+
+    /// Session ID for persistence
+    session_id: Option<String>,
+}
+
+impl ClaudegenContext {
+    /// Create a new ClaudegenContext for the given project
+    pub fn new(project_root: impl AsRef<Path>) -> Self {
+        Self {
+            project_root: project_root.as_ref().to_path_buf(),
+            tier_classification: TierTracker::new(),
+            analysis_results: AnalysisResults::new(),
+            session_id: None,
+        }
+    }
+
+    /// Create with an existing session ID
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Get the project root path
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// Get the session ID if set
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    // ── Tier Classification ────────────────────────────────────────────────
+
+    /// Set analysis results
+    pub fn set_analysis(&mut self, results: AnalysisResults) {
+        self.analysis_results = results;
+    }
+
+    /// Get analysis results
+    pub fn analysis(&self) -> &AnalysisResults {
+        &self.analysis_results
+    }
+
+    /// Get mutable analysis results
+    pub fn analysis_mut(&mut self) -> &mut AnalysisResults {
+        &mut self.analysis_results
+    }
+
+    /// Classify content tier based on patterns
+    pub fn classify_content(&self, content: &str) -> ContentTier {
+        // Tier3 indicators (essential constraints)
+        let tier3_patterns = [
+            "MUST", "NEVER", "ALWAYS", "CRITICAL",
+            "gotcha", "constraint", "invariant",
+            "⚠️", "🚨", "IMPORTANT:",
+            "@", ":",  // File references like @src/main.rs:10
+        ];
+
+        // Tier1 indicators (generic knowledge)
+        let tier1_patterns = [
+            "best practice", "generally", "typically",
+            "you should", "consider using",
+            "good to", "recommended to",
+        ];
+
+        let content_lower = content.to_lowercase();
+
+        // Check for Tier3 first (highest priority)
+        let has_file_ref = content.contains("@") && content.contains(":");
+        let has_tier3_keyword = tier3_patterns.iter().any(|p| content.contains(p));
+
+        if has_file_ref || has_tier3_keyword {
+            return ContentTier::Tier3Constraint;
+        }
+
+        // Check for Tier1 (generic)
+        let has_tier1_pattern = tier1_patterns.iter().any(|p| content_lower.contains(p));
+        if has_tier1_pattern && !has_file_ref {
+            return ContentTier::Tier1Generic;
+        }
+
+        // Default to Tier2 (convention)
+        ContentTier::Tier2Convention
+    }
+
+    /// Record a tier classification result
+    pub fn record_classification(&mut self, item_type: &str, name: &str, tier: ContentTier, content: &str) {
+        match tier {
+            ContentTier::Tier1Generic => {
+                self.tier_classification.add_rejected(RejectedItem {
+                    item_type: item_type.to_string(),
+                    name: name.to_string(),
+                    reason: "Generic content".to_string(),
+                });
+            }
+            ContentTier::Tier2Convention => {
+                self.tier_classification.add_convention(Convention {
+                    name: name.to_string(),
+                    description: content.chars().take(200).collect(),
+                    examples: Vec::new(),
+                });
+            }
+            ContentTier::Tier3Constraint => {
+                self.tier_classification.add_constraint(Constraint {
+                    name: name.to_string(),
+                    description: content.chars().take(200).collect(),
+                    evidence: Vec::new(),
+                    gotcha: None,
+                });
+            }
+        }
+    }
+
+    /// Get tier classification summary
+    pub fn tier_classification(&self) -> &TierTracker {
+        &self.tier_classification
+    }
+
+    /// Get tier3 constraint count
+    pub fn tier3_count(&self) -> usize {
+        self.tier_classification.tier3_count()
+    }
+
+    // ── Compaction Priority ────────────────────────────────────────────────
+
+    /// Get compaction priority for content
+    pub fn get_compaction_priority(&self, content: &str) -> CompactionPriority {
+        let tier = self.classify_content(content);
+
+        match tier {
+            ContentTier::Tier3Constraint => CompactionPriority::Critical,
+            ContentTier::Tier2Convention => CompactionPriority::High,
+            ContentTier::Tier1Generic => CompactionPriority::Low,
+        }
+    }
+
+    /// Check if content should be preserved during compaction
+    pub fn should_preserve(&self, content: &str) -> bool {
+        matches!(
+            self.get_compaction_priority(content),
+            CompactionPriority::Critical | CompactionPriority::High
+        )
+    }
+
+    // ── Generation Prompt ──────────────────────────────────────────────────
+
+    /// Generate a prompt context from analysis results
+    pub fn to_generation_prompt(&self) -> String {
+        let mut prompt = String::new();
+
+        if let Some(ref detection) = self.analysis_results.detection {
+            prompt.push_str(&format!(
+                "## Project Type\n{:?}\n\n",
+                detection.primary_type
+            ));
+        }
+
+        if let Some(ref conventions) = self.analysis_results.conventions {
+            prompt.push_str("## Conventions\n");
+            prompt.push_str(&format!("- File naming: {:?}\n", conventions.naming.file_naming));
+            prompt.push_str(&format!("- Type naming: {:?}\n", conventions.naming.type_naming));
+            prompt.push_str(&format!("- Function naming: {:?}\n", conventions.naming.function_naming));
+            for pattern in &conventions.patterns {
+                prompt.push_str(&format!("- Pattern: {} - {}\n", pattern.name, pattern.description));
+            }
+            prompt.push('\n');
+        }
+
+        if !self.tier_classification.tier3_constraints.is_empty() {
+            prompt.push_str("## Critical Constraints (Tier3)\n");
+            for constraint in &self.tier_classification.tier3_constraints {
+                prompt.push_str(&format!(
+                    "- **{}**: {}\n",
+                    constraint.name, constraint.description
+                ));
+            }
+            prompt.push('\n');
+        }
+
+        prompt
+    }
+
+    // ── Merge ──────────────────────────────────────────────────────────────
+
+    /// Merge another context's classifications into this one
+    pub fn merge_from(&mut self, other: &ClaudegenContext) {
+        self.tier_classification.tier1_rejected.extend(other.tier_classification.tier1_rejected.clone());
+        self.tier_classification.tier2_conventions.extend(other.tier_classification.tier2_conventions.clone());
+        self.tier_classification.tier3_constraints.extend(other.tier_classification.tier3_constraints.clone());
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ProjectContext - Legacy structure retained for compatibility
+// ════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
 pub struct ProjectContext {
