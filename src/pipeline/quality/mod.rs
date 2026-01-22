@@ -1,12 +1,12 @@
-mod convergence;
 mod judge;
+mod judge_convergence;
 mod llm_judge_agent;
 mod thinking;
 
-pub use convergence::{ConvergenceChecker, ConvergenceReason, ConvergenceResult};
 pub use judge::{
     Artifacts, IssueSeverity, JudgeConfig, JudgmentResult, LlmJudge, QualityIssue, Suggestion,
 };
+pub use judge_convergence::{ConvergenceChecker, ConvergenceReason, ConvergenceResult};
 pub use thinking::{Criterion, Issue, ThinkingFramework};
 
 pub use llm_judge_agent::{
@@ -21,7 +21,6 @@ mod tests {
 
     #[test]
     fn test_quality_exports() {
-        // Verify that key types are accessible
         let _checker = ConvergenceChecker::new(0.85, 0.5);
     }
 }

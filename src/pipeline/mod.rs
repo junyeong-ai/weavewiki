@@ -13,7 +13,7 @@ pub mod adaptive;
 pub mod analysis;
 pub mod checkpoint;
 pub mod context;
-pub mod convergence;
+pub mod quality_assessment;
 pub mod cross;
 pub mod deep_review;
 pub mod enrichment;
@@ -45,8 +45,10 @@ pub use enrichment::{
 };
 pub use checkpoint::{CheckpointManager, CrashRecovery, ExecutionCheckpoint, PipelinePhase, RecoveryResult};
 pub use context::{ProjectContext, VerifiedFileRegistry};
-pub use convergence::{
-    ConvergencePath, ConvergenceReport, TerminationDecision, TerminationReason, ContinueReason,
+pub use quality_assessment::{
+    AssessmentPath, QualityAssessment, QualityAssessor, TerminationDecision, TerminationReason, ContinueReason,
+    // Backward compatibility aliases
+    ConvergencePath, ConvergenceReport, ConvergenceChecker as QualityConvergenceChecker,
 };
 pub use deep_review::{DeepReviewEngine, DeepReviewResult, ReviewArtifacts, TwoPassResult};
 pub use feedback::{AggregatedFeedback, FeedbackAggregator};
