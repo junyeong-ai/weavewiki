@@ -23,7 +23,9 @@
 ```
 project/
 ├── CLAUDE.md                          # Project memory (rules, guidelines)
-└── .claudegen/                        # Plugin directory
+├── .claudegen/                        # Internal data (graph, cache, config)
+│   └── config.toml
+└── {project-name}-plugin/             # Plugin directory
     ├── .claude-plugin/
     │   └── plugin.json                # Plugin manifest
     ├── skills/
@@ -100,11 +102,9 @@ cargo build --release
 ---
 name: skill-name
 description: "This skill should be used when..."
-version: "1.0.0"
-allowed-tools: "Read, Grep, Glob"
-model: opus
+allowed-tools: Read, Grep, Glob
+model: sonnet
 context: fork
-agent: agent-name
 user-invocable: true
 ---
 
@@ -117,17 +117,20 @@ Skill prompt body...
 
 `.claudegen/config.toml`:
 ```toml
+version = "2.0"
+preset = "standard"  # quick | standard | thorough | exhaustive
+
 [project]
 name = "my-project"
+type = "auto"
 
-[plugin]
-name = ".claudegen"
-version = "1.0.0"
+[analysis]
+include = ["**/*"]
+exclude = ["node_modules/**", "dist/**", ".git/**", "target/**"]
 
-[generation]
-include_skills = true
-include_agents = true
-include_hooks = true
+[llm]
+provider = "claude-agent"
+model = "claude-sonnet-4-5-20250929"
 ```
 
 ---
@@ -136,8 +139,8 @@ include_hooks = true
 
 ```
 1. Built-in defaults
-2. Global config (~/.claudegen/config.yaml)
-3. Project config (.claudegen/config.yaml)
+2. Global config (~/.config/claudegen/config.toml)
+3. Project config (.claudegen/config.toml)
 4. Environment variables (CLAUDEGEN_*)
 5. CLI arguments (highest priority)
 ```

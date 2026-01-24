@@ -14,18 +14,13 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// Authentication mode affects available features
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AuthMode {
     /// API key authentication - supports all features including beta
     ApiKey,
     /// OAuth authentication (Claude Code CLI) - limited beta features
+    #[default]
     OAuth,
-}
-
-impl Default for AuthMode {
-    fn default() -> Self {
-        Self::OAuth
-    }
 }
 
 /// Model family for grouping similar models
@@ -70,7 +65,11 @@ impl ModelCapabilities {
     /// Get effective context window based on auth mode and extended flag
     pub fn effective_context_window(&self, auth_mode: AuthMode, use_extended: bool) -> u64 {
         if use_extended {
-            match (self.extended_context_window, self.extended_requires_api_key, auth_mode) {
+            match (
+                self.extended_context_window,
+                self.extended_requires_api_key,
+                auth_mode,
+            ) {
                 // Extended available and no API key requirement
                 (Some(extended), false, _) => extended,
                 // Extended available and API key is used
@@ -87,11 +86,14 @@ impl ModelCapabilities {
 
     /// Check if extended context is available for given auth mode
     pub fn extended_available(&self, auth_mode: AuthMode) -> bool {
-        match (self.extended_context_window, self.extended_requires_api_key, auth_mode) {
-            (Some(_), false, _) => true,
-            (Some(_), true, AuthMode::ApiKey) => true,
-            _ => false,
-        }
+        matches!(
+            (
+                self.extended_context_window,
+                self.extended_requires_api_key,
+                auth_mode
+            ),
+            (Some(_), false, _) | (Some(_), true, AuthMode::ApiKey)
+        )
     }
 }
 

@@ -29,10 +29,7 @@ impl ResponseValidationResult {
     }
 
     pub fn error_count(&self) -> usize {
-        self.issues
-            .iter()
-            .filter(|i| i.severity.is_error())
-            .count()
+        self.issues.iter().filter(|i| i.severity.is_error()).count()
     }
 
     pub fn warning_count(&self) -> usize {
@@ -71,24 +68,36 @@ impl ResponseValidator {
         let mut result = ResponseValidationResult::new();
 
         if !response.is_object() {
-            result.add(ValidationIssue::error("RESP001", "Response must be a JSON object"));
+            result.add(ValidationIssue::error(
+                "RESP001",
+                "Response must be a JSON object",
+            ));
             return result;
         }
 
         let files = match response.get("files") {
             Some(Value::Array(arr)) => arr,
             Some(_) => {
-                result.add(ValidationIssue::error("RESP002", "'files' must be an array"));
+                result.add(ValidationIssue::error(
+                    "RESP002",
+                    "'files' must be an array",
+                ));
                 return result;
             }
             None => {
-                result.add(ValidationIssue::error("RESP003", "Missing required 'files' field"));
+                result.add(ValidationIssue::error(
+                    "RESP003",
+                    "Missing required 'files' field",
+                ));
                 return result;
             }
         };
 
         if files.is_empty() {
-            result.add(ValidationIssue::warning("RESP004", "'files' array is empty"));
+            result.add(ValidationIssue::warning(
+                "RESP004",
+                "'files' array is empty",
+            ));
             return result;
         }
 
@@ -165,8 +174,11 @@ impl ResponseValidator {
             && !(0.0..=1.0).contains(&c)
         {
             result.add(
-                ValidationIssue::warning("FILE005", format!("Confidence {c} out of range [0.0, 1.0]"))
-                    .with_location(format!("files[{idx}].confidence")),
+                ValidationIssue::warning(
+                    "FILE005",
+                    format!("Confidence {c} out of range [0.0, 1.0]"),
+                )
+                .with_location(format!("files[{idx}].confidence")),
             );
         }
 
@@ -244,7 +256,8 @@ impl ResponseValidator {
 
         if section.get("content").is_none() {
             result.add(
-                ValidationIssue::warning("SEC002", "Missing content field").with_location(&location),
+                ValidationIssue::warning("SEC002", "Missing content field")
+                    .with_location(&location),
             );
         }
 
@@ -367,7 +380,10 @@ impl ResponseValidator {
         let files = match response.get("files").and_then(|v| v.as_array()) {
             Some(f) => f,
             None => {
-                result.add(ValidationIssue::error("COV001", "No files array in response"));
+                result.add(ValidationIssue::error(
+                    "COV001",
+                    "No files array in response",
+                ));
                 return result;
             }
         };
@@ -500,9 +516,11 @@ mod tests {
         ];
 
         let result = validator.validate_coverage(&response, &expected);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.message.contains("Missing analysis for") && i.message.contains("c.rs")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("Missing analysis for") && i.message.contains("c.rs"))
+        );
     }
 }

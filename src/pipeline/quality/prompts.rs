@@ -21,9 +21,6 @@ pub struct QualityPrompts {
     max_steps: usize,
 }
 
-/// Backward compatibility alias
-pub type ThinkingFramework = QualityPrompts;
-
 impl Default for QualityPrompts {
     fn default() -> Self {
         Self { max_steps: 10 }
@@ -45,7 +42,11 @@ impl QualityPrompts {
     }
 
     pub fn analysis_prompt(&self, context: &str, focus: &[String]) -> String {
-        let focus_list = focus.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n");
+        let focus_list = focus
+            .iter()
+            .map(|f| format!("- {}", f))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         format!(
             r#"You are in ANALYSIS mode. Follow this structured thinking framework:
@@ -133,7 +134,12 @@ Output JSON:
     pub fn verification_prompt(&self, context: &str, criteria: &[Criterion]) -> String {
         let criteria_list = criteria
             .iter()
-            .map(|c| format!("- **{}** (weight: {:.1}): {}", c.name, c.weight, c.description))
+            .map(|c| {
+                format!(
+                    "- **{}** (weight: {:.1}): {}",
+                    c.name, c.weight, c.description
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 

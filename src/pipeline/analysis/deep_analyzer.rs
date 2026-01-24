@@ -7,17 +7,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::ai::LlmProvider;
-use crate::config::{AnalysisConfig, ProjectType};
+use crate::config::{AnalysisConfig, DeepAnalysisConfig, ProjectType};
 use crate::pipeline::phases::ProjectDetection;
-use crate::types::Result;
+use crate::types::{Result, Severity};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeepAnalysisResult {
-    pub structure: StructureAnalysis,
+    pub structure: SemanticStructure,
     pub patterns: Vec<PatternInstance>,
     pub constraints: Vec<DiscoveredConstraint>,
     pub dependencies: Vec<ModuleDependency>,
@@ -56,15 +57,20 @@ impl DeepAnalysisResult {
         score += (self.patterns.len() as f32 * 0.1).min(0.3);
 
         // Constraints are high-value (especially hidden dependencies)
-        let high_value_constraints = self.constraints.iter()
-            .filter(|c| matches!(c.kind, ConstraintKind::HiddenDependency | ConstraintKind::AntiPattern))
+        let high_value_constraints = self
+            .constraints
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    ConstraintKind::HiddenDependency | ConstraintKind::AntiPattern
+                )
+            })
             .count();
         score += (high_value_constraints as f32 * 0.15).min(0.3);
 
         // Insights with gotchas are valuable
-        let gotcha_count: usize = self.insights.iter()
-            .map(|i| i.gotchas.len())
-            .sum();
+        let gotcha_count: usize = self.insights.iter().map(|i| i.gotchas.len()).sum();
         score += (gotcha_count as f32 * 0.1).min(0.2);
 
         // Analysis quality contributes
@@ -81,7 +87,7 @@ impl DeepAnalysisResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StructureAnalysis {
+pub struct SemanticStructure {
     pub entry_points: Vec<EntryPoint>,
     pub core_modules: Vec<CoreModule>,
     pub layer_boundaries: Vec<LayerBoundary>,
@@ -157,7 +163,7 @@ pub struct DiscoveredConstraint {
     pub description: String,
     pub rationale: String,
     pub evidence: Vec<ConstraintEvidence>,
-    pub severity: ConstraintSeverity,
+    pub severity: Severity,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,15 +181,6 @@ pub struct ConstraintEvidence {
     pub file: String,
     pub line: Option<u32>,
     pub context: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConstraintSeverity {
-    Critical,
-    High,
-    Medium,
-    Low,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,27 +233,102 @@ pub enum AbstractionKind {
     Type,
 }
 
+// File-level deep analysis types (consolidated from deep/ subdirectory)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDeepAnalysis {
+    pub file_path: String,
+    pub gotchas: Vec<Gotcha>,
+    pub constraints: Vec<FileConstraint>,
+    pub patterns: Vec<CodePattern>,
+    pub relationships: Vec<Relationship>,
+    pub summary: String,
+    pub analyzed_at: DateTime<Utc>,
+}
+
+impl FileDeepAnalysis {
+    pub fn high_severity_gotchas(&self) -> Vec<&Gotcha> {
+        self.gotchas
+            .iter()
+            .filter(|g| matches!(g.severity, Severity::High | Severity::Critical))
+            .collect()
+    }
+
+    pub fn has_critical_constraints(&self) -> bool {
+        self.constraints.iter().any(|c| {
+            c.description.to_lowercase().contains("must")
+                || c.description.to_lowercase().contains("required")
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gotcha {
+    pub description: String,
+    #[serde(default)]
+    pub lines: Vec<usize>,
+    pub severity: Severity,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileConstraint {
+    pub description: String,
+    #[serde(default)]
+    pub lines: Vec<usize>,
+    #[serde(default)]
+    pub enforcement: Option<ConstraintEnforcement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintEnforcement {
+    CompileTime,
+    Runtime,
+    Convention,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodePattern {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub example_lines: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relationship {
+    pub target: String,
+    pub relationship_type: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 pub struct DeepAnalyzer {
     project_root: PathBuf,
     provider: Arc<dyn LlmProvider>,
-    config: AnalysisConfig,
+    analysis_config: AnalysisConfig,
+    deep_config: DeepAnalysisConfig,
 }
 
 impl DeepAnalyzer {
     pub fn new(
         project_root: impl AsRef<Path>,
         provider: Arc<dyn LlmProvider>,
-        config: AnalysisConfig,
+        analysis_config: AnalysisConfig,
+        deep_config: DeepAnalysisConfig,
     ) -> Self {
         Self {
             project_root: project_root.as_ref().to_path_buf(),
             provider,
-            config,
+            analysis_config,
+            deep_config,
         }
     }
 
     pub async fn analyze(&self, detection: &ProjectDetection) -> Result<DeepAnalysisResult> {
-        if !self.config.deep_analysis.enabled {
+        if !self.deep_config.enabled {
             return Ok(DeepAnalysisResult::default());
         }
 
@@ -318,21 +390,41 @@ impl DeepAnalyzer {
         let lines_analyzed: usize = file_map.values().map(|f| f.lines).sum();
 
         // Estimate total source files for coverage calculation
-        let estimated_total = detection.languages.iter()
+        let estimated_total = detection
+            .languages
+            .iter()
             .map(|l| l.file_count)
             .sum::<usize>()
             .max(1);
         let coverage_ratio = (files_analyzed as f32 / estimated_total as f32).min(1.0);
 
-        // Count distinct evidence references
-        let pattern_refs: usize = patterns.iter().map(|p| p.locations.len()).sum();
-        let constraint_refs: usize = constraints.iter().map(|c| c.evidence.len()).sum();
-        let evidence_count = pattern_refs + constraint_refs;
+        // Count and validate distinct evidence references
+        let mut validated_refs = 0;
+        let mut filtered_hallucinations = 0;
 
-        // Validated vs filtered references are tracked during parsing
-        // For now, assume all refs were validated (since parse_* methods already filter)
-        let validated_refs = evidence_count;
-        let filtered_hallucinations = 0;
+        // Validate pattern location references
+        for pattern in patterns {
+            for location in &pattern.locations {
+                if file_map.contains_key(&location.file) || self.file_exists_sync(&location.file) {
+                    validated_refs += 1;
+                } else {
+                    filtered_hallucinations += 1;
+                }
+            }
+        }
+
+        // Validate constraint evidence references
+        for constraint in constraints {
+            for ev in &constraint.evidence {
+                if file_map.contains_key(&ev.file) || self.file_exists_sync(&ev.file) {
+                    validated_refs += 1;
+                } else {
+                    filtered_hallucinations += 1;
+                }
+            }
+        }
+
+        let evidence_count = validated_refs + filtered_hallucinations;
 
         // Calculate confidence score based on multiple factors
         let mut confidence = 0.0f32;
@@ -355,10 +447,17 @@ impl DeepAnalyzer {
         confidence += gotcha_ratio * 0.2;
 
         // Constraint quality (having multiple kinds is better)
-        let constraint_kinds: std::collections::HashSet<_> = constraints.iter()
+        let constraint_kinds: std::collections::HashSet<_> = constraints
+            .iter()
             .map(|c| std::mem::discriminant(&c.kind))
             .collect();
         confidence += (constraint_kinds.len() as f32 * 0.05).min(0.2);
+
+        // Penalize high hallucination ratio
+        if evidence_count > 0 {
+            let hallucination_ratio = filtered_hallucinations as f32 / evidence_count as f32;
+            confidence *= 1.0 - (hallucination_ratio * 0.5);
+        }
 
         AnalysisQuality {
             files_analyzed,
@@ -376,8 +475,8 @@ impl DeepAnalyzer {
         detection: &ProjectDetection,
     ) -> Result<HashMap<String, FileContent>> {
         let mut files = HashMap::new();
-        let max_files = self.config.max_file_samples;
-        let max_chars = self.config.deep_analysis.max_code_context_chars;
+        let max_files = self.analysis_config.max_file_samples;
+        let max_chars = self.deep_config.max_code_context_chars;
 
         let priority_patterns = self.get_priority_patterns(detection.primary_type);
 
@@ -390,8 +489,14 @@ impl DeepAnalyzer {
         }
 
         if files.len() < max_files {
-            self.collect_source_files(&self.project_root, detection, &mut files, max_files, max_chars)
-                .await?;
+            self.collect_source_files(
+                &self.project_root,
+                detection,
+                &mut files,
+                max_files,
+                max_chars,
+            )
+            .await?;
         }
 
         Ok(files)
@@ -443,26 +548,28 @@ impl DeepAnalyzer {
         max_chars: usize,
     ) -> Result<()> {
         let path = dir.join(pattern);
-        if path.exists() && path.is_file()
-            && let Ok(content) = fs::read_to_string(&path).await {
-                let lines = content.lines().count();
-                let truncated = if content.len() > max_chars {
-                    content[..max_chars].to_string()
-                } else {
-                    content
-                };
-                let relative = path
-                    .strip_prefix(&self.project_root)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| pattern.to_string());
-                files.insert(
-                    relative,
-                    FileContent {
-                        content: truncated,
-                        lines,
-                    },
-                );
-            }
+        if path.exists()
+            && path.is_file()
+            && let Ok(content) = fs::read_to_string(&path).await
+        {
+            let lines = content.lines().count();
+            let truncated = if content.len() > max_chars {
+                content[..max_chars].to_string()
+            } else {
+                content
+            };
+            let relative = path
+                .strip_prefix(&self.project_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| pattern.to_string());
+            files.insert(
+                relative,
+                FileContent {
+                    content: truncated,
+                    lines,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -540,30 +647,36 @@ impl DeepAnalyzer {
 
                 if path.is_dir() {
                     Box::pin(self.collect_files_recursive(
-                        &path, extensions, files, max_files, max_chars, depth + 1,
+                        &path,
+                        extensions,
+                        files,
+                        max_files,
+                        max_chars,
+                        depth + 1,
                     ))
                     .await?;
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
                     && extensions.contains(&ext)
-                        && let Ok(content) = fs::read_to_string(&path).await
-                            && content.len() <= self.config.max_file_size {
-                                let truncated = if content.len() > max_chars {
-                                    content[..max_chars].to_string()
-                                } else {
-                                    content.clone()
-                                };
-                                let relative = path
-                                    .strip_prefix(&self.project_root)
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                files.insert(
-                                    relative,
-                                    FileContent {
-                                        content: truncated,
-                                        lines: content.lines().count(),
-                                    },
-                                );
-                            }
+                    && let Ok(content) = fs::read_to_string(&path).await
+                    && content.len() <= self.analysis_config.max_file_size
+                {
+                    let truncated = if content.len() > max_chars {
+                        content[..max_chars].to_string()
+                    } else {
+                        content.clone()
+                    };
+                    let relative = path
+                        .strip_prefix(&self.project_root)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    files.insert(
+                        relative,
+                        FileContent {
+                            content: truncated,
+                            lines: content.lines().count(),
+                        },
+                    );
+                }
             }
         }
 
@@ -574,7 +687,7 @@ impl DeepAnalyzer {
         &self,
         detection: &ProjectDetection,
         files: &HashMap<String, FileContent>,
-    ) -> Result<StructureAnalysis> {
+    ) -> Result<SemanticStructure> {
         let file_list: Vec<&str> = files.keys().map(|s| s.as_str()).collect();
         let sample_contents = self.build_sample_context(files, 5);
 
@@ -653,13 +766,13 @@ Be specific to THIS project's actual structure."#,
             Ok(response) => self.parse_structure_response(&response.content),
             Err(e) => {
                 tracing::warn!(error = %e, "Structure analysis failed, using fallback");
-                Ok(StructureAnalysis::default())
+                Ok(SemanticStructure::default())
             }
         }
     }
 
-    fn parse_structure_response(&self, content: &serde_json::Value) -> Result<StructureAnalysis> {
-        let mut structure = StructureAnalysis::default();
+    fn parse_structure_response(&self, content: &serde_json::Value) -> Result<SemanticStructure> {
+        let mut structure = SemanticStructure::default();
 
         if let Some(entries) = content.get("entry_points").and_then(|v| v.as_array()) {
             for e in entries {
@@ -671,9 +784,17 @@ Be specific to THIS project's actual structure."#,
                     _ => EntryPointKind::Main,
                 };
                 structure.entry_points.push(EntryPoint {
-                    path: e.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    path: e
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     kind,
-                    description: e.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    description: e
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                 });
             }
         }
@@ -681,16 +802,38 @@ Be specific to THIS project's actual structure."#,
         if let Some(modules) = content.get("core_modules").and_then(|v| v.as_array()) {
             for m in modules {
                 structure.core_modules.push(CoreModule {
-                    path: m.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    name: m.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    responsibility: m.get("responsibility").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    public_items: m.get("public_items")
+                    path: m
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    responsibility: m
+                        .get("responsibility")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    public_items: m
+                        .get("public_items")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                    internal_deps: m.get("internal_deps")
+                    internal_deps: m
+                        .get("internal_deps")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 });
             }
@@ -699,10 +842,22 @@ Be specific to THIS project's actual structure."#,
         if let Some(boundaries) = content.get("layer_boundaries").and_then(|v| v.as_array()) {
             for b in boundaries {
                 structure.layer_boundaries.push(LayerBoundary {
-                    from_layer: b.get("from_layer").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    to_layer: b.get("to_layer").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    from_layer: b
+                        .get("from_layer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    to_layer: b
+                        .get("to_layer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     allowed: b.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true),
-                    evidence: b.get("evidence").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    evidence: b
+                        .get("evidence")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                 });
             }
         }
@@ -823,8 +978,13 @@ ONLY include patterns you can see evidence for in the code."#,
                                 }
                                 Some(PatternLocation {
                                     file: file.to_string(),
-                                    line: loc.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                    snippet: loc.get("snippet").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                                    line: loc.get("line").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as u32,
+                                    snippet: loc
+                                        .get("snippet")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
                                 })
                             })
                             .collect()
@@ -838,9 +998,17 @@ ONLY include patterns you can see evidence for in the code."#,
                 patterns.push(PatternInstance {
                     name: name.to_string(),
                     category,
-                    description: p.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    description: p
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     locations,
-                    usage_guidance: p.get("usage_guidance").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    usage_guidance: p
+                        .get("usage_guidance")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                 });
             }
         }
@@ -955,11 +1123,15 @@ ONLY include constraints with evidence from the actual code."#,
                     _ => ConstraintKind::AntiPattern,
                 };
 
-                let severity = match c.get("severity").and_then(|v| v.as_str()).unwrap_or("medium") {
-                    "critical" => ConstraintSeverity::Critical,
-                    "high" => ConstraintSeverity::High,
-                    "low" => ConstraintSeverity::Low,
-                    _ => ConstraintSeverity::Medium,
+                let severity = match c
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("medium")
+                {
+                    "critical" => Severity::Critical,
+                    "high" => Severity::High,
+                    "low" => Severity::Low,
+                    _ => Severity::Medium,
                 };
 
                 let evidence: Vec<ConstraintEvidence> = c
@@ -975,7 +1147,11 @@ ONLY include constraints with evidence from the actual code."#,
                                 Some(ConstraintEvidence {
                                     file: file.to_string(),
                                     line: e.get("line").and_then(|v| v.as_u64()).map(|n| n as u32),
-                                    context: e.get("context").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                                    context: e
+                                        .get("context")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
                                 })
                             })
                             .collect()
@@ -985,8 +1161,16 @@ ONLY include constraints with evidence from the actual code."#,
                 constraints.push(DiscoveredConstraint {
                     kind,
                     title: title.to_string(),
-                    description: c.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    rationale: c.get("rationale").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    description: c
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    rationale: c
+                        .get("rationale")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     evidence,
                     severity,
                 });
@@ -1085,7 +1269,9 @@ ONLY include constraints with evidence from the actual code."#,
             .collect();
 
         for (path, content) in key_files {
-            let insight = self.analyze_single_file(detection, path, &content.content).await?;
+            let insight = self
+                .analyze_single_file(detection, path, &content.content)
+                .await?;
             if !insight.purpose.is_empty() {
                 insights.push(insight);
             }
@@ -1143,18 +1329,37 @@ Be specific and concise. Only include notable findings."#,
                 let c = &response.content;
                 Ok(FileInsight {
                     file: path.to_string(),
-                    purpose: c.get("purpose").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    key_exports: c.get("key_exports")
+                    purpose: c
+                        .get("purpose")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    key_exports: c
+                        .get("key_exports")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                    notable_patterns: c.get("notable_patterns")
+                    notable_patterns: c
+                        .get("notable_patterns")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                    gotchas: c.get("gotchas")
+                    gotchas: c
+                        .get("gotchas")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 })
             }
@@ -1261,10 +1466,19 @@ Focus on abstractions that define the project's architecture."#,
                     kind,
                     file: file.to_string(),
                     line: a.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    description: a.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    usage_notes: a.get("usage_notes")
+                    description: a
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    usage_notes: a
+                        .get("usage_notes")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 });
             }
@@ -1273,9 +1487,13 @@ Focus on abstractions that define the project's architecture."#,
         Ok(abstractions)
     }
 
-    fn build_sample_context(&self, files: &HashMap<String, FileContent>, max_files: usize) -> String {
+    fn build_sample_context(
+        &self,
+        files: &HashMap<String, FileContent>,
+        max_files: usize,
+    ) -> String {
         let mut samples = String::new();
-        let mut char_budget = self.config.deep_analysis.max_code_context_chars;
+        let mut char_budget = self.deep_config.max_code_context_chars;
 
         for (path, content) in files.iter().take(max_files) {
             if char_budget == 0 {
@@ -1307,10 +1525,16 @@ struct FileContent {
 pub async fn analyze(
     project_root: impl AsRef<Path>,
     provider: Arc<dyn LlmProvider>,
-    config: &AnalysisConfig,
+    analysis_config: &AnalysisConfig,
+    deep_config: &DeepAnalysisConfig,
     detection: &ProjectDetection,
 ) -> Result<DeepAnalysisResult> {
-    let analyzer = DeepAnalyzer::new(project_root, provider, config.clone());
+    let analyzer = DeepAnalyzer::new(
+        project_root,
+        provider,
+        analysis_config.clone(),
+        deep_config.clone(),
+    );
     analyzer.analyze(detection).await
 }
 
@@ -1323,12 +1547,19 @@ mod tests {
         let analyzer = DeepAnalyzer {
             project_root: PathBuf::from("/test"),
             provider: Arc::new(MockProvider),
-            config: AnalysisConfig::default(),
+            analysis_config: AnalysisConfig::default(),
+            deep_config: DeepAnalysisConfig::default(),
         };
 
-        assert_eq!(analyzer.extract_module_name("src/pipeline/mod.rs"), "pipeline");
+        assert_eq!(
+            analyzer.extract_module_name("src/pipeline/mod.rs"),
+            "pipeline"
+        );
         assert_eq!(analyzer.extract_module_name("src/types.rs"), "types");
-        assert_eq!(analyzer.extract_module_name("src/ai/provider/index.ts"), "provider");
+        assert_eq!(
+            analyzer.extract_module_name("src/ai/provider/index.ts"),
+            "provider"
+        );
     }
 
     #[test]
@@ -1336,7 +1567,8 @@ mod tests {
         let analyzer = DeepAnalyzer {
             project_root: PathBuf::from("/test"),
             provider: Arc::new(MockProvider),
-            config: AnalysisConfig::default(),
+            analysis_config: AnalysisConfig::default(),
+            deep_config: DeepAnalysisConfig::default(),
         };
 
         assert_eq!(

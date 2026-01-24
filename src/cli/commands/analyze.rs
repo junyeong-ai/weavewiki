@@ -8,21 +8,33 @@ use crate::analyzer::parser::{
     BashParser, GoParser, Language, ParseResult, Parser, PythonParser, RustParser, TypeScriptParser,
 };
 use crate::analyzer::scanner::FileScanner;
-use crate::config::{Config, ConfigLoader};
+use crate::cli::util::{CLAUDEGEN_DIR, GRAPH_DB_PATH, create_graph_db};
+use crate::config::ConfigLoader;
 use crate::constants::cli as cli_constants;
 use crate::storage::{Database, GraphStore};
 use crate::types::Result;
 
-pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
+pub fn run(
+    full: bool,
+    path: Option<PathBuf>,
+    skip_docs: bool,
+    config_path: Option<&Path>,
+) -> Result<()> {
     let root = path.unwrap_or_else(|| PathBuf::from("."));
-    let claudegen_dir = root.join(".claudegen");
+    let claudegen_dir = root.join(CLAUDEGEN_DIR);
 
     if !claudegen_dir.exists() {
         std::fs::create_dir_all(&claudegen_dir)?;
     }
 
-    let config = load_config()?;
-    let db = Database::open(claudegen_dir.join("claudegen.db"))?;
+    // Load config from target project, not CWD
+    let config = ConfigLoader::load_for_project(&root, config_path)?;
+    let db_path = claudegen_dir.join(GRAPH_DB_PATH);
+    let db = if db_path.exists() {
+        Database::open(&db_path)?
+    } else {
+        create_graph_db(&claudegen_dir)?
+    };
     let graph_store = GraphStore::new(&db);
 
     println!("Starting analysis...");
@@ -32,9 +44,7 @@ pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
         println!("  Cleared existing graph data");
     }
 
-    let scanner = FileScanner::new(&root)
-        .with_exclude(config.analysis.exclude.clone())
-        .with_max_file_size(config.analysis.max_file_size as u64);
+    let scanner = FileScanner::new(&root, &config.analysis);
     let files = scanner.scan()?;
     println!("Found {} files to analyze", files.len());
 
@@ -137,10 +147,6 @@ pub fn run(full: bool, path: Option<PathBuf>, skip_docs: bool) -> Result<()> {
     println!("Analysis complete!");
 
     Ok(())
-}
-
-fn load_config() -> Result<Config> {
-    ConfigLoader::load()
 }
 
 fn parse_file(path: &Path, lang: Language) -> Result<Option<ParseResult>> {

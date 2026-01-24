@@ -30,8 +30,8 @@ pub struct GenerateOptions {
     pub output: Option<PathBuf>,
     pub resume: bool,
     pub dry_run: bool,
+    pub config_path: Option<PathBuf>,
 }
-
 
 pub fn run(options: GenerateOptions) -> Result<()> {
     let rt = Runtime::new()?;
@@ -44,7 +44,8 @@ async fn run_async(options: GenerateOptions) -> Result<()> {
     println!("claudegen - Claude Code Plugin Generator\n");
     println!("Using Quality Loop with Adaptive Pipeline");
 
-    let config = ConfigLoader::load()?;
+    // Load config from project root for consistency
+    let config = ConfigLoader::load_for_project(&project_root, options.config_path.as_deref())?;
 
     if options.dry_run {
         println!("\nDry run mode - configuration:\n");
@@ -69,7 +70,15 @@ async fn run_async(options: GenerateOptions) -> Result<()> {
 
     let provider = create_provider(&config).await?;
 
-    let quality_loop = QualityLoop::new(project_root.clone(), provider, config);
+    let mut quality_loop = QualityLoop::new(project_root.clone(), provider, config);
+
+    if let Some(output_dir) = options.output {
+        quality_loop = quality_loop.with_output_dir(output_dir);
+    }
+
+    if options.resume {
+        quality_loop = quality_loop.with_resume(true);
+    }
 
     println!("\nStarting Quality Loop Pipeline...\n");
     println!("  Outer Loop: Quality verification with analysis re-run on gaps");
@@ -103,19 +112,32 @@ fn print_quality_loop_result(result: &QualityLoopResult) {
     println!("\n🔄 Quality Loop Summary:");
     println!("  - Outer iterations: {}", result.outer_iterations);
     println!("  - Analysis re-runs: {}", result.analysis_rerun_count);
-    println!("  - Final confidence: {:.1}%", result.final_confidence * 100.0);
+    println!(
+        "  - Final confidence: {:.1}%",
+        result.final_confidence * 100.0
+    );
 
     if !result.gaps_discovered.is_empty() {
         println!("  - Gaps discovered: {}", result.gaps_discovered.len());
         for gap in result.gaps_discovered.iter().take(3) {
-            println!("    • [{}] {} (iteration {})", gap.area, gap.description, gap.iteration_found);
+            println!(
+                "    • [{}] {} (iteration {})",
+                gap.area, gap.description, gap.iteration_found
+            );
         }
     }
 
     // Deep Review Results
     if result.deep_review_attempts > 0 {
-        let status = if result.deep_review_passed { "✓" } else { "✗" };
-        println!("\n🔍 Deep Review: {} ({} attempts)", status, result.deep_review_attempts);
+        let status = if result.deep_review_passed {
+            "✓"
+        } else {
+            "✗"
+        };
+        println!(
+            "\n🔍 Deep Review: {} ({} attempts)",
+            status, result.deep_review_attempts
+        );
         if !result.deep_review_passed {
             println!("  ⚠️  Two-pass verification did not pass");
         }
@@ -183,8 +205,8 @@ fn print_summary(output: &AdaptivePipelineOutput) {
 
     if !output.tier_filter_result.passed {
         println!(
-            "\n⚠️  Tier 1 content filtered: {} items removed",
-            output.tier_filter_result.tier1_violations.len()
+            "\n⚠️  Tier 1 content filtered: {} items",
+            output.tier_filter_result.tier1_count
         );
     }
 
@@ -210,26 +232,28 @@ fn print_summary(output: &AdaptivePipelineOutput) {
     println!("\n📊 Quality Score: {:.0}%", output.quality_score * 100.0);
 
     let cv = &output.cross_validation_result;
-    if cv.evidence_traceability.total_references > 0 {
+    let total_refs =
+        cv.evidence_traceability.valid_references + cv.evidence_traceability.invalid_references;
+    if total_refs > 0 {
         println!(
             "  - Evidence Traceability: {}/{} references valid ({:.0}%)",
             cv.evidence_traceability.valid_references,
-            cv.evidence_traceability.total_references,
+            total_refs,
             cv.evidence_traceability.coverage_score * 100.0
         );
     }
 
-    if !cv.plan_consistency.missing_items.is_empty() {
+    if !cv.plan_consistency.missing_coverage.is_empty() {
         println!(
             "  - Plan Consistency: {} items missing from plan",
-            cv.plan_consistency.missing_items.len()
+            cv.plan_consistency.missing_coverage.len()
         );
     }
 
-    if !cv.passed {
+    if cv.evidence_traceability.invalid_references > 0 {
         println!(
-            "\n⚠️  Cross-validation warnings: {} issues",
-            cv.issues.len()
+            "\n⚠️  Invalid file references: {}",
+            cv.evidence_traceability.invalid_references
         );
     }
 }

@@ -372,8 +372,11 @@ impl ProviderChain {
                             ErrorCategory::RateLimit => {
                                 // Use retry_after from error if available, otherwise use default
                                 let wait = classified.retry_after.unwrap_or_else(|| {
-                                    parse_rate_limit_delay(&classified.message)
-                                        .unwrap_or(Duration::from_secs(RetryConfig::default().rate_limit_fallback_secs))
+                                    parse_rate_limit_delay(&classified.message).unwrap_or(
+                                        Duration::from_secs(
+                                            RetryConfig::default().rate_limit_fallback_secs,
+                                        ),
+                                    )
                                 });
                                 info!(
                                     wait_secs = wait.as_secs(),

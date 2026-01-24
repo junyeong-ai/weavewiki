@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::InformationTier;
-use super::validation::Severity;
+use super::validation::DiagnosticLevel;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Claim {
@@ -104,7 +104,7 @@ impl ClaimEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationIssue {
     pub id: String,
-    pub severity: Severity,
+    pub severity: DiagnosticLevel,
     pub claim_id: String,
     pub message: String,
     pub suggestion: Option<String>,
@@ -114,7 +114,7 @@ pub struct VerificationIssue {
 impl VerificationIssue {
     pub fn new(
         claim_id: impl Into<String>,
-        severity: Severity,
+        severity: DiagnosticLevel,
         message: impl Into<String>,
     ) -> Self {
         Self {
@@ -165,10 +165,7 @@ impl VerificationReport {
     }
 
     pub fn error_count(&self) -> usize {
-        self.issues
-            .iter()
-            .filter(|i| i.severity.is_error())
-            .count()
+        self.issues.iter().filter(|i| i.severity.is_error()).count()
     }
 
     pub fn warning_count(&self) -> usize {

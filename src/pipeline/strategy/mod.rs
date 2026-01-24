@@ -1,17 +1,16 @@
 //! Refinement Strategy Module
 //!
 //! Provides pluggable strategies for iterative quality improvement.
-//! Strategies are selected based on issue type and historical success rates.
+//! Strategies operate on artifacts with full GenerationContext for
+//! context-aware refinement based on source insights.
 
 mod evidence;
 mod regeneration;
 mod semantic;
-mod verification;
 
-pub use evidence::EvidenceStrategy;
+pub use evidence::{EvidenceResult, EvidenceStrategy};
 pub use regeneration::RegenerationStrategy;
 pub use semantic::SemanticStrategy;
-pub use verification::{PostStrategyVerifier, VerificationMetrics, VerificationResult};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,10 +19,11 @@ use async_trait::async_trait;
 
 use crate::ai::LlmProvider;
 use crate::config::RefinementStrategyType;
-use crate::types::{Agent, Result, Rule, Skill};
+use crate::types::{Agent, DiagnosticLevel, Result, Rule, Skill};
 
 use super::context::VerifiedFileRegistry;
 
+/// Issue kinds that can trigger refinement
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IssueKind {
     LowActionability,
@@ -40,39 +40,161 @@ pub enum IssueKind {
     PartialModuleCoverage,
 }
 
-impl IssueKind {
-    pub fn from_refinement_issue(issue: &super::refinement::IssueKind) -> Self {
-        use super::refinement::IssueKind as RI;
+impl From<&super::refinement::DetectedIssue> for IssueKind {
+    fn from(issue: &super::refinement::DetectedIssue) -> Self {
+        use super::refinement::DetectedIssue as DI;
         match issue {
-            RI::LowActionability { .. } => Self::LowActionability,
-            RI::TooGeneric { .. } => Self::TooGeneric,
-            RI::WeakEvidence { .. } => Self::WeakEvidence,
-            RI::MissingReferences { .. } => Self::MissingReferences,
-            RI::Shallow { .. } => Self::Shallow,
-            RI::TooShort { .. } => Self::TooShort,
-            RI::MissingSections { .. } => Self::MissingSections,
-            RI::Redundant { .. } => Self::Redundant,
-            RI::Tier1Content { .. } => Self::Tier1Content,
-            RI::PlanMismatch => Self::PlanMismatch,
-            RI::MissingModule { .. } => Self::MissingModule,
-            RI::PartialModuleCoverage { .. } => Self::PartialModuleCoverage,
+            DI::LowActionability { .. } => Self::LowActionability,
+            DI::TooGeneric { .. } => Self::TooGeneric,
+            DI::WeakEvidence { .. } => Self::WeakEvidence,
+            DI::MissingReferences { .. } => Self::MissingReferences,
+            DI::Shallow { .. } => Self::Shallow,
+            DI::TooShort { .. } => Self::TooShort,
+            DI::MissingSections { .. } => Self::MissingSections,
+            DI::Redundant { .. } => Self::Redundant,
+            DI::Tier1Content { .. } => Self::Tier1Content,
+            DI::PlanMismatch => Self::PlanMismatch,
+            DI::MissingModule { .. } => Self::MissingModule,
+            DI::PartialModuleCoverage { .. } => Self::PartialModuleCoverage,
         }
     }
 }
 
-#[derive(Debug)]
-pub enum ItemContent<'a> {
-    Skill(&'a mut Skill),
-    Agent(&'a mut Agent),
-    Rule(&'a mut Rule),
+/// A refinement issue detected in an artifact
+#[derive(Debug, Clone)]
+pub struct StrategyIssue {
+    pub kind: IssueKind,
+    pub severity: DiagnosticLevel,
+    pub message: String,
+    pub suggestion: Option<String>,
 }
 
+impl StrategyIssue {
+    pub fn new(kind: IssueKind, severity: DiagnosticLevel, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            severity,
+            message: message.into(),
+            suggestion: None,
+        }
+    }
+
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    pub fn error(kind: IssueKind, message: impl Into<String>) -> Self {
+        Self::new(kind, DiagnosticLevel::Error, message)
+    }
+
+    pub fn warning(kind: IssueKind, message: impl Into<String>) -> Self {
+        Self::new(kind, DiagnosticLevel::Warning, message)
+    }
+}
+
+/// Rich context for refinement strategies
+///
+/// Provides file registry and issue context for strategy-based refinement.
 #[derive(Debug, Clone)]
 pub struct StrategyContext<'a> {
+    /// Verified file registry for reference validation
     pub file_registry: &'a VerifiedFileRegistry,
-    pub issue_description: String,
+    /// Current refinement issues to address
+    pub issues: Vec<StrategyIssue>,
+    /// Pre-computed suggestions for improvement
     pub suggestions: Vec<String>,
+    /// Validation feedback from previous passes
     pub validation_feedback: Option<ValidationFeedback>,
+    /// Minimum quality improvement required for acceptance
+    pub quality_acceptance_delta: f32,
+}
+
+impl<'a> StrategyContext<'a> {
+    /// Create a new strategy context with minimal requirements
+    pub fn new(file_registry: &'a VerifiedFileRegistry) -> Self {
+        Self {
+            file_registry,
+            issues: Vec::new(),
+            suggestions: Vec::new(),
+            validation_feedback: None,
+            quality_acceptance_delta: 0.02,
+        }
+    }
+
+    /// Add refinement issues to address
+    pub fn with_issues(mut self, issues: Vec<StrategyIssue>) -> Self {
+        self.issues = issues;
+        self
+    }
+
+    /// Set pre-computed suggestions
+    pub fn with_suggestions(mut self, suggestions: Vec<String>) -> Self {
+        self.suggestions = suggestions;
+        self
+    }
+
+    /// Set validation feedback
+    pub fn with_validation_feedback(mut self, feedback: ValidationFeedback) -> Self {
+        self.validation_feedback = Some(feedback);
+        self
+    }
+
+    /// Set quality acceptance delta
+    pub fn with_acceptance_delta(mut self, delta: f32) -> Self {
+        self.quality_acceptance_delta = delta;
+        self
+    }
+
+    /// Format source insights for inclusion in prompts (reserved for future use)
+    pub fn format_source_insights(&self) -> String {
+        String::new()
+    }
+
+    /// Format current issues for prompt inclusion
+    pub fn format_issues(&self) -> String {
+        if self.issues.is_empty() {
+            return String::new();
+        }
+
+        self.issues
+            .iter()
+            .map(|i| {
+                if let Some(ref suggestion) = i.suggestion {
+                    format!("[{}] {}\n  Suggestion: {}", i.severity, i.message, suggestion)
+                } else {
+                    format!("[{}] {}", i.severity, i.message)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Format project context for prompts (reserved for future use)
+    pub fn format_project_context(&self) -> String {
+        String::new()
+    }
+
+    /// Generate suggestions section for prompts
+    pub fn suggestions_section(&self, default: &str) -> String {
+        if self.suggestions.is_empty() {
+            default.to_string()
+        } else {
+            self.suggestions
+                .iter()
+                .map(|s| format!("- {}", s))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+
+    /// Generate feedback section for prompts
+    pub fn feedback_section(&self) -> String {
+        self.validation_feedback
+            .as_ref()
+            .map(|f| f.to_prompt_section())
+            .unwrap_or_default()
+    }
 }
 
 /// Feedback from validation to guide targeted refinement
@@ -80,7 +202,50 @@ pub struct StrategyContext<'a> {
 pub struct ValidationFeedback {
     pub missing_modules: Vec<String>,
     pub weak_coverage_areas: Vec<String>,
-    pub module_constraints: std::collections::HashMap<String, Vec<String>>,
+    pub module_constraints: HashMap<String, Vec<String>>,
+}
+
+impl ValidationFeedback {
+    pub fn to_prompt_section(&self) -> String {
+        let mut parts = Vec::new();
+
+        if !self.missing_modules.is_empty() {
+            parts.push(format!(
+                "MISSING MODULE COVERAGE:\n{}",
+                self.missing_modules
+                    .iter()
+                    .map(|m| format!("- {}", m))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        if !self.weak_coverage_areas.is_empty() {
+            parts.push(format!(
+                "WEAK COVERAGE AREAS:\n{}",
+                self.weak_coverage_areas
+                    .iter()
+                    .map(|a| format!("- {}", a))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        if !self.module_constraints.is_empty() {
+            let constraints: Vec<String> = self
+                .module_constraints
+                .iter()
+                .flat_map(|(module, constraints)| {
+                    constraints
+                        .iter()
+                        .map(move |c| format!("- {}: {}", module, c))
+                })
+                .collect();
+            parts.push(format!("MODULE CONSTRAINTS:\n{}", constraints.join("\n")));
+        }
+
+        parts.join("\n\n")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,13 +298,13 @@ pub trait RefinementStrategy: Send + Sync {
 
 pub struct StrategyRotator {
     strategies: Vec<Arc<dyn RefinementStrategy>>,
-    history: HashMap<(String, IssueKind), Vec<StrategyOutcome>>,
+    history: HashMap<(String, IssueKind), Vec<StrategyAttempt>>,
     max_history_per_item: usize,
     escalation_level: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct StrategyOutcome {
+pub struct StrategyAttempt {
     pub strategy_name: String,
     pub success: bool,
     pub quality_delta: f32,
@@ -148,26 +313,35 @@ pub struct StrategyOutcome {
 
 impl StrategyRotator {
     pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self::with_strategies(provider, &[
-            RefinementStrategyType::Semantic,
-            RefinementStrategyType::Evidence,
-            RefinementStrategyType::Regeneration,
-        ])
+        Self::with_strategies(
+            provider,
+            &[
+                RefinementStrategyType::Semantic,
+                RefinementStrategyType::Evidence,
+                RefinementStrategyType::Regeneration,
+            ],
+        )
     }
 
     pub fn with_strategies(
         provider: Arc<dyn LlmProvider>,
         strategy_types: &[RefinementStrategyType],
     ) -> Self {
-        let strategies: Vec<Arc<dyn RefinementStrategy>> = strategy_types
+        let mut strategies: Vec<Arc<dyn RefinementStrategy>> = strategy_types
             .iter()
             .map(|strategy_type| Self::create_strategy(&provider, *strategy_type))
             .collect();
 
-        assert!(
-            !strategies.is_empty(),
-            "StrategyRotator requires at least one strategy"
-        );
+        // Ensure at least one strategy exists - add default if empty
+        if strategies.is_empty() {
+            tracing::warn!(
+                "StrategyRotator configured with zero strategies - adding default SemanticStrategy"
+            );
+            strategies.push(Self::create_strategy(
+                &provider,
+                RefinementStrategyType::Semantic,
+            ));
+        }
 
         Self {
             strategies,
@@ -210,10 +384,6 @@ impl StrategyRotator {
         tracing::info!("Forced regeneration mode - using most aggressive strategy");
     }
 
-    pub fn reset_escalation(&mut self) {
-        self.escalation_level = 0;
-    }
-
     pub fn select_strategy(
         &self,
         item_name: &str,
@@ -240,18 +410,18 @@ impl StrategyRotator {
             && let Some(strategy) = candidates
                 .iter()
                 .find(|s| s.name() == best_strategy.as_str())
-            {
-                return Arc::clone(strategy);
-            }
+        {
+            return Arc::clone(strategy);
+        }
 
         candidates
             .into_iter()
             .next()
             .or_else(|| self.strategies.last().cloned())
-            .expect("StrategyRotator must have at least one strategy")
+            .expect("StrategyRotator must have at least one strategy (enforced at construction)")
     }
 
-    fn recently_failed(&self, history: Option<&Vec<StrategyOutcome>>, strategy_name: &str) -> bool {
+    fn recently_failed(&self, history: Option<&Vec<StrategyAttempt>>, strategy_name: &str) -> bool {
         let Some(outcomes) = history else {
             return false;
         };
@@ -266,7 +436,7 @@ impl StrategyRotator {
         recent_failures >= 2
     }
 
-    fn best_historical_strategy(&self, history: Option<&Vec<StrategyOutcome>>) -> Option<String> {
+    fn best_historical_strategy(&self, history: Option<&Vec<StrategyAttempt>>) -> Option<String> {
         let outcomes = history?;
 
         let mut success_rates: HashMap<String, (usize, usize)> = HashMap::new();
@@ -294,7 +464,7 @@ impl StrategyRotator {
             .map(|(name, _)| name)
     }
 
-    pub fn record_outcome(&mut self, item_name: &str, issue: &IssueKind, outcome: StrategyOutcome) {
+    pub fn record_outcome(&mut self, item_name: &str, issue: &IssueKind, outcome: StrategyAttempt) {
         let key = (item_name.to_string(), issue.clone());
         let history = self.history.entry(key).or_default();
 
@@ -319,9 +489,9 @@ impl StrategyRotator {
 }
 
 pub fn calculate_quick_quality(content: &str) -> f32 {
+    use super::file_reference;
     use super::patterns::{
-        count_generic_patterns, count_value_indicators, ACTIONABLE_PATTERN, FILE_LINE_REF, FILE_REF,
-        GENERIC_PATTERN,
+        ACTIONABLE_PATTERN, GENERIC_PATTERN, count_generic_patterns, count_value_indicators,
     };
 
     if content.trim().is_empty() {
@@ -363,8 +533,8 @@ pub fn calculate_quick_quality(content: &str) -> f32 {
         0.0
     };
 
-    let file_refs = FILE_REF.captures_iter(content).count();
-    let file_line_refs = FILE_LINE_REF.captures_iter(content).count();
+    let file_refs = file_reference::count_references(content);
+    let file_line_refs = file_reference::count_references_with_lines(content);
     let evidence = if file_refs > 0 {
         let line_ratio = file_line_refs as f32 / file_refs as f32;
         (file_refs.min(5) as f32 / 5.0 * 0.5 + line_ratio * 0.5).clamp(0.0, 1.0)
@@ -378,10 +548,8 @@ pub fn calculate_quick_quality(content: &str) -> f32 {
         + (example_count.min(3) as f32 / 3.0) * 0.5)
         .clamp(0.0, 1.0);
 
-    let unique_words: std::collections::HashSet<&str> = content
-        .split_whitespace()
-        .filter(|w| w.len() > 3)
-        .collect();
+    let unique_words: std::collections::HashSet<&str> =
+        content.split_whitespace().filter(|w| w.len() > 3).collect();
     let total_words = content.split_whitespace().filter(|w| w.len() > 3).count();
     let redundancy = if total_words > 0 {
         1.0 - (unique_words.len() as f32 / total_words as f32)
@@ -400,25 +568,16 @@ pub fn calculate_quick_quality(content: &str) -> f32 {
 }
 
 pub fn calculate_validated_quality(content: &str, registry: &VerifiedFileRegistry) -> f32 {
-    use super::patterns::FILE_REF;
-
     let base_quality = calculate_quick_quality(content);
 
-    let file_refs: Vec<&str> = FILE_REF
-        .captures_iter(content)
-        .filter_map(|c| c.get(1).map(|m| m.as_str()))
-        .collect();
-
-    if file_refs.is_empty() {
+    let refs = super::file_reference::extract_references(content);
+    if refs.is_empty() {
         return base_quality;
     }
 
-    let valid_refs = file_refs
-        .iter()
-        .filter(|path| registry.contains(path))
-        .count();
+    let valid_refs = refs.iter().filter(|r| registry.contains(&r.path)).count();
 
-    let validity_ratio = valid_refs as f32 / file_refs.len() as f32;
+    let validity_ratio = valid_refs as f32 / refs.len() as f32;
     let evidence_adjustment = (validity_ratio - 0.5) * 0.1;
 
     (base_quality + evidence_adjustment).clamp(0.0, 1.0)
@@ -430,24 +589,18 @@ mod tests {
 
     #[test]
     fn test_issue_kind_conversion() {
-        use super::super::refinement::IssueKind as RI;
+        use super::super::refinement::DetectedIssue as DI;
 
-        let issue = RI::LowActionability {
+        let issue = DI::LowActionability {
             score: 0.3,
             threshold: 0.6,
         };
-        assert_eq!(
-            IssueKind::from_refinement_issue(&issue),
-            IssueKind::LowActionability
-        );
+        assert_eq!(IssueKind::from(&issue), IssueKind::LowActionability);
 
-        let issue = RI::TooGeneric {
+        let issue = DI::TooGeneric {
             description: "test".to_string(),
         };
-        assert_eq!(
-            IssueKind::from_refinement_issue(&issue),
-            IssueKind::TooGeneric
-        );
+        assert_eq!(IssueKind::from(&issue), IssueKind::TooGeneric);
     }
 
     #[test]

@@ -11,14 +11,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use crate::ai::LlmProvider;
 use crate::config::DeepReviewConfig;
 use crate::pipeline::context::VerifiedFileRegistry;
+use crate::pipeline::file_reference;
+use crate::pipeline::quality::find_tier1_matches;
 use crate::types::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,17 +50,12 @@ impl CheckType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum IssueSeverity {
-    Warning,
-    Error,
-    Critical,
-}
+use crate::types::Severity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewIssue {
     pub check_type: CheckType,
-    pub severity: IssueSeverity,
+    pub severity: Severity,
     pub artifact: String,
     pub message: String,
     pub location: Option<String>,
@@ -70,7 +66,7 @@ impl ReviewIssue {
     pub fn error(check_type: CheckType, artifact: &str, message: &str) -> Self {
         Self {
             check_type,
-            severity: IssueSeverity::Error,
+            severity: Severity::High,
             artifact: artifact.to_string(),
             message: message.to_string(),
             location: None,
@@ -81,7 +77,7 @@ impl ReviewIssue {
     pub fn warning(check_type: CheckType, artifact: &str, message: &str) -> Self {
         Self {
             check_type,
-            severity: IssueSeverity::Warning,
+            severity: Severity::Medium,
             artifact: artifact.to_string(),
             message: message.to_string(),
             location: None,
@@ -224,50 +220,19 @@ pub struct DeepReviewEngine {
     provider: Arc<dyn LlmProvider>,
     config: DeepReviewConfig,
     file_registry: VerifiedFileRegistry,
-    tier1_patterns: Vec<Regex>,
 }
 
 impl DeepReviewEngine {
     pub fn new(
         provider: Arc<dyn LlmProvider>,
-        config: DeepReviewConfig,
+        config: &DeepReviewConfig,
         file_registry: VerifiedFileRegistry,
     ) -> Self {
         Self {
             provider,
-            config,
+            config: config.clone(),
             file_registry,
-            tier1_patterns: Self::build_tier1_patterns(),
         }
-    }
-
-    fn build_tier1_patterns() -> Vec<Regex> {
-        let patterns = [
-            r"(?i)cargo\s+(build|run|test|check)",
-            r"(?i)npm\s+(install|run|test|build)",
-            r"(?i)yarn\s+(install|add|build)",
-            r"(?i)pnpm\s+(install|add)",
-            r"(?i)go\s+(build|run|test)",
-            r"(?i)make\s+(build|test|clean)",
-            r"(?i)use\s+async/await",
-            r"(?i)use\s+the\s+\?\s+operator",
-            r"(?i)prefer\s+const\s+over\s+let",
-            r"(?i)use\s+strict\s+mode",
-            r"(?i)follow\s+best\s+practices",
-            r"(?i)write\s+clean\s+code",
-            r"(?i)use\s+meaningful\s+names",
-            r"(?i)add\s+comments\s+to\s+explain",
-            r"(?i)handle\s+errors\s+properly",
-            r"(?i)use\s+git\s+for\s+version\s+control",
-            r"(?i)run\s+tests\s+before\s+commit",
-            r"(?i)use\s+a\s+linter",
-            r"(?i)format\s+your\s+code",
-        ];
-
-        patterns
-            .iter()
-            .filter_map(|p| Regex::new(p).ok())
-            .collect()
     }
 
     pub async fn execute_two_pass_review(
@@ -400,7 +365,6 @@ impl DeepReviewEngine {
     }
 
     fn validate_evidence(&self, artifacts: &ReviewArtifacts) -> CheckResult {
-        let reference_pattern = Regex::new(r"@([^\s:]+):(\d+)").unwrap();
         let mut issues = Vec::new();
         let mut total_refs = 0;
         let mut valid_refs = 0;
@@ -408,10 +372,14 @@ impl DeepReviewEngine {
         let all_content = self.collect_all_content(artifacts);
 
         for (artifact_name, content) in &all_content {
-            for cap in reference_pattern.captures_iter(content) {
+            for file_ref in file_reference::extract_references(content) {
+                // Only count references with line numbers for validation
+                let Some(line_num) = file_ref.line_start else {
+                    continue;
+                };
+
                 total_refs += 1;
-                let file_path = &cap[1];
-                let line_num: usize = cap[2].parse().unwrap_or(0);
+                let file_path = &file_ref.path;
 
                 if !self.file_registry.file_exists(file_path) {
                     issues.push(
@@ -427,20 +395,21 @@ impl DeepReviewEngine {
                 }
 
                 if let Ok(max_lines) = self.file_registry.get_line_count(file_path)
-                    && line_num > max_lines {
-                        issues.push(
-                            ReviewIssue::error(
-                                CheckType::EvidenceValid,
-                                artifact_name,
-                                &format!(
-                                    "Invalid line {} (file has {} lines): {}",
-                                    line_num, max_lines, file_path
-                                ),
-                            )
-                            .with_location(&format!("@{}:{}", file_path, line_num)),
-                        );
-                        continue;
-                    }
+                    && (line_num as usize) > max_lines
+                {
+                    issues.push(
+                        ReviewIssue::error(
+                            CheckType::EvidenceValid,
+                            artifact_name,
+                            &format!(
+                                "Invalid line {} (file has {} lines): {}",
+                                line_num, max_lines, file_path
+                            ),
+                        )
+                        .with_location(&format!("@{}:{}", file_path, line_num)),
+                    );
+                    continue;
+                }
 
                 valid_refs += 1;
             }
@@ -478,30 +447,25 @@ impl DeepReviewEngine {
         let all_content = self.collect_all_content(artifacts);
 
         for (artifact_name, content) in &all_content {
-            let lines: Vec<&str> = content.lines().collect();
-            let mut tier1_matches = 0;
+            let matches = find_tier1_matches(content);
+            let tier1_matches = matches.len();
 
-            for (line_num, line) in lines.iter().enumerate() {
-                for pattern in &self.tier1_patterns {
-                    if pattern.is_match(line) {
-                        tier1_matches += 1;
-                        if tier1_matches <= 3 {
-                            issues.push(
-                                ReviewIssue::error(
-                                    CheckType::Tier1Free,
-                                    artifact_name,
-                                    &format!("Tier 1 content: {}", line.trim()),
-                                )
-                                .with_location(&format!("line {}", line_num + 1))
-                                .with_suggestion("Remove basic knowledge that Claude already knows"),
-                            );
-                        }
-                    }
-                }
+            // Report first 3 matches
+            for (line_num, line_content) in matches.iter().take(3) {
+                issues.push(
+                    ReviewIssue::error(
+                        CheckType::Tier1Free,
+                        artifact_name,
+                        &format!("Tier 1 content: {}", line_content),
+                    )
+                    .with_location(&format!("line {}", line_num))
+                    .with_suggestion("Remove basic knowledge that Claude already knows"),
+                );
             }
 
-            if !lines.is_empty() {
-                let ratio = tier1_matches as f32 / lines.len() as f32;
+            let line_count = content.lines().count();
+            if line_count > 0 {
+                let ratio = tier1_matches as f32 / line_count as f32;
                 if ratio > 0.1 {
                     issues.push(ReviewIssue::error(
                         CheckType::Tier1Free,
@@ -593,12 +557,14 @@ impl DeepReviewEngine {
             Ok(resp) => resp,
             Err(e) => {
                 warn!(error = %e, "LLM semantic check failed");
-                return Ok(CheckResult::fail(vec![ReviewIssue::error(
-                    CheckType::SemanticQuality,
-                    "llm_validation",
-                    &format!("LLM validation failed: {}", e),
-                )
-                .with_suggestion("Check LLM provider connectivity and retry")]));
+                return Ok(CheckResult::fail(vec![
+                    ReviewIssue::error(
+                        CheckType::SemanticQuality,
+                        "llm_validation",
+                        &format!("LLM validation failed: {}", e),
+                    )
+                    .with_suggestion("Check LLM provider connectivity and retry"),
+                ]));
             }
         };
 
@@ -676,12 +642,14 @@ Only report issues with score < 0.7 for any dimension. Pass if overall score >= 
             Ok(resp) => resp,
             Err(e) => {
                 warn!(error = %e, "LLM cross-artifact check failed");
-                return Ok(CheckResult::fail(vec![ReviewIssue::error(
-                    CheckType::CrossArtifactConsistent,
-                    "llm_validation",
-                    &format!("LLM cross-artifact validation failed: {}", e),
-                )
-                .with_suggestion("Check LLM provider connectivity and retry")]));
+                return Ok(CheckResult::fail(vec![
+                    ReviewIssue::error(
+                        CheckType::CrossArtifactConsistent,
+                        "llm_validation",
+                        &format!("LLM cross-artifact validation failed: {}", e),
+                    )
+                    .with_suggestion("Check LLM provider connectivity and retry"),
+                ]));
             }
         };
 
@@ -789,12 +757,14 @@ Pass if artifacts are logically consistent (score >= 0.7)."#
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "Failed to parse LLM review response");
-                return Ok(CheckResult::fail(vec![ReviewIssue::error(
-                    check_type,
-                    "llm_response_parse",
-                    &format!("Failed to parse LLM response: {}", e),
-                )
-                .with_suggestion("LLM response format may be invalid, retry validation")]));
+                return Ok(CheckResult::fail(vec![
+                    ReviewIssue::error(
+                        check_type,
+                        "llm_response_parse",
+                        &format!("Failed to parse LLM response: {}", e),
+                    )
+                    .with_suggestion("LLM response format may be invalid, retry validation"),
+                ]));
             }
         };
 
@@ -803,9 +773,9 @@ Pass if artifacts are logically consistent (score >= 0.7)."#
             .into_iter()
             .map(|i| {
                 let severity = match i.severity.to_lowercase().as_str() {
-                    "critical" => IssueSeverity::Critical,
-                    "error" => IssueSeverity::Error,
-                    _ => IssueSeverity::Warning,
+                    "critical" => Severity::Critical,
+                    "error" => Severity::High,
+                    _ => Severity::Medium,
                 };
 
                 ReviewIssue {
@@ -924,12 +894,10 @@ impl FileRegistryExt for VerifiedFileRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::quality::count_tier1_matches;
 
     #[test]
     fn test_tier1_patterns() {
-        let patterns = DeepReviewEngine::build_tier1_patterns();
-        assert!(!patterns.is_empty());
-
         let test_cases = [
             ("cargo build", true),
             ("npm install", true),
@@ -939,7 +907,7 @@ mod tests {
         ];
 
         for (text, should_match) in test_cases {
-            let matched = patterns.iter().any(|p| p.is_match(text));
+            let matched = count_tier1_matches(text) > 0;
             assert_eq!(matched, should_match, "Failed for: {}", text);
         }
     }
@@ -950,7 +918,7 @@ mod tests {
             .with_location("@missing.rs:10")
             .with_suggestion("Check file path");
 
-        assert_eq!(issue.severity, IssueSeverity::Error);
+        assert_eq!(issue.severity, Severity::High);
         assert!(issue.location.is_some());
         assert!(issue.suggestion.is_some());
     }

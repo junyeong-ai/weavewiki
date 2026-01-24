@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
-use crate::config::ExecutionConfig;
 use crate::types::Result;
 
 /// Pipeline phases for checkpoint tracking
@@ -168,20 +167,26 @@ pub struct CheckpointManager {
     interval: Duration,
     last_checkpoint: Instant,
     max_checkpoints: usize,
+    /// Counter to ensure unique filenames even within same millisecond
+    save_counter: std::sync::atomic::AtomicU32,
 }
 
 impl CheckpointManager {
     /// Create a new checkpoint manager
-    pub fn new(project_root: &Path, config: &ExecutionConfig) -> Self {
+    ///
+    /// Interval is dynamically calculated as 1/4 of quality_loop_timeout (min 60s)
+    pub fn new(project_root: &Path, timeout_config: &crate::config::TimeoutConfig) -> Self {
         let checkpoint_dir = project_root.join(".claudegen").join("checkpoints");
         let lock_file = project_root.join(".claudegen").join(".lock");
+        let interval_secs = timeout_config.effective_checkpoint_interval_secs();
 
         Self {
             checkpoint_dir,
             lock_file,
-            interval: Duration::from_secs(config.checkpoint_interval_minutes * 60),
+            interval: Duration::from_secs(interval_secs),
             last_checkpoint: Instant::now(),
             max_checkpoints: 5,
+            save_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -208,9 +213,17 @@ impl CheckpointManager {
 
     /// Force save a checkpoint immediately
     pub async fn save_checkpoint(&mut self, checkpoint: &ExecutionCheckpoint) -> Result<()> {
+        use std::sync::atomic::Ordering;
+
+        // Use timestamp + counter + iteration for guaranteed unique filenames
+        // Counter prevents overwrites even in async bursts within same millisecond
+        let now = chrono::Utc::now();
+        let counter = self.save_counter.fetch_add(1, Ordering::Relaxed);
         let filename = format!(
-            "checkpoint_{}.json",
-            checkpoint.created_at.format("%Y%m%d_%H%M%S")
+            "checkpoint_{}_{}_{}.json",
+            now.format("%Y%m%d_%H%M%S_%3f"),
+            counter,
+            checkpoint.refinement_iteration
         );
         let path = self.checkpoint_dir.join(&filename);
         let temp_path = path.with_extension("tmp");
@@ -287,12 +300,18 @@ impl CheckpointManager {
     }
 
     /// Restore to a specific phase
-    pub async fn restore_to_phase(&self, target_phase: PipelinePhase) -> Result<Option<ExecutionCheckpoint>> {
+    pub async fn restore_to_phase(
+        &self,
+        target_phase: PipelinePhase,
+    ) -> Result<Option<ExecutionCheckpoint>> {
         let checkpoints = self.list_checkpoints().await?;
 
         for checkpoint in checkpoints {
             if checkpoint.is_compatible()
-                && checkpoint.completed_phases.iter().any(|p| p.phase == target_phase)
+                && checkpoint
+                    .completed_phases
+                    .iter()
+                    .any(|p| p.phase == target_phase)
             {
                 return Ok(Some(checkpoint));
             }
@@ -315,9 +334,10 @@ impl CheckpointManager {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "json")
                 && let Ok(metadata) = entry.metadata().await
-                    && let Ok(modified) = metadata.modified() {
-                        entries.push((path, modified));
-                    }
+                && let Ok(modified) = metadata.modified()
+            {
+                entries.push((path, modified));
+            }
         }
 
         // Sort by modification time, oldest first
@@ -520,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn test_checkpoint_save_and_restore() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ExecutionConfig::default();
+        let config = crate::config::TimeoutConfig::default();
         let mut manager = CheckpointManager::new(temp_dir.path(), &config);
         manager.initialize().await.unwrap();
 
@@ -545,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn test_lock_acquire_release() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ExecutionConfig::default();
+        let config = crate::config::TimeoutConfig::default();
         let manager = CheckpointManager::new(temp_dir.path(), &config);
         manager.initialize().await.unwrap();
 

@@ -86,7 +86,7 @@ pub struct PluginPermissions {
 impl PluginPermissions {
     /// Validate plugin permissions
     pub fn validate(&self) -> Vec<super::ValidationIssue> {
-        use crate::types::is_valid_tool;
+        use crate::utils::is_valid_tool;
         let mut issues = Vec::new();
 
         // Validate allowed_tools
@@ -119,7 +119,10 @@ impl PluginPermissions {
                 if disallowed.contains(tool) {
                     issues.push(super::ValidationIssue::warning(
                         "TOOL_CONFLICT",
-                        format!("tool '{}' appears in both allowedTools and disallowedTools", tool),
+                        format!(
+                            "tool '{}' appears in both allowedTools and disallowedTools",
+                            tool
+                        ),
                     ));
                 }
             }
@@ -256,11 +259,17 @@ impl PluginManifest {
 
         // Name validation (required)
         if self.name.is_empty() {
-            errors.push(super::ValidationIssue::error("MANIFEST_NAME_REQUIRED", "plugin name is required"));
+            errors.push(super::ValidationIssue::error(
+                "MANIFEST_NAME_REQUIRED",
+                "plugin name is required",
+            ));
         } else if self.name.len() > plugin_constants::MAX_NAME_LENGTH {
             errors.push(super::ValidationIssue::error(
                 "MANIFEST_NAME_TOO_LONG",
-                format!("plugin name exceeds {} characters", plugin_constants::MAX_NAME_LENGTH),
+                format!(
+                    "plugin name exceeds {} characters",
+                    plugin_constants::MAX_NAME_LENGTH
+                ),
             ));
         } else if !is_valid_plugin_name(&self.name) {
             errors.push(super::ValidationIssue::error(
@@ -370,7 +379,11 @@ impl Plugin {
                         format!("duplicate skill name: '{}'", skill.name),
                     ));
                 }
-                if issues.is_empty() { None } else { Some((skill.name.clone(), issues)) }
+                if issues.is_empty() {
+                    None
+                } else {
+                    Some((skill.name.clone(), issues))
+                }
             })
             .collect();
 
@@ -386,7 +399,11 @@ impl Plugin {
                         format!("duplicate agent name: '{}'", agent.name),
                     ));
                 }
-                if issues.is_empty() { None } else { Some((agent.name.clone(), issues)) }
+                if issues.is_empty() {
+                    None
+                } else {
+                    Some((agent.name.clone(), issues))
+                }
             })
             .collect();
 
@@ -402,7 +419,11 @@ impl Plugin {
                         format!("duplicate rule name: '{}'", rule.name),
                     ));
                 }
-                if issues.is_empty() { None } else { Some((rule.name.clone(), issues)) }
+                if issues.is_empty() {
+                    None
+                } else {
+                    Some((rule.name.clone(), issues))
+                }
             })
             .collect();
 
@@ -433,16 +454,49 @@ impl PluginValidationResult {
 
     pub fn error_count(&self) -> usize {
         self.manifest_errors.iter().filter(|e| e.is_error()).count()
-            + self.skill_errors.iter().flat_map(|(_, e)| e).filter(|e| e.is_error()).count()
-            + self.agent_errors.iter().flat_map(|(_, e)| e).filter(|e| e.is_error()).count()
-            + self.rule_errors.iter().flat_map(|(_, e)| e).filter(|e| e.is_error()).count()
+            + self
+                .skill_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.is_error())
+                .count()
+            + self
+                .agent_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.is_error())
+                .count()
+            + self
+                .rule_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.is_error())
+                .count()
     }
 
     pub fn warning_count(&self) -> usize {
-        self.manifest_errors.iter().filter(|e| e.severity.is_warning()).count()
-            + self.skill_errors.iter().flat_map(|(_, e)| e).filter(|e| e.severity.is_warning()).count()
-            + self.agent_errors.iter().flat_map(|(_, e)| e).filter(|e| e.severity.is_warning()).count()
-            + self.rule_errors.iter().flat_map(|(_, e)| e).filter(|e| e.severity.is_warning()).count()
+        self.manifest_errors
+            .iter()
+            .filter(|e| e.severity.is_warning())
+            .count()
+            + self
+                .skill_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.severity.is_warning())
+                .count()
+            + self
+                .agent_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.severity.is_warning())
+                .count()
+            + self
+                .rule_errors
+                .iter()
+                .flat_map(|(_, e)| e)
+                .filter(|e| e.severity.is_warning())
+                .count()
     }
 }
 
@@ -495,7 +549,8 @@ mod tests {
 
     #[test]
     fn test_manifest_validation() {
-        let manifest = PluginManifest::with_version_and_description("claudegen", "1.0.0", "A test plugin");
+        let manifest =
+            PluginManifest::with_version_and_description("claudegen", "1.0.0", "A test plugin");
         assert!(manifest.validate().is_empty());
 
         // Empty name is the only required field error now (version/description are optional)
@@ -507,30 +562,31 @@ mod tests {
 
     #[test]
     fn test_plugin_paths() {
-        // Official Claude Code plugin structure with hidden directory
-        let manifest = PluginManifest::with_version_and_description(".claudegen", "1.0.0", "Test");
+        // Plugin output structure: {project-name}-plugin/
+        let manifest =
+            PluginManifest::with_version_and_description("myproject-plugin", "1.0.0", "Test");
         let plugin = Plugin::new(manifest);
         let base = Path::new("/project");
 
         // Plugin manifest at .claude-plugin/plugin.json
         assert_eq!(
             plugin.manifest_path(base),
-            PathBuf::from("/project/.claudegen/.claude-plugin/plugin.json")
+            PathBuf::from("/project/myproject-plugin/.claude-plugin/plugin.json")
         );
         // Skills at skills/
         assert_eq!(
             plugin.skills_dir(base),
-            PathBuf::from("/project/.claudegen/skills")
+            PathBuf::from("/project/myproject-plugin/skills")
         );
         // Agents at agents/
         assert_eq!(
             plugin.agents_dir(base),
-            PathBuf::from("/project/.claudegen/agents")
+            PathBuf::from("/project/myproject-plugin/agents")
         );
         // Commands at commands/
         assert_eq!(
             plugin.commands_dir(base),
-            PathBuf::from("/project/.claudegen/commands")
+            PathBuf::from("/project/myproject-plugin/commands")
         );
     }
 }

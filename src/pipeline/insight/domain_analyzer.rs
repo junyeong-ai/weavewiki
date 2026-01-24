@@ -8,9 +8,9 @@ use regex::Regex;
 
 // Cached regexes for terminology extraction
 static PASCAL_CASE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b").unwrap());
+    LazyLock::new(|| Regex::new(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b").expect("pascal case regex"));
 static QUOTED_TERM_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"["']([^"']+)["']"#).unwrap());
+    LazyLock::new(|| Regex::new(r#"["']([^"']+)["']"#).expect("quoted term regex"));
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -19,8 +19,8 @@ use crate::ai::LlmProvider;
 use crate::config::Config;
 use crate::types::Result;
 
-use super::types::{BusinessRule, BusinessRuleType, DomainKnowledge, Terminology};
 use super::InsightContext;
+use super::types::{BusinessRule, BusinessRuleType, DomainKnowledge, Terminology};
 
 /// Extracts domain terminology from code
 pub struct TerminologyExtractor;
@@ -35,7 +35,10 @@ impl TerminologyExtractor {
             for insight in &synthesis.deep.insights {
                 let potential_terms = self.extract_terms_from_text(&insight.purpose);
                 for term in potential_terms {
-                    if !terms.iter().any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase()) {
+                    if !terms
+                        .iter()
+                        .any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase())
+                    {
                         terms.push(Terminology {
                             term,
                             definition: String::new(),
@@ -50,7 +53,10 @@ impl TerminologyExtractor {
             for module in &synthesis.modules {
                 let potential_terms = self.extract_terms_from_text(&module.responsibility);
                 for term in potential_terms {
-                    if !terms.iter().any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase()) {
+                    if !terms
+                        .iter()
+                        .any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase())
+                    {
                         terms.push(Terminology {
                             term,
                             definition: String::new(),
@@ -66,7 +72,10 @@ impl TerminologyExtractor {
         for pattern in &ctx.conventions.patterns {
             let potential_terms = self.extract_terms_from_text(&pattern.description);
             for term in potential_terms {
-                if !terms.iter().any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase()) {
+                if !terms
+                    .iter()
+                    .any(|t: &Terminology| t.term.to_lowercase() == term.to_lowercase())
+                {
                     terms.push(Terminology {
                         term,
                         definition: pattern.description.clone(),
@@ -108,10 +117,30 @@ impl TerminologyExtractor {
 
     fn is_common_programming_term(&self, term: &str) -> bool {
         let common = [
-            "String", "Integer", "Boolean", "Array", "Object", "Function",
-            "Result", "Option", "Error", "Config", "Default", "Debug",
-            "Clone", "Copy", "Send", "Sync", "Serialize", "Deserialize",
-            "HashMap", "HashSet", "Vector", "Iterator", "Future", "Stream",
+            "String",
+            "Integer",
+            "Boolean",
+            "Array",
+            "Object",
+            "Function",
+            "Result",
+            "Option",
+            "Error",
+            "Config",
+            "Default",
+            "Debug",
+            "Clone",
+            "Copy",
+            "Send",
+            "Sync",
+            "Serialize",
+            "Deserialize",
+            "HashMap",
+            "HashSet",
+            "Vector",
+            "Iterator",
+            "Future",
+            "Stream",
         ];
         common.contains(&term)
     }
@@ -169,16 +198,41 @@ impl BusinessRuleExtractor {
 
     fn looks_like_business_rule(&self, text: &str) -> bool {
         let business_indicators = [
-            "must", "should", "cannot", "only", "when", "if",
-            "validate", "check", "verify", "ensure", "require",
-            "limit", "allow", "restrict", "permission", "eligible",
-            "policy", "rule", "condition", "constraint",
-            "customer", "user", "order", "payment", "invoice",
-            "account", "balance", "transaction", "refund",
+            "must",
+            "should",
+            "cannot",
+            "only",
+            "when",
+            "if",
+            "validate",
+            "check",
+            "verify",
+            "ensure",
+            "require",
+            "limit",
+            "allow",
+            "restrict",
+            "permission",
+            "eligible",
+            "policy",
+            "rule",
+            "condition",
+            "constraint",
+            "customer",
+            "user",
+            "order",
+            "payment",
+            "invoice",
+            "account",
+            "balance",
+            "transaction",
+            "refund",
         ];
 
         let text_lower = text.to_lowercase();
-        business_indicators.iter().any(|&indicator| text_lower.contains(indicator))
+        business_indicators
+            .iter()
+            .any(|&indicator| text_lower.contains(indicator))
     }
 
     fn infer_rule_type(&self, text: &str) -> BusinessRuleType {
@@ -277,13 +331,18 @@ impl DomainAnalyzer {
             let llm_knowledge = self.analyze_with_llm(ctx).await?;
 
             for term in llm_knowledge.terminology {
-                if !terminology.iter().any(|t| t.term.to_lowercase() == term.term.to_lowercase()) {
+                if !terminology
+                    .iter()
+                    .any(|t| t.term.to_lowercase() == term.term.to_lowercase())
+                {
                     terminology.push(term);
                 }
             }
 
             for rule in llm_knowledge.business_rules {
-                if !business_rules.iter().any(|r| r.name.to_lowercase() == rule.name.to_lowercase())
+                if !business_rules
+                    .iter()
+                    .any(|r| r.name.to_lowercase() == rule.name.to_lowercase())
                 {
                     business_rules.push(rule);
                 }
@@ -305,8 +364,14 @@ impl DomainAnalyzer {
         // Sort business rules by priority (configured rule types first)
         let priorities = &domain_config.rule_type_priorities;
         business_rules.sort_by(|a, b| {
-            let a_priority = priorities.iter().position(|t| *t == a.rule_type).unwrap_or(usize::MAX);
-            let b_priority = priorities.iter().position(|t| *t == b.rule_type).unwrap_or(usize::MAX);
+            let a_priority = priorities
+                .iter()
+                .position(|t| *t == a.rule_type)
+                .unwrap_or(usize::MAX);
+            let b_priority = priorities
+                .iter()
+                .position(|t| *t == b.rule_type)
+                .unwrap_or(usize::MAX);
             a_priority.cmp(&b_priority)
         });
 
@@ -513,6 +578,7 @@ Return JSON:
 
 #[cfg(test)]
 mod tests {
+    use super::super::InsightContext;
     use super::*;
     use crate::pipeline::context::VerifiedFileRegistry;
     use crate::pipeline::phases::constraint_extraction::{
@@ -522,7 +588,6 @@ mod tests {
         ArchitectureConvention, AsyncPattern, ErrorHandlingPattern, FileOrganization,
         InferredConventions, NamingConventions, TestingConvention,
     };
-    use super::super::InsightContext;
 
     fn create_test_context<'a>(
         conventions: &'a InferredConventions,

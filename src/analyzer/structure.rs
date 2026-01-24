@@ -13,7 +13,7 @@ use crate::types::{Result, log_filter_error};
 
 /// Universal structure analysis results
 #[derive(Debug, Clone)]
-pub struct StructureAnalysis {
+pub struct ProjectStructure {
     /// Directory tree with metrics
     pub directories: Vec<DirectoryInfo>,
     /// Entry points (files with no internal dependents)
@@ -124,8 +124,8 @@ impl<'a> StructureAnalyzer<'a> {
     }
 
     /// Perform complete structure analysis
-    pub fn analyze(&self) -> Result<StructureAnalysis> {
-        Ok(StructureAnalysis {
+    pub fn analyze(&self) -> Result<ProjectStructure> {
+        Ok(ProjectStructure {
             directories: self.analyze_directories()?,
             entry_points: self.find_entry_points()?,
             hotspots: self.find_hotspots()?,

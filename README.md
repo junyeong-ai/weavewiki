@@ -23,7 +23,9 @@
 ```
 project/
 ├── CLAUDE.md                          # 프로젝트 메모리 (규칙, 가이드라인)
-└── .claudegen/                        # 플러그인 디렉토리
+├── .claudegen/                        # 내부 데이터 (graph, cache, config)
+│   └── config.toml
+└── {project-name}-plugin/             # 플러그인 디렉토리
     ├── .claude-plugin/
     │   └── plugin.json                # 플러그인 매니페스트
     ├── skills/
@@ -100,11 +102,9 @@ cargo build --release
 ---
 name: skill-name
 description: "This skill should be used when..."
-version: "1.0.0"
-allowed-tools: "Read, Grep, Glob"
-model: opus
+allowed-tools: Read, Grep, Glob
+model: sonnet
 context: fork
-agent: agent-name
 user-invocable: true
 ---
 
@@ -117,17 +117,20 @@ user-invocable: true
 
 `.claudegen/config.toml`:
 ```toml
+version = "2.0"
+preset = "standard"  # quick | standard | thorough | exhaustive
+
 [project]
 name = "my-project"
+type = "auto"
 
-[plugin]
-name = ".claudegen"
-version = "1.0.0"
+[analysis]
+include = ["**/*"]
+exclude = ["node_modules/**", "dist/**", ".git/**", "target/**"]
 
-[generation]
-include_skills = true
-include_agents = true
-include_hooks = true
+[llm]
+provider = "claude-agent"
+model = "claude-sonnet-4-5-20250929"
 ```
 
 ---
@@ -136,8 +139,8 @@ include_hooks = true
 
 ```
 1. 내장 기본값
-2. 글로벌 설정 (~/.claudegen/config.yaml)
-3. 프로젝트 설정 (.claudegen/config.yaml)
+2. 글로벌 설정 (~/.config/claudegen/config.toml)
+3. 프로젝트 설정 (.claudegen/config.toml)
 4. 환경 변수 (CLAUDEGEN_*)
 5. CLI 인수 (최우선)
 ```

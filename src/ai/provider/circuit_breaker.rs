@@ -81,19 +81,19 @@ impl CircuitBreakerConfig {
 
     pub fn strict() -> Self {
         Self {
-            failure_threshold: 3,      // Open quickly after 3 failures
-            success_threshold: 3,      // Require 3 successes to close
+            failure_threshold: 3,                  // Open quickly after 3 failures
+            success_threshold: 3,                  // Require 3 successes to close
             open_timeout: Duration::from_secs(30), // Short recovery timeout
-            half_open_max_requests: 1, // Only 1 test request in half-open
+            half_open_max_requests: 1,             // Only 1 test request in half-open
         }
     }
 
     pub fn lenient() -> Self {
         Self {
-            failure_threshold: 10,     // Allow more failures before opening
-            success_threshold: 1,      // 1 success to close
+            failure_threshold: 10,                  // Allow more failures before opening
+            success_threshold: 1,                   // 1 success to close
             open_timeout: Duration::from_secs(120), // Longer recovery timeout
-            half_open_max_requests: 5, // More test requests in half-open
+            half_open_max_requests: 5,              // More test requests in half-open
         }
     }
 }

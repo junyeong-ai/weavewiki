@@ -1,42 +1,41 @@
 //! Claude Code Agent types - Official spec compliant
-//!
-//! Agents follow the Progressive Disclosure philosophy:
-//! - Agents are domain-specific experts with internal project knowledge
-//! - NOT generic roles like "code-reviewer" or "feature-developer"
-//! - Must include project-specific context and @file:line references
-//!
-//! Quality Requirements:
-//! - Domain-specific focus (not generic assistant)
-//! - Internal knowledge about project workflows and dependencies
-//! - At least 2 @file:line references for key context
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 
 use super::hook::ToolHooks;
+use super::insight::TierClassification;
 use super::node::EvidenceLocation;
-use super::skill::{ContentTier, QualityMetrics};
+use super::skill::QualityMetrics;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use crate::pipeline::generation::GenerationContext;
+use crate::utils::{is_valid_tool, patterns};
 
-// Quality calculation patterns
-static FILE_LINE_REF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@([a-zA-Z0-9_\-]+/[a-zA-Z0-9_./\-]+):(\d+)").expect("Invalid regex")
-});
-
-// Tier 1 agent names (generic functionality)
 const TIER1_AGENT_NAMES: &[&str] = &[
-    "code-reviewer", "test-writer", "documentation-writer", "bug-fixer",
-    "feature-developer", "code-assistant", "general-assistant", "helper",
+    "code-reviewer",
+    "test-writer",
+    "documentation-writer",
+    "bug-fixer",
+    "feature-developer",
+    "code-assistant",
+    "general-assistant",
+    "helper",
 ];
 
-// Tier 3 indicators for agents
 const TIER3_AGENT_INDICATORS: &[&str] = &[
-    "internal knowledge", "hidden", "constraint", "dependency",
-    "workflow", "gotcha", "order matters", "sequence",
+    "internal knowledge",
+    "hidden",
+    "constraint",
+    "dependency",
+    "workflow",
+    "gotcha",
+    "order matters",
+    "sequence",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub name: String,
     pub description: String,
@@ -59,10 +58,30 @@ pub struct Agent {
     pub examples: Vec<AgentExample>,
     #[serde(skip)]
     pub evidence: Vec<EvidenceLocation>,
-    /// Quality metrics (not serialized to output)
+    #[serde(skip)]
+    pub generation_context: Option<Arc<GenerationContext>>,
     #[serde(skip)]
     pub quality: QualityMetrics,
 }
+
+impl PartialEq for Agent {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.color == other.color
+            && self.tools == other.tools
+            && self.disallowed_tools == other.disallowed_tools
+            && self.model == other.model
+            && self.permission_mode == other.permission_mode
+            && self.skills == other.skills
+            && self.hooks == other.hooks
+            && self.prompt == other.prompt
+            && self.examples == other.examples
+            && self.quality == other.quality
+    }
+}
+
+impl Eq for Agent {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -161,6 +180,20 @@ impl std::fmt::Display for AgentModel {
     }
 }
 
+impl std::str::FromStr for AgentModel {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "sonnet" => Self::Sonnet,
+            "opus" => Self::Opus,
+            "haiku" => Self::Haiku,
+            "inherit" => Self::Inherit,
+            _ => Self::Inherit, // Default fallback
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
@@ -171,6 +204,33 @@ pub enum PermissionMode {
     Plan,
 }
 
+impl std::str::FromStr for PermissionMode {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // Case-insensitive matching for robustness
+        Ok(match s.to_lowercase().replace('_', "").as_str() {
+            "acceptedits" => Self::AcceptEdits,
+            "dontask" => Self::DontAsk,
+            "bypasspermissions" => Self::BypassPermissions,
+            "plan" => Self::Plan,
+            "default" => Self::Default,
+            _ => Self::Default,
+        })
+    }
+}
+
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default => write!(f, "default"),
+            Self::AcceptEdits => write!(f, "acceptEdits"),
+            Self::DontAsk => write!(f, "dontAsk"),
+            Self::BypassPermissions => write!(f, "bypassPermissions"),
+            Self::Plan => write!(f, "plan"),
+        }
+    }
+}
 
 /// Minimum required @file:line references for an agent to pass quality
 pub const MIN_AGENT_FILE_REFS: usize = 2;
@@ -197,13 +257,14 @@ impl Agent {
             prompt: prompt_str,
             examples: Vec::new(),
             evidence: Vec::new(),
+            generation_context: None,
             quality,
         }
     }
 
     /// Calculate quality metrics for agent
     pub fn calculate_quality(name: &str, prompt: &str) -> QualityMetrics {
-        let file_refs = FILE_LINE_REF.captures_iter(prompt).count();
+        let file_refs = patterns::count_file_line_refs(prompt);
         let name_lower = name.to_lowercase();
         let prompt_lower = prompt.to_lowercase();
 
@@ -211,32 +272,30 @@ impl Agent {
         let is_tier1_name = TIER1_AGENT_NAMES.iter().any(|n| name_lower.contains(n));
 
         // Count tier 3 indicators (internal knowledge, etc.)
-        let tier3_count = TIER3_AGENT_INDICATORS.iter()
+        let tier3_count = TIER3_AGENT_INDICATORS
+            .iter()
             .filter(|i| prompt_lower.contains(*i))
             .count();
 
-        // Determine tier
         let tier = if is_tier1_name {
-            ContentTier::Tier1Generic
+            TierClassification::Tier1Generic
         } else if tier3_count > 0 {
-            ContentTier::Tier3Constraint
+            TierClassification::Tier3Constraint
         } else if file_refs >= MIN_AGENT_FILE_REFS {
-            ContentTier::Tier2Convention
+            TierClassification::Tier2Convention
         } else {
-            ContentTier::Tier1Generic
+            TierClassification::Tier1Generic
         };
 
-        // Calculate score
-        let mut score = 0.3f32; // Base score
-        score += 0.15 * (file_refs.min(5) as f32);     // File refs
-        score += 0.1 * (tier3_count.min(3) as f32);    // Tier 3 indicators
+        let mut score = 0.3f32;
+        score += 0.15 * (file_refs.min(5) as f32);
+        score += 0.1 * (tier3_count.min(3) as f32);
         if is_tier1_name {
-            score -= 0.4; // Heavy penalty for generic names
+            score -= 0.4;
         }
         score = score.clamp(0.0, 1.0);
 
-        let meets_requirements = file_refs >= MIN_AGENT_FILE_REFS
-            && tier != ContentTier::Tier1Generic;
+        let meets_requirements = file_refs >= MIN_AGENT_FILE_REFS && tier.should_keep();
 
         QualityMetrics {
             file_refs,
@@ -297,6 +356,11 @@ impl Agent {
         self
     }
 
+    pub fn with_generation_context(mut self, ctx: Arc<GenerationContext>) -> Self {
+        self.generation_context = Some(ctx);
+        self
+    }
+
     fn build_prompt_with_examples(&self) -> String {
         if self.examples.is_empty() {
             return self.prompt.clone();
@@ -334,13 +398,12 @@ impl Agent {
             lines.push(format!("color: {color}"));
         }
         if let Some(tools) = &self.tools {
-            let tools_json = serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_string());
-            lines.push(format!("tools: {tools_json}"));
+            // Claude Code expects comma-separated string, not JSON array
+            lines.push(format!("tools: {}", tools.join(", ")));
         }
         if let Some(disallowed) = &self.disallowed_tools {
-            let disallowed_json =
-                serde_json::to_string(disallowed).unwrap_or_else(|_| "[]".to_string());
-            lines.push(format!("disallowedTools: {disallowed_json}"));
+            // Claude Code expects comma-separated string, not JSON array
+            lines.push(format!("disallowedTools: {}", disallowed.join(", ")));
         }
         if let Some(mode) = &self.permission_mode {
             let mode_str = match mode {
@@ -353,8 +416,11 @@ impl Agent {
             lines.push(format!("permissionMode: {mode_str}"));
         }
         if let Some(skills) = &self.skills {
-            let skills_json = serde_json::to_string(skills).unwrap_or_else(|_| "[]".to_string());
-            lines.push(format!("skills: {skills_json}"));
+            // Skills should be YAML array format
+            lines.push("skills:".to_string());
+            for skill in skills {
+                lines.push(format!("  - {skill}"));
+            }
         }
 
         lines.push("---".to_string());
@@ -433,30 +499,6 @@ impl Agent {
     }
 }
 
-pub const VALID_TOOLS: &[&str] = &[
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "Bash",
-    "Task",
-    "WebFetch",
-    "WebSearch",
-    "TodoWrite",
-    "NotebookEdit",
-    "AskUserQuestion",
-    "Skill",
-    "EnterPlanMode",
-    "ExitPlanMode",
-    "KillShell",
-    "TaskOutput",
-];
-
-pub fn is_valid_tool(name: &str) -> bool {
-    VALID_TOOLS.contains(&name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,7 +519,8 @@ mod tests {
         assert!(md.contains("description: \"Use this agent for code review.\""));
         assert!(md.contains("color: blue"));
         assert!(md.contains("model: sonnet"));
-        assert!(md.contains(r#"tools: ["Read","Grep"]"#));
+        // Claude Code format: comma-separated string, not JSON array
+        assert!(md.contains("tools: Read, Grep"));
         assert!(md.contains("You are a code reviewer."));
     }
 

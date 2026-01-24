@@ -15,16 +15,18 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::ai::{with_timeout, LlmProvider};
+use crate::ai::{LlmProvider, with_timeout};
 use crate::config::Config;
 use crate::types::{Agent, AgentModel, Plugin, PluginManifest, ProjectMemory, Result, Rule, Skill};
 
 use super::analysis::{
-    AstEnricher, AnalysisSynthesizer, DeepAnalysisResult, DeepAnalyzer, SynthesizedAnalysis,
+    AnalysisSynthesizer, AstEnricher, DeepAnalysisResult, DeepAnalyzer, SynthesizedAnalysis,
     multi_agent::{AnalysisContext, MultiAgentAnalyzer},
 };
 use super::context::VerifiedFileRegistry;
 
+use super::context::ClaudegenContext;
+use super::enrichment::{EnrichedPlan, EnrichmentEngine};
 use super::generation::path_rules::{ClaudeMdGenerator, PathRulesGenerator};
 use super::phases::{
     constraint_extraction::{self, ExtractedConstraints},
@@ -33,13 +35,9 @@ use super::phases::{
     output_router::{self, OutputPlan},
     project_detection::{self, ProjectDetection},
 };
-use super::context::ClaudegenContext;
-use super::enrichment::{EnrichedPlan, EnrichmentEngine};
 use super::reference_extractor::ReferenceExtractor;
 use super::refinement::RefinementEngine;
-use super::validation::{
-    ConsistencyResult, CrossValidationResult, SemanticQualityResult, TierFilterResult,
-};
+use super::validation::{ConsistencyResult, CrossValidationResult, TierFilterResult};
 
 #[derive(Debug, Clone)]
 pub struct AdaptivePipelineOutput {
@@ -54,7 +52,6 @@ pub struct AdaptivePipelineOutput {
     pub tier_filter_result: TierFilterResult,
     pub consistency_result: ConsistencyResult,
     pub cross_validation_result: CrossValidationResult,
-    pub semantic_quality: Option<SemanticQualityResult>,
     pub quality_score: f32,
     pub refinement_iterations: usize,
     pub refinement_converged: bool,
@@ -69,11 +66,7 @@ pub struct AdaptivePipeline {
 }
 
 impl AdaptivePipeline {
-    pub fn new(
-        project_root: PathBuf,
-        provider: Arc<dyn LlmProvider>,
-        config: Config,
-    ) -> Self {
+    pub fn new(project_root: PathBuf, provider: Arc<dyn LlmProvider>, config: Config) -> Self {
         Self {
             project_root,
             provider,
@@ -84,9 +77,7 @@ impl AdaptivePipeline {
 
     async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
         self.file_registry
-            .get_or_try_init(|| async {
-                VerifiedFileRegistry::build(&self.project_root).await
-            })
+            .get_or_try_init(|| async { VerifiedFileRegistry::build(&self.project_root).await })
             .await
             .cloned()
     }
@@ -161,7 +152,8 @@ impl AdaptivePipeline {
         );
 
         // Phase 2.5: Deep Analysis (if enabled) with timeout
-        let analysis_timeout = Duration::from_secs(self.config.timeout().analysis_phase_timeout_secs);
+        let analysis_timeout =
+            Duration::from_secs(self.config.timeout().analysis_phase_timeout_secs);
         let deep_analysis = with_timeout(
             analysis_timeout,
             self.run_deep_analysis(&detection),
@@ -198,7 +190,8 @@ impl AdaptivePipeline {
                 && retry_count < max_synthesis_retries
             {
                 retry_count += 1;
-                let reanalysis_targets = synthesizer.get_reanalysis_targets(&synth_result, min_confidence);
+                let reanalysis_targets =
+                    synthesizer.get_reanalysis_targets(&synth_result, min_confidence);
 
                 if !reanalysis_targets.needs_reanalysis() {
                     tracing::debug!(
@@ -218,10 +211,14 @@ impl AdaptivePipeline {
                 );
 
                 // Re-run deep analysis focusing on weak areas
-                match self.run_targeted_reanalysis(&detection, &reanalysis_targets).await {
+                match self
+                    .run_targeted_reanalysis(&detection, &reanalysis_targets)
+                    .await
+                {
                     Ok(Some(enhanced_analysis)) => {
                         // Merge enhanced analysis with existing
-                        current_analysis = self.merge_analysis_results(current_analysis, enhanced_analysis);
+                        current_analysis =
+                            self.merge_analysis_results(current_analysis, enhanced_analysis);
 
                         // Re-synthesize
                         synth_result = synthesizer.synthesize(
@@ -267,10 +264,8 @@ impl AdaptivePipeline {
             }
 
             // AST Enrichment: validate and enhance synthesis with ground-truth facts
-            let ast_facts = AstEnricher::extract_facts(
-                &self.project_root,
-                file_registry.all_files(),
-            ).await;
+            let ast_facts =
+                AstEnricher::extract_facts(&self.project_root, file_registry.all_files()).await;
 
             if !ast_facts.parsed_files.is_empty() {
                 synthesizer.enhance_with_ast(&mut synth_result, &ast_facts);
@@ -291,12 +286,13 @@ impl AdaptivePipeline {
 
         // Log synthesis insights if available
         if let Some(ref synth) = synthesis
-            && !synth.modules.is_empty() {
-                tracing::debug!(
-                    merged_modules = synth.modules.len(),
-                    "Merged module analysis available"
-                );
-            }
+            && !synth.modules.is_empty()
+        {
+            tracing::debug!(
+                merged_modules = synth.modules.len(),
+                "Merged module analysis available"
+            );
+        }
 
         // Phase 3: Convention Inference
         let conventions = self.infer_conventions(&detection).await?;
@@ -337,14 +333,9 @@ impl AdaptivePipeline {
         );
 
         // Phase 5.5: Enrichment - Bridge synthesis findings to generation
-        let enrichment_engine = EnrichmentEngine::new(
-            self.config.quality().minimum_quality,
-        );
-        let enriched_plan = enrichment_engine.enrich(
-            output_plan.clone(),
-            synthesis.as_ref(),
-            &constraints,
-        );
+        let enrichment_engine = EnrichmentEngine::new(self.config.quality().minimum_quality);
+        let enriched_plan =
+            enrichment_engine.enrich(output_plan.clone(), synthesis.as_ref(), &constraints);
         tracing::info!(
             total_constraints = enriched_plan.coverage.total_constraints,
             covered = enriched_plan.coverage.covered_constraints,
@@ -380,13 +371,25 @@ impl AdaptivePipeline {
             synthesis.as_ref(),
         )?;
 
-        let rules =
-            PathRulesGenerator::generate(&output_plan, monorepo.as_ref(), &conventions, &constraints)?;
+        let rules = PathRulesGenerator::generate(
+            &output_plan,
+            monorepo.as_ref(),
+            &conventions,
+            &constraints,
+        )?;
 
         let skills = self
-            .generate_skills_with_enrichment(&enriched_plan, &constraints, &file_registry, &conventions, synthesis.as_ref())
+            .generate_skills_with_enrichment(
+                &enriched_plan,
+                &constraints,
+                &file_registry,
+                &conventions,
+                synthesis.as_ref(),
+            )
             .await?;
-        let agents = self.generate_agents_with_enrichment(&enriched_plan, &detection, monorepo.as_ref()).await?;
+        let agents = self
+            .generate_agents_with_enrichment(&enriched_plan, &detection, monorepo.as_ref())
+            .await?;
 
         tracing::info!(
             skills = skills.len(),
@@ -401,7 +404,8 @@ impl AdaptivePipeline {
             Arc::clone(&self.provider),
             self.config.clone(),
             file_registry.clone(),
-        ).await?;
+        )
+        .await?;
 
         let refinement_result = refinement_engine
             .refine(skills, agents, rules, &claude_md, &output_plan)
@@ -419,22 +423,15 @@ impl AdaptivePipeline {
         let rules = refinement_result.rules;
 
         // Phase 8: Final Validation (simplified - actual validation via LLM Judge)
-        let tier_result = TierFilterResult::evaluate(&skills, &agents, &rules, &claude_md.to_markdown());
+        let tier_result =
+            TierFilterResult::check(&skills, &agents, &rules, &claude_md.to_markdown());
 
-        let consistency_result = ConsistencyResult::check(
-            detection.primary_type,
-            detection.is_monorepo,
-            &skills,
-            &agents,
-            &rules,
-        );
+        let consistency_result =
+            ConsistencyResult::check(detection.is_monorepo, &skills, &agents, &rules);
 
-        let cross_validation_result = CrossValidationResult::validate(
-            &skills,
-            &agents,
-            &rules,
-            &claude_md,
-        );
+        let file_registry = self.get_file_registry().await?;
+        let cross_validation_result =
+            CrossValidationResult::check(&skills, &agents, &rules, &claude_md, &file_registry);
 
         let quality_score = refinement_result.final_quality;
 
@@ -477,7 +474,6 @@ impl AdaptivePipeline {
             tier_filter_result: tier_result,
             consistency_result,
             cross_validation_result,
-            semantic_quality: refinement_result.semantic_quality,
             quality_score,
             refinement_iterations: refinement_result.iterations,
             refinement_converged: refinement_result.converged,
@@ -495,7 +491,13 @@ impl AdaptivePipeline {
 
     async fn infer_conventions(&self, detection: &ProjectDetection) -> Result<InferredConventions> {
         let max_samples = self.config.few_shot.max_examples;
-        convention_inference::infer(&self.project_root, detection, self.provider.clone(), max_samples).await
+        convention_inference::infer(
+            &self.project_root,
+            detection,
+            self.provider.clone(),
+            max_samples,
+        )
+        .await
     }
 
     async fn extract_constraints(
@@ -513,7 +515,10 @@ impl AdaptivePipeline {
             .await
     }
 
-    async fn run_deep_analysis(&self, detection: &ProjectDetection) -> Result<Option<DeepAnalysisResult>> {
+    async fn run_deep_analysis(
+        &self,
+        detection: &ProjectDetection,
+    ) -> Result<Option<DeepAnalysisResult>> {
         if !self.config.deep_analysis().enabled {
             return Ok(None);
         }
@@ -527,13 +532,12 @@ impl AdaptivePipeline {
             &self.project_root,
             Arc::clone(&self.provider),
             self.config.analysis.clone(),
+            self.config.deep_analysis.clone(),
         );
 
         let result = analyzer.analyze(detection).await?;
 
-        if result.patterns.is_empty()
-            && result.constraints.is_empty()
-            && result.insights.is_empty()
+        if result.patterns.is_empty() && result.constraints.is_empty() && result.insights.is_empty()
         {
             return Ok(None);
         }
@@ -577,12 +581,14 @@ impl AdaptivePipeline {
             .collect();
 
         let mut file_contents = std::collections::HashMap::new();
-        for file in file_list.iter().take(100) { // Read more files
+        for file in file_list.iter().take(100) {
+            // Read more files
             let path = self.project_root.join(file.as_str());
             if let Ok(content) = tokio::fs::read_to_string(&path).await
-                && content.len() < 50000 {
-                    file_contents.insert(file.clone(), content);
-                }
+                && content.len() < 50000
+            {
+                file_contents.insert(file.clone(), content);
+            }
         }
 
         let context = AnalysisContext {
@@ -590,7 +596,11 @@ impl AdaptivePipeline {
             file_list,
             file_contents,
             project_type: detection.primary_type.as_str().to_string(),
-            languages: detection.languages.iter().map(|l| l.language.clone()).collect(),
+            languages: detection
+                .languages
+                .iter()
+                .map(|l| l.language.clone())
+                .collect(),
         };
 
         let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
@@ -619,12 +629,32 @@ impl AdaptivePipeline {
         use std::collections::HashSet;
 
         // Collect existing names first (cloning to avoid borrow issues)
-        let existing_pattern_names: HashSet<String> = existing.patterns.iter().map(|p| p.name.clone()).collect();
-        let existing_constraint_titles: HashSet<String> = existing.constraints.iter().map(|c| c.title.clone()).collect();
-        let existing_module_names: HashSet<String> = existing.structure.core_modules.iter().map(|m| m.name.clone()).collect();
-        let existing_entry_paths: HashSet<String> = existing.structure.entry_points.iter().map(|e| e.path.clone()).collect();
-        let existing_insight_files: HashSet<String> = existing.insights.iter().map(|i| i.file.clone()).collect();
-        let existing_abstraction_names: HashSet<String> = existing.key_abstractions.iter().map(|a| a.name.clone()).collect();
+        let existing_pattern_names: HashSet<String> =
+            existing.patterns.iter().map(|p| p.name.clone()).collect();
+        let existing_constraint_titles: HashSet<String> = existing
+            .constraints
+            .iter()
+            .map(|c| c.title.clone())
+            .collect();
+        let existing_module_names: HashSet<String> = existing
+            .structure
+            .core_modules
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
+        let existing_entry_paths: HashSet<String> = existing
+            .structure
+            .entry_points
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        let existing_insight_files: HashSet<String> =
+            existing.insights.iter().map(|i| i.file.clone()).collect();
+        let existing_abstraction_names: HashSet<String> = existing
+            .key_abstractions
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
 
         // Now move and merge
         let mut merged_patterns = existing.patterns;
@@ -670,7 +700,7 @@ impl AdaptivePipeline {
         }
 
         DeepAnalysisResult {
-            structure: super::analysis::deep_analyzer::StructureAnalysis {
+            structure: super::analysis::deep_analyzer::SemanticStructure {
                 entry_points: merged_entry_points,
                 core_modules: merged_modules,
                 layer_boundaries: existing.structure.layer_boundaries,
@@ -682,22 +712,35 @@ impl AdaptivePipeline {
             insights: merged_insights,
             key_abstractions: merged_abstractions,
             analysis_quality: super::analysis::deep_analyzer::AnalysisQuality {
-                files_analyzed: existing.analysis_quality.files_analyzed + new.analysis_quality.files_analyzed,
-                lines_analyzed: existing.analysis_quality.lines_analyzed + new.analysis_quality.lines_analyzed,
-                coverage_ratio: (existing.analysis_quality.coverage_ratio + new.analysis_quality.coverage_ratio) / 2.0,
-                evidence_count: existing.analysis_quality.evidence_count + new.analysis_quality.evidence_count,
-                validated_refs: existing.analysis_quality.validated_refs + new.analysis_quality.validated_refs,
-                filtered_hallucinations: existing.analysis_quality.filtered_hallucinations + new.analysis_quality.filtered_hallucinations,
-                confidence_score: (existing.analysis_quality.confidence_score + new.analysis_quality.confidence_score) / 2.0,
+                files_analyzed: existing.analysis_quality.files_analyzed
+                    + new.analysis_quality.files_analyzed,
+                lines_analyzed: existing.analysis_quality.lines_analyzed
+                    + new.analysis_quality.lines_analyzed,
+                coverage_ratio: (existing.analysis_quality.coverage_ratio
+                    + new.analysis_quality.coverage_ratio)
+                    / 2.0,
+                evidence_count: existing.analysis_quality.evidence_count
+                    + new.analysis_quality.evidence_count,
+                validated_refs: existing.analysis_quality.validated_refs
+                    + new.analysis_quality.validated_refs,
+                filtered_hallucinations: existing.analysis_quality.filtered_hallucinations
+                    + new.analysis_quality.filtered_hallucinations,
+                confidence_score: (existing.analysis_quality.confidence_score
+                    + new.analysis_quality.confidence_score)
+                    / 2.0,
             },
         }
     }
 
-    async fn run_multi_agent_analysis(&self, detection: &ProjectDetection) -> Result<Option<DeepAnalysisResult>> {
+    async fn run_multi_agent_analysis(
+        &self,
+        detection: &ProjectDetection,
+    ) -> Result<Option<DeepAnalysisResult>> {
         let file_registry = self.get_file_registry().await?;
 
         // Build analysis context
-        let file_list: Vec<String> = file_registry.all_files()
+        let file_list: Vec<String> = file_registry
+            .all_files()
             .take(self.config.analysis.depth.max_files().min(100))
             .cloned()
             .collect();
@@ -706,9 +749,11 @@ impl AdaptivePipeline {
         for file in file_list.iter().take(50) {
             let path = self.project_root.join(file.as_str());
             if let Ok(content) = tokio::fs::read_to_string(&path).await
-                && content.len() < 50000 { // Skip very large files
-                    file_contents.insert(file.clone(), content);
-                }
+                && content.len() < 50000
+            {
+                // Skip very large files
+                file_contents.insert(file.clone(), content);
+            }
         }
 
         let context = AnalysisContext {
@@ -716,7 +761,11 @@ impl AdaptivePipeline {
             file_list,
             file_contents,
             project_type: detection.primary_type.as_str().to_string(),
-            languages: detection.languages.iter().map(|l| l.language.clone()).collect(),
+            languages: detection
+                .languages
+                .iter()
+                .map(|l| l.language.clone())
+                .collect(),
         };
 
         let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
@@ -772,8 +821,7 @@ impl AdaptivePipeline {
                         .filter(|f| file_registry.contains(f) || file_registry.directory_exists(f))
                         .collect();
 
-                    if !valid_files.is_empty() {
-                        let file_ref = valid_files.first().unwrap();
+                    if let Some(file_ref) = valid_files.first() {
                         body.push_str(&format!(
                             "{}. {} (see @{})\n",
                             step.order, step.action, file_ref
@@ -822,8 +870,7 @@ impl AdaptivePipeline {
                 }
             }
 
-            let skill = Skill::new(&planned.name, &planned.trigger, body)
-                .with_user_invocable(true);
+            let skill = Skill::new(&planned.name, &planned.trigger, body).with_user_invocable(true);
 
             skills.push(skill);
         }
@@ -842,13 +889,16 @@ impl AdaptivePipeline {
 
         for planned in &enriched_plan.plan.agents_plan.planned_agents {
             // Get enriched knowledge for this agent
-            let knowledge = enriched_plan
-                .agent_knowledge
-                .get(&planned.name)
-                .cloned();
+            let knowledge = enriched_plan.agent_knowledge.get(&planned.name).cloned();
 
             let agent = self
-                .build_agent_with_knowledge(&planned.name, &planned.role, detection, monorepo, knowledge)
+                .build_agent_with_knowledge(
+                    &planned.name,
+                    &planned.role,
+                    detection,
+                    monorepo,
+                    knowledge,
+                )
                 .await?;
             agents.push(agent);
         }
@@ -1042,10 +1092,10 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
     async fn get_key_paths(&self, detection: &ProjectDetection) -> Vec<String> {
         let mut paths = Vec::new();
 
-        if let Ok(refs) = ReferenceExtractor::extract_key_references(
-            &self.project_root,
-            detection.primary_type,
-        ).await {
+        if let Ok(refs) =
+            ReferenceExtractor::extract_key_references(&self.project_root, detection.primary_type)
+                .await
+        {
             for r in refs.into_iter().take(6) {
                 paths.push(r.to_string_ref());
             }
@@ -1117,10 +1167,10 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
     }
 
     pub async fn write_output(&self, output: &AdaptivePipelineOutput) -> Result<()> {
-        // Write CLAUDE.md
-        fs::write(
-            self.project_root.join("CLAUDE.md"),
-            output.claude_md.to_markdown(),
+        // Write CLAUDE.md atomically
+        atomic_write(
+            &self.project_root.join("CLAUDE.md"),
+            output.claude_md.to_markdown().as_bytes(),
         )
         .await?;
 
@@ -1141,39 +1191,58 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
         fs::create_dir_all(&skills_dir).await?;
         fs::create_dir_all(&agents_dir).await?;
 
-        // Write plugin manifest
+        // Write plugin manifest atomically
         let manifest_json = output.plugin.manifest.to_json().map_err(|e| {
             crate::types::ClaudegenError::Config(format!(
                 "Failed to serialize plugin manifest: {e}"
             ))
         })?;
-        fs::write(claude_plugin_dir.join("plugin.json"), manifest_json).await?;
+        atomic_write(
+            &claude_plugin_dir.join("plugin.json"),
+            manifest_json.as_bytes(),
+        )
+        .await?;
 
         // Write skills
         for skill in &output.plugin.skills {
             let skill_dir = skills_dir.join(&skill.name);
             fs::create_dir_all(&skill_dir).await?;
-            fs::write(skill_dir.join("SKILL.md"), skill.to_markdown()).await?;
+            atomic_write(&skill_dir.join("SKILL.md"), skill.to_markdown().as_bytes()).await?;
         }
 
         // Write agents
         for agent in &output.plugin.agents {
-            fs::write(
-                agents_dir.join(format!("{}.md", agent.name)),
-                agent.to_markdown(),
+            atomic_write(
+                &agents_dir.join(format!("{}.md", agent.name)),
+                agent.to_markdown().as_bytes(),
             )
             .await?;
         }
 
         // Write rules to .claude/rules/
+        // Clean stale rules first to prevent invalid constraints from previous runs
+        let rules_dir = self.project_root.join(".claude").join("rules");
+        if rules_dir.exists() {
+            // Remove all existing .md files to prevent stale rules
+            if let Ok(mut entries) = fs::read_dir(&rules_dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "md")
+                        && let Err(e) = fs::remove_file(&path).await
+                    {
+                        tracing::debug!(path = %path.display(), error = %e, "Failed to remove stale rule");
+                    }
+                }
+            }
+        }
+
         if !output.rules.is_empty() || output.output_plan.strategy.requires_path_rules() {
-            let rules_dir = self.project_root.join(".claude").join("rules");
             fs::create_dir_all(&rules_dir).await?;
 
             for rule in &output.rules {
-                fs::write(
-                    rules_dir.join(format!("{}.md", rule.name)),
-                    rule.to_markdown(),
+                atomic_write(
+                    &rules_dir.join(format!("{}.md", rule.name)),
+                    rule.to_markdown().as_bytes(),
                 )
                 .await?;
             }
@@ -1184,6 +1253,57 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
 
     pub fn project_root(&self) -> &PathBuf {
         &self.project_root
+    }
+
+    /// Write only plugin artifacts (skills, agents, manifest).
+    /// Used when output_dir differs from project_root.
+    pub async fn write_plugin_only(&self, output: &AdaptivePipelineOutput) -> Result<()> {
+        // Create plugin directory structure
+        let plugin_dir = output.plugin.plugin_dir(&self.project_root);
+        let claude_plugin_dir = plugin_dir.join(".claude-plugin");
+        let skills_dir = plugin_dir.join("skills");
+        let agents_dir = plugin_dir.join("agents");
+
+        // Clean old directories
+        for dir in [&skills_dir, &agents_dir] {
+            if dir.exists() {
+                fs::remove_dir_all(dir).await?;
+            }
+        }
+
+        fs::create_dir_all(&claude_plugin_dir).await?;
+        fs::create_dir_all(&skills_dir).await?;
+        fs::create_dir_all(&agents_dir).await?;
+
+        // Write plugin manifest atomically
+        let manifest_json = output.plugin.manifest.to_json().map_err(|e| {
+            crate::types::ClaudegenError::Config(format!(
+                "Failed to serialize plugin manifest: {e}"
+            ))
+        })?;
+        atomic_write(
+            &claude_plugin_dir.join("plugin.json"),
+            manifest_json.as_bytes(),
+        )
+        .await?;
+
+        // Write skills
+        for skill in &output.plugin.skills {
+            let skill_dir = skills_dir.join(&skill.name);
+            fs::create_dir_all(&skill_dir).await?;
+            atomic_write(&skill_dir.join("SKILL.md"), skill.to_markdown().as_bytes()).await?;
+        }
+
+        // Write agents
+        for agent in &output.plugin.agents {
+            atomic_write(
+                &agents_dir.join(format!("{}.md", agent.name)),
+                agent.to_markdown().as_bytes(),
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1200,6 +1320,34 @@ fn to_kebab_case(s: &str) -> String {
         .replace("--", "-")
         .trim_matches('-')
         .to_string()
+}
+
+/// Atomically write content to a file.
+///
+/// Writes to a temporary file in the same directory, syncs to disk,
+/// then renames to the target path. This prevents partial writes on crash.
+async fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    use uuid::Uuid;
+
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    let temp_name = format!(".tmp_{}", Uuid::new_v4());
+    let temp_path = parent.join(&temp_name);
+
+    // Write to temp file
+    let mut file: tokio::fs::File = fs::File::create(&temp_path).await?;
+    file.write_all(content).await?;
+    file.sync_all().await?;
+    drop(file);
+
+    // Atomic rename (same filesystem guarantees atomicity on POSIX)
+    if let Err(e) = fs::rename(&temp_path, path).await {
+        // Clean up temp file on failure
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(crate::types::ClaudegenError::Io(e));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

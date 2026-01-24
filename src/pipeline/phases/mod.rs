@@ -41,16 +41,16 @@ impl OutputStrategy {
 }
 
 pub use constraint_extraction::{
-    AntiPattern, ComplexWorkflow, ExtractedConstraints, Gotcha, HiddenDependency, Severity,
+    AntiPattern, ComplexWorkflow, ExtractedConstraints, Gotcha, HiddenDependency,
 };
 pub use convention_inference::{
     ArchitectureConvention, AsyncPattern, ErrorHandlingPattern, InferredConventions,
     NamingConventions,
 };
-pub use few_shot::{FewShotExample, get_examples, get_claude_md_example, get_skill_example, get_rule_example};
-pub use monorepo_analyzer::{
-    CrossDependency, MonorepoAnalysis, SharedPackage, SubprojectInfo,
+pub use few_shot::{
+    FewShotExample, get_claude_md_example, get_examples, get_rule_example, get_skill_example,
 };
+pub use monorepo_analyzer::{CrossDependency, MonorepoAnalysis, SharedPackage, SubprojectInfo};
 pub use output_router::{AgentsPlan, ClaudeMdPlan, OutputPlan, RulesPlan, SkillsPlan};
 pub use project_detection::{
     DetectionSignal, LanguageInfo, ProjectDetection, ProjectDetector, SignalType, WorkspaceConfig,

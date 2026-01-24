@@ -12,6 +12,7 @@ use tokio::fs;
 use crate::ai::LlmProvider;
 use crate::config::ProjectType;
 use crate::types::Result;
+use crate::types::severity::Severity;
 
 use super::convention_inference::InferredConventions;
 use super::project_detection::ProjectDetection;
@@ -34,15 +35,6 @@ pub struct AntiPattern {
     pub correct_approach: String,
     pub evidence: Vec<Evidence>,
     pub severity: Severity,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Critical,
-    High,
-    Medium,
-    Low,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +130,8 @@ impl ConstraintExtractor {
         detection: &ProjectDetection,
         conventions: &InferredConventions,
     ) -> Result<ExtractedConstraints> {
-        self.extract_with_synthesis(detection, conventions, None).await
+        self.extract_with_synthesis(detection, conventions, None)
+            .await
     }
 
     /// Extract constraints with optional synthesis data for enhanced analysis
@@ -151,8 +144,12 @@ impl ConstraintExtractor {
         let mut constraints = ExtractedConstraints::default();
 
         let static_constraints = self.extract_static(detection).await?;
-        constraints.anti_patterns.extend(static_constraints.anti_patterns);
-        constraints.hidden_dependencies.extend(static_constraints.hidden_dependencies);
+        constraints
+            .anti_patterns
+            .extend(static_constraints.anti_patterns);
+        constraints
+            .hidden_dependencies
+            .extend(static_constraints.hidden_dependencies);
         constraints.gotchas.extend(static_constraints.gotchas);
 
         // Use synthesis data to enhance constraint extraction
@@ -164,14 +161,24 @@ impl ConstraintExtractor {
             .extract_with_llm(detection, conventions)
             .await
             .unwrap_or_default();
-        constraints.anti_patterns.extend(llm_constraints.anti_patterns);
-        constraints.hidden_dependencies.extend(llm_constraints.hidden_dependencies);
-        constraints.complex_workflows.extend(llm_constraints.complex_workflows);
-        constraints.implicit_rules.extend(llm_constraints.implicit_rules);
+        constraints
+            .anti_patterns
+            .extend(llm_constraints.anti_patterns);
+        constraints
+            .hidden_dependencies
+            .extend(llm_constraints.hidden_dependencies);
+        constraints
+            .complex_workflows
+            .extend(llm_constraints.complex_workflows);
+        constraints
+            .implicit_rules
+            .extend(llm_constraints.implicit_rules);
         constraints.gotchas.extend(llm_constraints.gotchas);
 
         constraints.anti_patterns.dedup_by(|a, b| a.name == b.name);
-        constraints.complex_workflows.dedup_by(|a, b| a.name == b.name);
+        constraints
+            .complex_workflows
+            .dedup_by(|a, b| a.name == b.name);
         constraints.gotchas.dedup_by(|a, b| a.title == b.title);
 
         tracing::info!(
@@ -240,12 +247,17 @@ impl ConstraintExtractor {
                         "Consider using this pattern more widely: {}",
                         pattern.usage_guidance
                     ),
-                    evidence: pattern.locations.iter().take(3).map(|loc| Evidence {
-                        file: loc.file.clone(),
-                        line: Some(loc.line),
-                        snippet: Some(loc.snippet.clone()),
-                        context: "Pattern usage found here".to_string(),
-                    }).collect(),
+                    evidence: pattern
+                        .locations
+                        .iter()
+                        .take(3)
+                        .map(|loc| Evidence {
+                            file: loc.file.clone(),
+                            line: Some(loc.line),
+                            snippet: Some(loc.snippet.clone()),
+                            context: "Pattern usage found here".to_string(),
+                        })
+                        .collect(),
                     severity: Severity::Low,
                 });
             }
@@ -262,16 +274,19 @@ impl ConstraintExtractor {
                     .unwrap_or_default(),
                 dependency_type: HiddenDepType::ImplicitOrdering,
                 description: constraint.description.clone(),
-                evidence: constraint.evidence.iter().map(|e| Evidence {
-                    file: e.file.clone(),
-                    line: e.line,
-                    snippet: None,
-                    context: e.context.clone(),
-                }).collect(),
+                evidence: constraint
+                    .evidence
+                    .iter()
+                    .map(|e| Evidence {
+                        file: e.file.clone(),
+                        line: e.line,
+                        snippet: None,
+                        context: e.context.clone(),
+                    })
+                    .collect(),
                 impact: format!(
                     "Violating '{}' constraint: {}",
-                    constraint.title,
-                    constraint.rationale
+                    constraint.title, constraint.rationale
                 ),
             });
         }
@@ -305,28 +320,30 @@ impl ConstraintExtractor {
         Ok(constraints)
     }
 
-    async fn extract_cli_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-    ) -> Result<()> {
+    async fn extract_cli_constraints(&self, constraints: &mut ExtractedConstraints) -> Result<()> {
         if self.project_root.join("Cargo.toml").exists()
             && let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml")).await
-                && content.contains("clap") {
-                    constraints.gotchas.push(Gotcha {
-                        title: "CLI argument changes require version bump consideration".to_string(),
-                        description: "Changing CLI arguments can break scripts that depend on the tool".to_string(),
-                        when: "Adding, removing, or renaming CLI flags/arguments".to_string(),
-                        solution: "Use deprecation warnings before removing flags. Add --help examples.".to_string(),
-                        related_files: vec!["src/cli/".to_string(), "Cargo.toml".to_string()],
-                    });
-                }
+            && content.contains("clap")
+        {
+            constraints.gotchas.push(Gotcha {
+                title: "CLI argument changes require version bump consideration".to_string(),
+                description: "Changing CLI arguments can break scripts that depend on the tool"
+                    .to_string(),
+                when: "Adding, removing, or renaming CLI flags/arguments".to_string(),
+                solution: "Use deprecation warnings before removing flags. Add --help examples."
+                    .to_string(),
+                related_files: vec!["src/cli/".to_string(), "Cargo.toml".to_string()],
+            });
+        }
 
         if self.project_root.join("src/main.rs").exists() {
             constraints.anti_patterns.push(AntiPattern {
                 name: "Direct stdout in library code".to_string(),
                 description: "Using println! or print! in non-CLI modules".to_string(),
-                why_bad: "Makes library code unusable as a dependency, breaks --quiet flags".to_string(),
-                correct_approach: "Use logging (tracing/log) or return data for CLI layer to format".to_string(),
+                why_bad: "Makes library code unusable as a dependency, breaks --quiet flags"
+                    .to_string(),
+                correct_approach:
+                    "Use logging (tracing/log) or return data for CLI layer to format".to_string(),
                 evidence: Vec::new(),
                 severity: Severity::Medium,
             });
@@ -346,7 +363,8 @@ impl ConstraintExtractor {
                 name: "Infrastructure in domain layer".to_string(),
                 description: "Database/HTTP/external service code in domain modules".to_string(),
                 why_bad: "Violates hexagonal architecture, makes testing difficult".to_string(),
-                correct_approach: "Use port interfaces in domain, implement in adapter layer".to_string(),
+                correct_approach: "Use port interfaces in domain, implement in adapter layer"
+                    .to_string(),
                 evidence: Vec::new(),
                 severity: Severity::High,
             });
@@ -372,59 +390,64 @@ impl ConstraintExtractor {
         constraints: &mut ExtractedConstraints,
     ) -> Result<()> {
         if self.project_root.join("package.json").exists()
-            && let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await {
-                if content.contains("orval") || content.contains("openapi-typescript") {
-                    constraints.anti_patterns.push(AntiPattern {
-                        name: "Manual API client modifications".to_string(),
-                        description: "Editing auto-generated API client files".to_string(),
-                        why_bad: "Changes will be lost on next generation".to_string(),
-                        correct_approach: "Modify OpenAPI spec or orval config instead".to_string(),
-                        evidence: Vec::new(),
-                        severity: Severity::High,
-                    });
+            && let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await
+        {
+            if content.contains("orval") || content.contains("openapi-typescript") {
+                constraints.anti_patterns.push(AntiPattern {
+                    name: "Manual API client modifications".to_string(),
+                    description: "Editing auto-generated API client files".to_string(),
+                    why_bad: "Changes will be lost on next generation".to_string(),
+                    correct_approach: "Modify OpenAPI spec or orval config instead".to_string(),
+                    evidence: Vec::new(),
+                    severity: Severity::High,
+                });
 
-                    constraints.complex_workflows.push(ComplexWorkflow {
-                        name: "API Client Regeneration".to_string(),
-                        description: "Regenerate TypeScript API clients from OpenAPI spec".to_string(),
-                        trigger: "Backend API changes".to_string(),
-                        steps: vec![
-                            WorkflowStep {
-                                order: 1,
-                                action: "Ensure backend OpenAPI spec is updated".to_string(),
-                                files_involved: vec!["openapi.yaml".to_string()],
-                                commands: Vec::new(),
-                                notes: Vec::new(),
-                            },
-                            WorkflowStep {
-                                order: 2,
-                                action: "Run orval to regenerate clients".to_string(),
-                                files_involved: Vec::new(),
-                                commands: vec!["pnpm orval".to_string()],
-                                notes: vec!["Check for breaking type changes".to_string()],
-                            },
-                            WorkflowStep {
-                                order: 3,
-                                action: "Update affected components".to_string(),
-                                files_involved: vec!["src/**/*.tsx".to_string()],
-                                commands: Vec::new(),
-                                notes: vec!["TypeScript will show errors for breaking changes".to_string()],
-                            },
-                        ],
-                        gotchas: vec!["Never manually edit generated files".to_string()],
-                        automation_potential: 0.7,
-                    });
-                }
-
-                if content.contains("\"react\"") {
-                    constraints.gotchas.push(Gotcha {
-                        title: "State management boundaries".to_string(),
-                        description: "Server state vs client state handling".to_string(),
-                        when: "Adding new data fetching or state".to_string(),
-                        solution: "Use TanStack Query for server state, Context/useState for client state".to_string(),
-                        related_files: vec!["src/hooks/".to_string(), "src/context/".to_string()],
-                    });
-                }
+                constraints.complex_workflows.push(ComplexWorkflow {
+                    name: "API Client Regeneration".to_string(),
+                    description: "Regenerate TypeScript API clients from OpenAPI spec".to_string(),
+                    trigger: "Backend API changes".to_string(),
+                    steps: vec![
+                        WorkflowStep {
+                            order: 1,
+                            action: "Ensure backend OpenAPI spec is updated".to_string(),
+                            files_involved: vec!["openapi.yaml".to_string()],
+                            commands: Vec::new(),
+                            notes: Vec::new(),
+                        },
+                        WorkflowStep {
+                            order: 2,
+                            action: "Run orval to regenerate clients".to_string(),
+                            files_involved: Vec::new(),
+                            commands: vec!["pnpm orval".to_string()],
+                            notes: vec!["Check for breaking type changes".to_string()],
+                        },
+                        WorkflowStep {
+                            order: 3,
+                            action: "Update affected components".to_string(),
+                            files_involved: vec!["src/**/*.tsx".to_string()],
+                            commands: Vec::new(),
+                            notes: vec![
+                                "TypeScript will show errors for breaking changes".to_string(),
+                            ],
+                        },
+                    ],
+                    gotchas: vec!["Never manually edit generated files".to_string()],
+                    automation_potential: 0.7,
+                });
             }
+
+            if content.contains("\"react\"") {
+                constraints.gotchas.push(Gotcha {
+                    title: "State management boundaries".to_string(),
+                    description: "Server state vs client state handling".to_string(),
+                    when: "Adding new data fetching or state".to_string(),
+                    solution:
+                        "Use TanStack Query for server state, Context/useState for client state"
+                            .to_string(),
+                    related_files: vec!["src/hooks/".to_string(), "src/context/".to_string()],
+                });
+            }
+        }
 
         Ok(())
     }
@@ -472,7 +495,8 @@ impl ConstraintExtractor {
                 name: "Leaking internal types".to_string(),
                 description: "Exposing internal implementation details in public API".to_string(),
                 why_bad: "Couples users to implementation, prevents refactoring".to_string(),
-                correct_approach: "Only expose necessary types, use pub(crate) for internals".to_string(),
+                correct_approach: "Only expose necessary types, use pub(crate) for internals"
+                    .to_string(),
                 evidence: Vec::new(),
                 severity: Severity::Medium,
             });
@@ -578,16 +602,19 @@ impl ConstraintExtractor {
                     title: "Feature flag interactions".to_string(),
                     description: "Features may have unexpected interactions".to_string(),
                     when: "Adding new feature flags or enabling combinations".to_string(),
-                    solution: "Test with various feature combinations, document dependencies".to_string(),
+                    solution: "Test with various feature combinations, document dependencies"
+                        .to_string(),
                     related_files: vec!["Cargo.toml".to_string()],
                 });
             }
             "typescript" | "javascript" => {
                 constraints.anti_patterns.push(AntiPattern {
                     name: "Type assertions abuse".to_string(),
-                    description: "Using `as any` or `as unknown as T` to bypass type checking".to_string(),
+                    description: "Using `as any` or `as unknown as T` to bypass type checking"
+                        .to_string(),
                     why_bad: "Defeats purpose of TypeScript, hides bugs".to_string(),
-                    correct_approach: "Fix the underlying type issue or use proper type guards".to_string(),
+                    correct_approach: "Fix the underlying type issue or use proper type guards"
+                        .to_string(),
                     evidence: Vec::new(),
                     severity: Severity::Medium,
                 });
@@ -615,12 +642,12 @@ impl ConstraintExtractor {
                 if name.contains(pattern) {
                     return true;
                 }
-                if entry.path().is_dir() && !name.starts_with('.')
-                    && Box::pin(self.check_pattern_exists(&entry.path(), pattern, depth + 1))
-                        .await
-                    {
-                        return true;
-                    }
+                if entry.path().is_dir()
+                    && !name.starts_with('.')
+                    && Box::pin(self.check_pattern_exists(&entry.path(), pattern, depth + 1)).await
+                {
+                    return true;
+                }
             }
         }
         false
@@ -707,7 +734,9 @@ impl ConstraintExtractor {
 
         let response = self.provider.generate(&prompt, &schema).await?;
 
-        let content_str = response.content.as_str()
+        let content_str = response
+            .content
+            .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| serde_json::to_string(&response.content).unwrap_or_default());
 
@@ -898,11 +927,27 @@ IMPORTANT:
                     if !name.is_empty() {
                         constraints.anti_patterns.push(AntiPattern {
                             name: name.to_string(),
-                            description: ap.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            why_bad: ap.get("why_bad").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            correct_approach: ap.get("correct_approach").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            description: ap
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            why_bad: ap
+                                .get("why_bad")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            correct_approach: ap
+                                .get("correct_approach")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             evidence: Vec::new(),
-                            severity: match ap.get("severity").and_then(|v| v.as_str()).unwrap_or("medium") {
+                            severity: match ap
+                                .get("severity")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("medium")
+                            {
                                 "critical" => Severity::Critical,
                                 "high" => Severity::High,
                                 "low" => Severity::Low,
@@ -920,12 +965,29 @@ IMPORTANT:
                     if !title.is_empty() {
                         constraints.gotchas.push(Gotcha {
                             title: title.to_string(),
-                            description: g.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            when: g.get("when").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            solution: g.get("solution").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            related_files: g.get("related_files")
+                            description: g
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            when: g
+                                .get("when")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            solution: g
+                                .get("solution")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            related_files: g
+                                .get("related_files")
                                 .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
                         });
                     }
@@ -937,33 +999,64 @@ IMPORTANT:
                 for wf in workflows {
                     let name = wf.get("name").and_then(|v| v.as_str()).unwrap_or_default();
                     if !name.is_empty() {
-                        let steps: Vec<WorkflowStep> = wf.get("steps")
+                        let steps: Vec<WorkflowStep> = wf
+                            .get("steps")
                             .and_then(|v| v.as_array())
                             .map(|arr| {
-                                arr.iter().map(|s| WorkflowStep {
-                                    order: s.get("order").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                                    action: s.get("action").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                                    files_involved: s.get("files_involved")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                                        .unwrap_or_default(),
-                                    commands: s.get("commands")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                                        .unwrap_or_default(),
-                                    notes: Vec::new(),
-                                }).collect()
+                                arr.iter()
+                                    .map(|s| WorkflowStep {
+                                        order: s.get("order").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as u32,
+                                        action: s
+                                            .get("action")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        files_involved: s
+                                            .get("files_involved")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|v| v.as_str().map(String::from))
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        commands: s
+                                            .get("commands")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|v| v.as_str().map(String::from))
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        notes: Vec::new(),
+                                    })
+                                    .collect()
                             })
                             .unwrap_or_default();
 
                         constraints.complex_workflows.push(ComplexWorkflow {
                             name: name.to_string(),
-                            description: wf.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                            trigger: wf.get("trigger").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            description: wf
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            trigger: wf
+                                .get("trigger")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             steps,
-                            gotchas: wf.get("gotchas")
+                            gotchas: wf
+                                .get("gotchas")
                                 .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
                             automation_potential: 0.7,
                         });
@@ -974,16 +1067,30 @@ IMPORTANT:
             // Parse hidden dependencies
             if let Some(deps) = json.get("hidden_dependencies").and_then(|v| v.as_array()) {
                 for dep in deps {
-                    let source = dep.get("source").and_then(|v| v.as_str()).unwrap_or_default();
-                    let target = dep.get("target").and_then(|v| v.as_str()).unwrap_or_default();
+                    let source = dep
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let target = dep
+                        .get("target")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
                     if !source.is_empty() && !target.is_empty() {
                         constraints.hidden_dependencies.push(HiddenDependency {
                             source: source.to_string(),
                             target: target.to_string(),
                             dependency_type: HiddenDepType::RuntimeDependency,
-                            description: dep.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            description: dep
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                             evidence: Vec::new(),
-                            impact: dep.get("impact").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                            impact: dep
+                                .get("impact")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
                         });
                     }
                 }
@@ -1012,8 +1119,7 @@ IMPORTANT:
                         constraints.anti_patterns.push(AntiPattern {
                             name: name.split(':').next().unwrap_or(name).to_string(),
                             description: name.to_string(),
-                            why_bad: Self::extract_field(block, "Why bad")
-                                .unwrap_or_default(),
+                            why_bad: Self::extract_field(block, "Why bad").unwrap_or_default(),
                             correct_approach: Self::extract_field(block, "Instead")
                                 .unwrap_or_default(),
                             evidence: Vec::new(),
@@ -1033,8 +1139,7 @@ IMPORTANT:
                             title: title.split(':').next().unwrap_or(title).to_string(),
                             description: title.to_string(),
                             when: Self::extract_field(block, "when").unwrap_or_default(),
-                            solution: Self::extract_field(block, "Solution")
-                                .unwrap_or_default(),
+                            solution: Self::extract_field(block, "Solution").unwrap_or_default(),
                             related_files: Vec::new(),
                         });
                     }

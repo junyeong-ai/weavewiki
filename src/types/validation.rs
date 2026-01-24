@@ -3,35 +3,35 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity {
+pub enum DiagnosticLevel {
     Info,
     Warning,
     Error,
 }
 
-impl Severity {
+impl DiagnosticLevel {
     pub fn is_error(&self) -> bool {
-        matches!(self, Severity::Error)
+        matches!(self, DiagnosticLevel::Error)
     }
 
     pub fn is_warning(&self) -> bool {
-        matches!(self, Severity::Warning)
+        matches!(self, DiagnosticLevel::Warning)
     }
 }
 
-impl fmt::Display for Severity {
+impl fmt::Display for DiagnosticLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Severity::Error => write!(f, "ERROR"),
-            Severity::Warning => write!(f, "WARN"),
-            Severity::Info => write!(f, "INFO"),
+            DiagnosticLevel::Error => write!(f, "ERROR"),
+            DiagnosticLevel::Warning => write!(f, "WARN"),
+            DiagnosticLevel::Info => write!(f, "INFO"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationIssue {
-    pub severity: Severity,
+    pub severity: DiagnosticLevel,
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,7 +41,7 @@ pub struct ValidationIssue {
 impl ValidationIssue {
     pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            severity: Severity::Error,
+            severity: DiagnosticLevel::Error,
             code: code.into(),
             message: message.into(),
             location: None,
@@ -50,7 +50,7 @@ impl ValidationIssue {
 
     pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            severity: Severity::Warning,
+            severity: DiagnosticLevel::Warning,
             code: code.into(),
             message: message.into(),
             location: None,
@@ -59,7 +59,7 @@ impl ValidationIssue {
 
     pub fn info(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            severity: Severity::Info,
+            severity: DiagnosticLevel::Info,
             code: code.into(),
             message: message.into(),
             location: None,
@@ -171,9 +171,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_severity_ordering() {
-        assert!(Severity::Error > Severity::Warning);
-        assert!(Severity::Warning > Severity::Info);
+    fn test_diagnostic_level_ordering() {
+        assert!(DiagnosticLevel::Error > DiagnosticLevel::Warning);
+        assert!(DiagnosticLevel::Warning > DiagnosticLevel::Info);
     }
 
     #[test]

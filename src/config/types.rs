@@ -12,6 +12,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::types::Severity;
+
 // =============================================================================
 // PRESETS
 // =============================================================================
@@ -33,20 +35,43 @@ pub enum ConfigPreset {
 
 impl ConfigPreset {
     pub fn apply(&self, config: &mut Config) {
+        // Apply adaptive iteration config for all presets
+        config.refinement.adaptive_iteration = AdaptiveIterationConfig::for_preset(*self);
+
         match self {
             Self::Quick => {
                 config.llm.default_model = "claude-haiku-4-5-20251001".into();
                 config.value.min_overall = 0.5;
                 config.convergence.max_iterations = 10;
                 config.convergence.consecutive_passes = 1;
+                config.convergence.quality_floor = 0.45;
+                config.convergence.target_quality = 0.60;
                 config.analysis.depth = AnalysisDepth::Fast;
+                config.quality.min_score = 0.5;
+                config.quality.target_score = 0.6;
+                config.deep_review.required_passes = 1;
+                config.multi_agent.enabled = false;
+                config.multi_agent.specialist_timeout_secs = 60;
+                config.learning.enabled = false;
+                config.quality_loop.max_iterations = 5;
+                config.timeout.specialist_timeout_secs = 60;
             }
             Self::Standard => {
                 config.llm.default_model = "claude-sonnet-4-5-20250929".into();
                 config.value.min_overall = 0.6;
                 config.convergence.max_iterations = 30;
                 config.convergence.consecutive_passes = 2;
+                config.convergence.quality_floor = 0.55;
+                config.convergence.target_quality = 0.80;
                 config.analysis.depth = AnalysisDepth::Standard;
+                config.quality.min_score = 0.6;
+                config.quality.target_score = 0.8;
+                config.deep_review.required_passes = 2;
+                config.multi_agent.enabled = true;
+                config.multi_agent.specialist_timeout_secs = 120;
+                config.learning.enabled = true;
+                config.quality_loop.max_iterations = 10;
+                config.timeout.specialist_timeout_secs = 120;
             }
             Self::Thorough => {
                 config.llm.default_model = "claude-sonnet-4-5-20250929".into();
@@ -54,7 +79,17 @@ impl ConfigPreset {
                 config.value.min_overall = 0.7;
                 config.convergence.max_iterations = 50;
                 config.convergence.consecutive_passes = 2;
+                config.convergence.quality_floor = 0.65;
+                config.convergence.target_quality = 0.90;
                 config.analysis.depth = AnalysisDepth::Complete;
+                config.quality.min_score = 0.7;
+                config.quality.target_score = 0.9;
+                config.deep_review.required_passes = 2;
+                config.multi_agent.enabled = true;
+                config.multi_agent.specialist_timeout_secs = 180;
+                config.learning.enabled = true;
+                config.quality_loop.max_iterations = 20;
+                config.timeout.specialist_timeout_secs = 180;
             }
             Self::Exhaustive => {
                 config.llm.default_model = "claude-opus-4-5-20251101".into();
@@ -62,9 +97,33 @@ impl ConfigPreset {
                 config.value.min_overall = 0.8;
                 config.convergence.max_iterations = 100;
                 config.convergence.consecutive_passes = 3;
+                config.convergence.quality_floor = 0.75;
+                config.convergence.target_quality = 0.95;
                 config.analysis.depth = AnalysisDepth::Complete;
-                config.performance.max_runtime_hours = 336; // 2 weeks
+                config.performance.max_runtime_hours = 336;
+                config.quality.min_score = 0.8;
+                config.quality.target_score = 0.95;
+                config.deep_review.required_passes = 3;
+                config.multi_agent.enabled = true;
+                config.multi_agent.specialist_timeout_secs = 300;
+                config.learning.enabled = true;
+                config.quality_loop.max_iterations = 50;
+                config.timeout.specialist_timeout_secs = 300;
             }
+        }
+    }
+}
+
+impl std::str::FromStr for ConfigPreset {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "quick" => Ok(Self::Quick),
+            "standard" => Ok(Self::Standard),
+            "thorough" => Ok(Self::Thorough),
+            "exhaustive" => Ok(Self::Exhaustive),
+            _ => Err(format!("Unknown preset: {s}")),
         }
     }
 }
@@ -82,8 +141,6 @@ pub struct Config {
     pub value: ValueConfig,
     pub convergence: ConvergenceConfig,
     pub domain: DomainConfig,
-    pub tiers: TierConfig,
-    pub artifacts: ArtifactConfigs,
     pub llm: LlmConfig,
     pub analysis: AnalysisConfig,
     pub insight: InsightConfig,
@@ -92,6 +149,21 @@ pub struct Config {
     pub project: ProjectConfig,
     pub output: OutputConfig,
     pub validation: ValidationConfig,
+    pub circuit_breaker: CircuitBreakerConfig,
+    pub refinement: RefinementConfig,
+    pub learning: LearningConfig,
+    pub semantic_validation: SemanticValidationConfig,
+    pub multi_agent: MultiAgentConfig,
+    pub usability: UsabilityConfig,
+    pub few_shot: FewShotConfig,
+    pub quality: QualityConfig,
+    pub deep_review: DeepReviewConfig,
+    pub cross_validation: CrossValidationConfig,
+    pub quality_loop: QualityLoopConfig,
+    pub deep_analysis: DeepAnalysisConfig,
+    pub structural_validation: StructuralValidationConfig,
+    pub cross_artifact: CrossArtifactConfig,
+    pub timeout: TimeoutConfig,
 }
 
 impl Default for Config {
@@ -103,8 +175,6 @@ impl Default for Config {
             value: ValueConfig::default(),
             convergence: ConvergenceConfig::default(),
             domain: DomainConfig::default(),
-            tiers: TierConfig::default(),
-            artifacts: ArtifactConfigs::default(),
             llm: LlmConfig::default(),
             analysis: AnalysisConfig::default(),
             insight: InsightConfig::default(),
@@ -113,6 +183,21 @@ impl Default for Config {
             project: ProjectConfig::default(),
             output: OutputConfig::default(),
             validation: ValidationConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
+            refinement: RefinementConfig::default(),
+            learning: LearningConfig::default(),
+            semantic_validation: SemanticValidationConfig::default(),
+            multi_agent: MultiAgentConfig::default(),
+            usability: UsabilityConfig::default(),
+            few_shot: FewShotConfig::default(),
+            quality: QualityConfig::default(),
+            deep_review: DeepReviewConfig::default(),
+            cross_validation: CrossValidationConfig::default(),
+            quality_loop: QualityLoopConfig::default(),
+            deep_analysis: DeepAnalysisConfig::default(),
+            structural_validation: StructuralValidationConfig::default(),
+            cross_artifact: CrossArtifactConfig::default(),
+            timeout: TimeoutConfig::default(),
         }
     }
 }
@@ -169,16 +254,7 @@ impl Config {
             )));
         }
 
-        // 2. Clean pass: max_attempts must allow convergence
-        if self.validation.clean_pass.max_attempts < self.validation.clean_pass.consecutive_passes {
-            return Err(ClaudegenError::Config(format!(
-                "validation.clean_pass.max_attempts ({}) must be >= consecutive_passes ({})",
-                self.validation.clean_pass.max_attempts,
-                self.validation.clean_pass.consecutive_passes
-            )));
-        }
-
-        // 3. Deep review: max_attempts must allow convergence (derived config)
+        // 2. Deep review: max_attempts must allow convergence (derived config)
         let deep_review = self.deep_review();
         if deep_review.max_attempts < deep_review.required_passes {
             return Err(ClaudegenError::Config(format!(
@@ -441,6 +517,12 @@ pub struct ConvergenceConfig {
     pub require_formal_pass: bool,
     /// Cross-artifact validation must pass
     pub require_cross_artifact_pass: bool,
+    /// Minimum acceptable quality floor (can converge without full dimension pass)
+    pub quality_floor: f32,
+    /// Target quality to aim for
+    pub target_quality: f32,
+    /// Whether early_exit bypasses dimension requirements
+    pub early_exit_bypasses_dimensions: bool,
 }
 
 impl Default for ConvergenceConfig {
@@ -454,6 +536,9 @@ impl Default for ConvergenceConfig {
             min_improvement: 0.01,
             require_formal_pass: true,
             require_cross_artifact_pass: true,
+            quality_floor: 0.55,
+            target_quality: 0.80,
+            early_exit_bypasses_dimensions: true,
         }
     }
 }
@@ -475,98 +560,6 @@ impl ConvergenceConfig {
         }
 
         Ok(())
-    }
-}
-
-/// Current convergence state
-#[derive(Debug, Clone, Default)]
-pub struct ConvergenceState {
-    pub iteration: usize,
-    pub consecutive_pass_count: usize,
-    pub oscillation_count: usize,
-    pub stagnation_count: usize,
-    pub last_score: f32,
-    pub score_history: Vec<f32>,
-}
-
-impl ConvergenceState {
-    pub fn record_result(&mut self, passed: bool, score: f32) {
-        self.iteration += 1;
-
-        if passed {
-            self.consecutive_pass_count += 1;
-        } else {
-            self.consecutive_pass_count = 0;
-        }
-
-        // Detect oscillation
-        if self.score_history.len() >= 2 {
-            let prev = self.score_history[self.score_history.len() - 1];
-            let prev_prev = self.score_history[self.score_history.len() - 2];
-            if (score - prev_prev).abs() < 0.01 && (score - prev).abs() > 0.05 {
-                self.oscillation_count += 1;
-            }
-        }
-
-        // Detect stagnation
-        let improvement = score - self.last_score;
-        if improvement.abs() < 0.01 {
-            self.stagnation_count += 1;
-        } else {
-            self.stagnation_count = 0;
-        }
-
-        self.last_score = score;
-        self.score_history.push(score);
-    }
-
-    pub fn should_terminate(&self, config: &ConvergenceConfig) -> ConvergenceStatus {
-        // Check max iterations
-        if self.iteration >= config.max_iterations {
-            return ConvergenceStatus::MaxIterationsReached;
-        }
-
-        // Check oscillation
-        if self.oscillation_count >= config.max_oscillations {
-            return ConvergenceStatus::Oscillating;
-        }
-
-        // Check stagnation
-        if self.stagnation_count >= config.stagnation_patience {
-            return ConvergenceStatus::Stagnated;
-        }
-
-        // Check early exit
-        if self.last_score >= config.early_exit_threshold {
-            return ConvergenceStatus::EarlyExit;
-        }
-
-        // Check stability (consecutive passes)
-        if self.consecutive_pass_count >= config.consecutive_passes {
-            return ConvergenceStatus::Converged;
-        }
-
-        ConvergenceStatus::InProgress
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConvergenceStatus {
-    InProgress,
-    Converged,
-    EarlyExit,
-    MaxIterationsReached,
-    Oscillating,
-    Stagnated,
-}
-
-impl ConvergenceStatus {
-    pub fn is_terminal(&self) -> bool {
-        !matches!(self, Self::InProgress)
-    }
-
-    pub fn is_success(&self) -> bool {
-        matches!(self, Self::Converged | Self::EarlyExit)
     }
 }
 
@@ -641,307 +634,6 @@ pub struct TermDefinition {
 }
 
 // =============================================================================
-// TIER CONFIG - Value classification patterns
-// =============================================================================
-
-/// Patterns for classifying content value
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TierConfig {
-    /// Tier 0: Immediately reject (generic knowledge)
-    pub tier0: TierPatterns,
-    /// Tier 2: Medium value (requires analysis)
-    pub tier2: TierPatterns,
-    /// Tier 3: High value (must keep)
-    pub tier3: TierPatterns,
-}
-
-impl Default for TierConfig {
-    fn default() -> Self {
-        Self {
-            tier0: TierPatterns::default_tier0(),
-            tier2: TierPatterns::default_tier2(),
-            tier3: TierPatterns::default_tier3(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TierPatterns {
-    /// Keywords that indicate this tier
-    pub keywords: Vec<String>,
-    /// Regex patterns for matching
-    pub patterns: Vec<String>,
-}
-
-impl TierPatterns {
-    /// Default patterns for Tier 0 (reject)
-    pub fn default_tier0() -> Self {
-        Self {
-            keywords: vec![
-                "best practices".into(),
-                "clean code".into(),
-                "follow conventions".into(),
-                "write tests".into(),
-                "handle errors".into(),
-                "cargo build".into(),
-                "npm install".into(),
-                "pip install".into(),
-                "go build".into(),
-                "docker build".into(),
-            ],
-            patterns: vec![
-                r"use `?[a-z]+`? (for|to) (build|test|run)".into(),
-                r"(always|should) (write|add|include) (tests|comments|docs)".into(),
-            ],
-        }
-    }
-
-    /// Default patterns for Tier 2 (medium value - requires analysis)
-    pub fn default_tier2() -> Self {
-        Self {
-            keywords: vec![
-                "convention".into(),
-                "pattern".into(),
-                "approach".into(),
-                "strategy".into(),
-                "recommended".into(),
-                "preferred".into(),
-                "idiom".into(),
-                "style guide".into(),
-            ],
-            patterns: vec![
-                r"(we|this project) (use|follow|prefer)".into(),
-                r"(standard|typical|usual) (way|approach|pattern)".into(),
-                r"by convention".into(),
-            ],
-        }
-    }
-
-    /// Default patterns for Tier 3 (high value)
-    pub fn default_tier3() -> Self {
-        Self {
-            keywords: vec![
-                "must".into(),
-                "never".into(),
-                "critical".into(),
-                "constraint".into(),
-                "breaks if".into(),
-                "fails when".into(),
-                "required for".into(),
-                "gotcha".into(),
-                "pitfall".into(),
-                "hidden".into(),
-                "order matters".into(),
-                "race condition".into(),
-                "deadlock".into(),
-            ],
-            patterns: vec![
-                r"(must|always) .+ (before|after) .+".into(),
-                r"(never|do not|don't) .+ (without|unless) .+".into(),
-                r"(will|can) (fail|break|crash) (if|when|unless)".into(),
-            ],
-        }
-    }
-
-    pub fn matches(&self, content: &str) -> bool {
-        let lower = content.to_lowercase();
-
-        // Check keywords
-        if self.keywords.iter().any(|k| lower.contains(&k.to_lowercase())) {
-            return true;
-        }
-
-        // Check patterns (compile lazily - this could be optimized with caching)
-        for pattern in &self.patterns {
-            if let Ok(re) = regex::Regex::new(pattern)
-                && re.is_match(&lower) {
-                    return true;
-                }
-        }
-
-        false
-    }
-}
-
-// =============================================================================
-// ARTIFACT CONFIGS
-// =============================================================================
-
-/// Per-artifact-type configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-pub struct ArtifactConfigs {
-    pub claude_md: ClaudeMdConfig,
-    pub rules: RulesConfig,
-    pub skills: SkillsConfig,
-    pub agents: AgentsConfig,
-}
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ClaudeMdConfig {
-    /// Required sections
-    pub sections: Vec<String>,
-    /// Minimum file references
-    pub min_file_refs: usize,
-    /// Include architecture diagram
-    pub include_diagram: bool,
-}
-
-impl Default for ClaudeMdConfig {
-    fn default() -> Self {
-        Self {
-            sections: vec![
-                "Core Abstraction".into(),
-                "Critical Constraints".into(),
-                "Architecture Intent".into(),
-                "Gotchas".into(),
-            ],
-            min_file_refs: 5,
-            include_diagram: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RulesConfig {
-    /// Rule types to extract
-    pub types: Vec<RuleType>,
-    /// Minimum evidence references per rule
-    pub min_evidence_refs: usize,
-    /// Require "why" explanation
-    pub require_why: bool,
-    /// Require example (correct/wrong)
-    pub require_example: bool,
-}
-
-impl Default for RulesConfig {
-    fn default() -> Self {
-        Self {
-            types: vec![
-                RuleType::Technical,
-                RuleType::Business,
-                RuleType::Security,
-                RuleType::Compliance,
-            ],
-            min_evidence_refs: 1,
-            require_why: true,
-            require_example: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum RuleType {
-    Technical,
-    Business,
-    Security,
-    Compliance,
-}
-
-impl RuleType {
-    pub fn all() -> Vec<Self> {
-        vec![Self::Technical, Self::Business, Self::Security, Self::Compliance]
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SkillsConfig {
-    /// Minimum evidence references per skill
-    pub min_evidence_refs: usize,
-    /// Require context section
-    pub require_context: bool,
-    /// Require verification checklist
-    pub require_verification: bool,
-    /// Minimum steps in task section
-    pub min_steps: usize,
-}
-
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            min_evidence_refs: 2,
-            require_context: true,
-            require_verification: true,
-            min_steps: 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AgentsConfig {
-    /// Minimum evidence references per agent
-    pub min_evidence_refs: usize,
-    /// Require domain expertise section
-    pub require_domain_expertise: bool,
-    /// Default tools for agents
-    pub default_tools: Vec<String>,
-    /// Model mapping by role patterns
-    pub role_model_mapping: HashMap<String, AgentModel>,
-}
-
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        let mut role_model_mapping = HashMap::new();
-        role_model_mapping.insert("architect".into(), AgentModel::Opus);
-        role_model_mapping.insert("design".into(), AgentModel::Opus);
-        role_model_mapping.insert("debug".into(), AgentModel::Sonnet);
-        role_model_mapping.insert("review".into(), AgentModel::Sonnet);
-
-        Self {
-            min_evidence_refs: 3,
-            require_domain_expertise: true,
-            default_tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
-            role_model_mapping,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentModel {
-    Haiku,
-    #[default]
-    Sonnet,
-    Opus,
-}
-
-impl AgentModel {
-    pub fn model_id(&self) -> &'static str {
-        match self {
-            Self::Haiku => "claude-haiku-4-5-20251001",
-            Self::Sonnet => "claude-sonnet-4-5-20250929",
-            Self::Opus => "claude-opus-4-5-20251101",
-        }
-    }
-
-    pub fn to_types_model(&self) -> crate::types::AgentModel {
-        match self {
-            Self::Haiku => crate::types::AgentModel::Haiku,
-            Self::Sonnet => crate::types::AgentModel::Sonnet,
-            Self::Opus => crate::types::AgentModel::Opus,
-        }
-    }
-}
-
-impl std::fmt::Display for AgentModel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Haiku => write!(f, "haiku"),
-            Self::Sonnet => write!(f, "sonnet"),
-            Self::Opus => write!(f, "opus"),
-        }
-    }
-}
-
-// =============================================================================
 // LLM CONFIG
 // =============================================================================
 
@@ -1011,7 +703,7 @@ impl Default for ContextWindowConfig {
     fn default() -> Self {
         Self {
             auth_mode: AuthModeConfig::OAuth, // Default to OAuth (Claude Code CLI)
-            use_extended_context: false,       // Disabled by default
+            use_extended_context: false,      // Disabled by default
             override_window_size: None,
             input_ratio: 0.90,
             safety_margin_tokens: 10_000,
@@ -1069,24 +761,21 @@ impl ContextWindowConfig {
 }
 
 /// Authentication mode configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthModeConfig {
     /// API key authentication - supports all features
     ApiKey,
     /// OAuth authentication (Claude Code CLI) - limited features
+    #[default]
     OAuth,
-}
-
-impl Default for AuthModeConfig {
-    fn default() -> Self {
-        Self::OAuth
-    }
 }
 
 impl LlmConfig {
     pub fn performance_model(&self) -> &str {
-        self.performance_model.as_deref().unwrap_or(&self.default_model)
+        self.performance_model
+            .as_deref()
+            .unwrap_or(&self.default_model)
     }
 
     pub fn fast_model(&self) -> &str {
@@ -1111,18 +800,11 @@ impl LlmConfig {
 #[serde(default)]
 pub struct AnalysisConfig {
     pub depth: AnalysisDepth,
-    /// Glob patterns to include
     pub include: Vec<String>,
     pub exclude: Vec<String>,
-    pub max_file_size_bytes: usize,
+    /// Maximum file size in bytes (default: 5MB)
     pub max_file_size: usize,
     pub max_file_samples: usize,
-    /// Enable constraint detection (concurrency, init order, etc.)
-    pub detect_constraints: bool,
-    /// Enable business rule detection
-    pub detect_business_rules: bool,
-    pub deep_analysis: DeepAnalysisConfig,
-    pub few_shots: FewShotConfig,
 }
 
 impl Default for AnalysisConfig {
@@ -1141,13 +823,8 @@ impl Default for AnalysisConfig {
                 ".venv/**".into(),
                 ".claudegen/**".into(),
             ],
-            max_file_size_bytes: 5 * 1024 * 1024, // 5MB
-            max_file_size: 5 * 1024 * 1024, // 5MB (alias)
+            max_file_size: 5 * 1024 * 1024,
             max_file_samples: 100,
-            detect_constraints: true,
-            detect_business_rules: true,
-            deep_analysis: DeepAnalysisConfig::default(),
-            few_shots: FewShotConfig::default(),
         }
     }
 }
@@ -1204,7 +881,6 @@ pub struct InsightConfig {
     pub scoring: ScoringConfig,
 }
 
-
 /// Mistake finder configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1248,7 +924,7 @@ pub struct ConstraintDetectionConfig {
     /// Enable performance constraint detection
     pub detect_performance: bool,
     /// Minimum severity to retain constraints
-    pub min_severity: ConstraintSeverity,
+    pub min_severity: Severity,
 }
 
 impl Default for ConstraintDetectionConfig {
@@ -1259,20 +935,9 @@ impl Default for ConstraintDetectionConfig {
             detect_security: true,
             detect_boundary: true,
             detect_performance: true,
-            min_severity: ConstraintSeverity::Low,
+            min_severity: Severity::Low,
         }
     }
-}
-
-/// Constraint severity levels
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ConstraintSeverity {
-    #[default]
-    Low,
-    Medium,
-    High,
-    Critical,
 }
 
 /// Domain analysis configuration
@@ -1648,7 +1313,6 @@ impl Default for PerformanceConfig {
 pub struct ProjectConfig {
     pub name: Option<String>,
     pub project_type: ProjectType,
-    pub root: Option<std::path::PathBuf>,
 }
 
 impl Default for ProjectConfig {
@@ -1656,7 +1320,6 @@ impl Default for ProjectConfig {
         Self {
             name: None,
             project_type: ProjectType::Auto,
-            root: None,
         }
     }
 }
@@ -1669,18 +1332,12 @@ impl Default for ProjectConfig {
 #[serde(default)]
 #[derive(Default)]
 pub struct OutputConfig {
-    pub dir: Option<std::path::PathBuf>,
     pub agents: OutputAgentConfig,
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct OutputAgentConfig {
-    pub max_agents: usize,
-    pub min_evidence_refs: usize,
-    pub require_domain_expertise: bool,
-    pub default_tools: Vec<String>,
     /// Default model for agents
     pub default_model: AgentModelType,
     /// Per-agent overrides by name
@@ -1689,21 +1346,6 @@ pub struct OutputAgentConfig {
     pub role_mappings: Vec<RoleMapping>,
     /// Tool sets for different roles
     pub tools: AgentToolsets,
-}
-
-impl Default for OutputAgentConfig {
-    fn default() -> Self {
-        Self {
-            max_agents: 10,
-            min_evidence_refs: 3,
-            require_domain_expertise: true,
-            default_tools: vec!["Read".into(), "Glob".into(), "Grep".into()],
-            default_model: AgentModelType::default(),
-            overrides: std::collections::HashMap::new(),
-            role_mappings: vec![],
-            tools: AgentToolsets::default(),
-        }
-    }
 }
 
 /// Agent model type for configuration
@@ -1808,30 +1450,8 @@ impl std::fmt::Display for ProjectType {
 }
 
 // =============================================================================
-// NETWORK & RETRY CONFIG (for AI providers)
+// RETRY CONFIG (for AI providers)
 // =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NetworkConfig {
-    pub timeout_ms: u64,
-    pub connect_timeout_ms: u64,
-    pub max_retry_timeout_ms: u64,
-    pub analysis_phase_timeout_secs: u64,
-    pub generation_phase_timeout_secs: u64,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 300_000,
-            connect_timeout_ms: 30_000,
-            max_retry_timeout_ms: 600_000,
-            analysis_phase_timeout_secs: 600,
-            generation_phase_timeout_secs: 300,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1911,6 +1531,94 @@ impl RefinementStrategyType {
     }
 }
 
+// =============================================================================
+// ADAPTIVE ITERATION CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveIterationConfig {
+    pub base_iterations: usize,
+    pub max_extension: usize,
+    pub extension_triggers: Vec<ExtensionTriggerConfig>,
+    pub allow_early_exit: bool,
+    pub min_iterations_for_exit: usize,
+    pub quality_improving_delta: f32,
+    pub high_uncertainty_threshold: f32,
+}
+
+impl Default for AdaptiveIterationConfig {
+    fn default() -> Self {
+        Self {
+            base_iterations: 10,
+            max_extension: 5,
+            extension_triggers: vec![
+                ExtensionTriggerConfig::QualityImproving,
+                ExtensionTriggerConfig::HighUncertainty,
+            ],
+            allow_early_exit: true,
+            min_iterations_for_exit: 3,
+            quality_improving_delta: 0.02,
+            high_uncertainty_threshold: 0.3,
+        }
+    }
+}
+
+impl AdaptiveIterationConfig {
+    pub fn max_total(&self) -> usize {
+        self.base_iterations + self.max_extension
+    }
+
+    pub fn for_preset(preset: ConfigPreset) -> Self {
+        match preset {
+            ConfigPreset::Quick => Self {
+                base_iterations: 5,
+                max_extension: 2,
+                extension_triggers: vec![ExtensionTriggerConfig::QualityImproving],
+                allow_early_exit: true,
+                min_iterations_for_exit: 2,
+                quality_improving_delta: 0.03,
+                high_uncertainty_threshold: 0.4,
+            },
+            ConfigPreset::Standard => Self::default(),
+            ConfigPreset::Thorough => Self {
+                base_iterations: 15,
+                max_extension: 10,
+                extension_triggers: vec![
+                    ExtensionTriggerConfig::QualityImproving,
+                    ExtensionTriggerConfig::HighUncertainty,
+                    ExtensionTriggerConfig::ValueDiscovery,
+                ],
+                allow_early_exit: true,
+                min_iterations_for_exit: 5,
+                quality_improving_delta: 0.015,
+                high_uncertainty_threshold: 0.25,
+            },
+            ConfigPreset::Exhaustive => Self {
+                base_iterations: 30,
+                max_extension: 20,
+                extension_triggers: vec![
+                    ExtensionTriggerConfig::QualityImproving,
+                    ExtensionTriggerConfig::HighUncertainty,
+                    ExtensionTriggerConfig::ValueDiscovery,
+                ],
+                allow_early_exit: true,
+                min_iterations_for_exit: 10,
+                quality_improving_delta: 0.01,
+                high_uncertainty_threshold: 0.2,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionTriggerConfig {
+    QualityImproving,
+    HighUncertainty,
+    ValueDiscovery,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RefinementConfig {
@@ -1918,8 +1626,7 @@ pub struct RefinementConfig {
     pub max_attempts_per_strategy: usize,
     pub strategy_rotation_enabled: bool,
     pub timeout_secs: u64,
-    pub max_iterations: usize,
-    pub min_iterations: usize,
+    pub adaptive_iteration: AdaptiveIterationConfig,
     pub stagnation_patience: usize,
     pub stagnation_threshold: f32,
     pub require_all_dimensions: bool,
@@ -1942,6 +1649,60 @@ pub struct RefinementConfig {
     pub oscillation_min_amplitude: f32,
     /// Minimum quality improvement to accept a regeneration
     pub quality_acceptance_delta: f32,
+    /// Self-critique inner loop configuration
+    pub self_critique: SelfCritiqueConfig,
+    /// Evidence feedback loop configuration
+    pub evidence_feedback: EvidenceFeedbackConfig,
+}
+
+/// Configuration for self-critique inner loop within refinement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SelfCritiqueConfig {
+    /// Enable self-critique loop
+    pub enabled: bool,
+    /// Maximum critique iterations per refinement cycle
+    pub max_iterations: usize,
+    /// Minimum quality improvement to continue critique loop
+    pub min_improvement: f32,
+    /// Skip critique if quality already above this threshold
+    pub quality_skip_threshold: f32,
+}
+
+impl Default for SelfCritiqueConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_iterations: 3,
+            min_improvement: 0.02,
+            quality_skip_threshold: 0.92,
+        }
+    }
+}
+
+/// Configuration for evidence feedback loop
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvidenceFeedbackConfig {
+    /// Enable evidence feedback loop
+    pub enabled: bool,
+    /// Maximum retry iterations with feedback
+    pub max_retries: usize,
+    /// Minimum references required per section
+    pub min_refs_per_section: usize,
+    /// Target total references to aim for
+    pub target_refs: usize,
+}
+
+impl Default for EvidenceFeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            min_refs_per_section: 1,
+            target_refs: 5,
+        }
+    }
 }
 
 impl Default for RefinementConfig {
@@ -1951,8 +1712,7 @@ impl Default for RefinementConfig {
             max_attempts_per_strategy: 3,
             strategy_rotation_enabled: true,
             timeout_secs: 600,
-            max_iterations: 30,
-            min_iterations: 3,
+            adaptive_iteration: AdaptiveIterationConfig::default(),
             stagnation_patience: 5,
             stagnation_threshold: 0.01,
             require_all_dimensions: false,
@@ -1974,6 +1734,8 @@ impl Default for RefinementConfig {
             oscillation_window: 3,
             oscillation_min_amplitude: 0.03,
             quality_acceptance_delta: 0.05,
+            self_critique: SelfCritiqueConfig::default(),
+            evidence_feedback: EvidenceFeedbackConfig::default(),
         }
     }
 }
@@ -2073,9 +1835,6 @@ pub struct QualityConfig {
     pub scoring: TierScoringWeights,
     pub skill: SkillQualityConfig,
     pub agent: AgentQualityConfig,
-    pub memory: MemoryQualityConfig,
-    pub rule: RuleQualityConfig,
-    pub project_specific: ProjectSpecificQuality,
     pub min_overall_score: f32,
     pub semantic: SemanticQualityThresholds,
 }
@@ -2095,9 +1854,6 @@ impl Default for QualityConfig {
             scoring: TierScoringWeights::default(),
             skill: SkillQualityConfig::default(),
             agent: AgentQualityConfig::default(),
-            memory: MemoryQualityConfig::default(),
-            rule: RuleQualityConfig::default(),
-            project_specific: ProjectSpecificQuality::default(),
             min_overall_score: 0.6,
             semantic: SemanticQualityThresholds::default(),
         }
@@ -2122,78 +1878,6 @@ impl Default for SemanticQualityThresholds {
             min_evidence_quality: 0.5,
             min_depth: 0.5,
             max_redundancy: 0.3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryQualityConfig {
-    pub min_evidence_refs: usize,
-    pub min_score: f32,
-    pub min_file_refs: usize,
-    pub min_chars: usize,
-    pub min_sections: usize,
-    pub target_file_refs: usize,
-}
-
-impl Default for MemoryQualityConfig {
-    fn default() -> Self {
-        Self {
-            min_evidence_refs: 2,
-            min_score: 0.6,
-            min_file_refs: 1,
-            min_chars: 300,
-            min_sections: 2,
-            target_file_refs: 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RuleQualityConfig {
-    pub min_evidence_refs: usize,
-    pub min_score: f32,
-    pub min_file_refs: usize,
-}
-
-impl Default for RuleQualityConfig {
-    fn default() -> Self {
-        Self {
-            min_evidence_refs: 1,
-            min_score: 0.6,
-            min_file_refs: 1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-pub struct ProjectSpecificQuality {
-    pub cli: ProjectTypeQuality,
-    pub library: ProjectTypeQuality,
-    pub backend: ProjectTypeQuality,
-    pub frontend: ProjectTypeQuality,
-    pub monorepo: ProjectTypeQuality,
-    pub agent: ProjectTypeQuality,
-    pub hybrid: ProjectTypeQuality,
-    pub auto: ProjectTypeQuality,
-}
-
-
-impl ProjectSpecificQuality {
-    pub fn get_for_type(&self, project_type: ProjectType) -> &ProjectTypeQuality {
-        match project_type {
-            ProjectType::Cli => &self.cli,
-            ProjectType::Library => &self.library,
-            ProjectType::Backend => &self.backend,
-            ProjectType::Frontend => &self.frontend,
-            ProjectType::Monorepo => &self.monorepo,
-            ProjectType::Agent => &self.agent,
-            ProjectType::Hybrid => &self.hybrid,
-            ProjectType::Auto => &self.auto,
         }
     }
 }
@@ -2229,159 +1913,25 @@ impl Default for DeepReviewConfig {
 }
 
 // =============================================================================
-// VALIDATION CONFIG - Multi-Layer Validation System
+// VALIDATION CONFIG
 // =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ValidationConfig {
-    pub enabled: bool,
-    pub layers: ValidationLayerConfigs,
-    pub clean_pass: CleanPassConfig,
-    pub semantic_context: SemanticContextValidationConfig,
-    pub value_assessment: ValueAssessmentConfig,
-}
-
-impl Default for ValidationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            layers: ValidationLayerConfigs::default(),
-            clean_pass: CleanPassConfig::default(),
-            semantic_context: SemanticContextValidationConfig::default(),
-            value_assessment: ValueAssessmentConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ValidationLayerConfigs {
-    pub format_enabled: bool,
-    pub evidence_enabled: bool,
-    pub semantic_context_enabled: bool,
-    pub value_assessment_enabled: bool,
-    pub cross_artifact_enabled: bool,
-    pub early_exit_on_critical: bool,
-}
-
-impl Default for ValidationLayerConfigs {
-    fn default() -> Self {
-        Self {
-            format_enabled: true,
-            evidence_enabled: true,
-            semantic_context_enabled: true,
-            value_assessment_enabled: true,
-            cross_artifact_enabled: true,
-            early_exit_on_critical: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CleanPassConfig {
-    pub require_zero_issues: bool,
-    pub consecutive_passes: usize,
-    pub max_attempts: usize,
-    pub reset_on_error: bool,
-    pub reset_on_critical: bool,
-}
-
-impl Default for CleanPassConfig {
-    fn default() -> Self {
-        Self {
-            require_zero_issues: true,
-            consecutive_passes: 2,
-            max_attempts: 10,
-            reset_on_error: true,
-            reset_on_critical: true,
-        }
-    }
-}
-
-impl CleanPassConfig {
-    /// Build reset severities vector from config flags
-    pub fn reset_severities(&self) -> Vec<crate::pipeline::validation::LayerIssueSeverity> {
-        use crate::pipeline::validation::LayerIssueSeverity;
-        let mut severities = Vec::new();
-        if self.reset_on_critical {
-            severities.push(LayerIssueSeverity::Critical);
-        }
-        if self.reset_on_error {
-            severities.push(LayerIssueSeverity::Error);
-        }
-        severities
-    }
-
-    pub fn for_preset(preset: ConfigPreset) -> Self {
-        match preset {
-            ConfigPreset::Quick => Self {
-                consecutive_passes: 1,
-                max_attempts: 5,
-                ..Default::default()
-            },
-            ConfigPreset::Standard => Self::default(),
-            ConfigPreset::Thorough => Self::default(),
-            ConfigPreset::Exhaustive => Self {
-                consecutive_passes: 3,
-                max_attempts: 15,
-                ..Default::default()
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SemanticContextValidationConfig {
-    pub enabled: bool,
-    pub context_lines: usize,
-    pub min_similarity: f32,
-    pub max_refs_per_artifact: usize,
-    pub cache_context: bool,
-}
-
-impl Default for SemanticContextValidationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            context_lines: 5,
-            min_similarity: 0.7,
-            max_refs_per_artifact: 10,
-            cache_context: true,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct ValueAssessmentConfig {
+pub struct ValidationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_true")]
-    pub reject_tier1: bool,
-    #[serde(default = "default_min_mistake_prevention")]
-    pub min_mistake_prevention: f32,
-    #[serde(default = "default_min_discoverability")]
-    pub min_discoverability: f32,
-    #[serde(default = "default_true")]
-    pub use_few_shot: bool,
-    #[serde(default = "default_few_shot_count")]
-    pub few_shot_examples_count: usize,
+    /// Threshold in seconds for considering a file "recently modified"
+    /// Files modified within this threshold trigger info-level notifications
+    #[serde(default = "default_stale_threshold")]
+    pub stale_file_threshold_secs: u64,
 }
 
 fn default_true() -> bool {
     true
 }
-fn default_min_mistake_prevention() -> f32 {
-    0.4
-}
-fn default_min_discoverability() -> f32 {
-    0.3
-}
-fn default_few_shot_count() -> usize {
-    3
+fn default_stale_threshold() -> u64 {
+    60
 }
 
 // =============================================================================
@@ -2411,7 +1961,7 @@ impl Default for SemanticValidationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            use_ai_validation: false,
+            use_ai_validation: true, // LLM-as-judge instead of regex patterns
             dimension_weights: SemanticDimensionWeights::default(),
             min_overall_score: 0.6,
             weights: SemanticWeights::default(),
@@ -2555,30 +2105,6 @@ impl Default for SemanticDimensionWeights {
 }
 
 // =============================================================================
-// EXECUTION CONFIG
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExecutionConfig {
-    pub parallel_workers: usize,
-    pub checkpoint_enabled: bool,
-    pub checkpoint_interval_secs: u64,
-    pub checkpoint_interval_minutes: u64,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            parallel_workers: 4,
-            checkpoint_enabled: true,
-            checkpoint_interval_secs: 300,
-            checkpoint_interval_minutes: 5,
-        }
-    }
-}
-
-// =============================================================================
 // ANALYSIS SPECIALTY
 // =============================================================================
 
@@ -2640,6 +2166,8 @@ pub struct MultiAgentConfig {
     pub conflict_resolution: ConflictResolution,
     pub cross_validate_specialists: bool,
     pub synthesis_retries: usize,
+    pub specialist_timeout_secs: u64,
+    pub total_timeout_secs: u64,
 }
 
 impl Default for MultiAgentConfig {
@@ -2657,6 +2185,8 @@ impl Default for MultiAgentConfig {
             conflict_resolution: ConflictResolution::WeightedVote,
             cross_validate_specialists: true,
             synthesis_retries: 3,
+            specialist_timeout_secs: 120,
+            total_timeout_secs: 600,
         }
     }
 }
@@ -2733,7 +2263,11 @@ impl Default for UsabilityConfig {
 
 impl UsabilityConfig {
     /// Get effective max context tokens (auto-compute if 0)
-    pub fn effective_max_context_tokens(&self, model_id: &str, context_config: &ContextWindowConfig) -> usize {
+    pub fn effective_max_context_tokens(
+        &self,
+        model_id: &str,
+        context_config: &ContextWindowConfig,
+    ) -> usize {
         if self.max_context_tokens > 0 {
             self.max_context_tokens
         } else {
@@ -2797,8 +2331,7 @@ pub struct QualityLoopConfig {
     pub max_outer_iterations: usize,
     pub target_score: f32,
     pub min_improvement: f32,
-    pub multi_agent: MultiAgentConfig,
-    pub insight_driven: InsightDrivenGenConfig,
+    // multi_agent and insight_driven moved to root Config
     pub analysis_confidence_threshold: f32,
     pub synthesis_confidence_threshold: f32,
     pub max_invalid_reference_ratio: f32,
@@ -2813,52 +2346,10 @@ impl Default for QualityLoopConfig {
             max_outer_iterations: 5,
             target_score: 0.8,
             min_improvement: 0.02,
-            multi_agent: MultiAgentConfig::default(),
-            insight_driven: InsightDrivenGenConfig::default(),
             analysis_confidence_threshold: 0.7,
             synthesis_confidence_threshold: 0.8,
             max_invalid_reference_ratio: 0.2,
             reanalysis_gap_threshold: 0.3,
-        }
-    }
-}
-
-// =============================================================================
-// INSIGHT DRIVEN GENERATION CONFIG
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct InsightDrivenGenConfig {
-    pub enabled: bool,
-    pub insight_weight: f32,
-    pub max_insights_per_artifact: usize,
-    pub use_llm_decisions: bool,
-    pub self_review_enabled: bool,
-    pub max_review_iterations: usize,
-    pub review_acceptance_threshold: f32,
-    pub min_value_score: f32,
-    pub max_inline_code_lines: usize,
-    pub reference_only_mode: bool,
-    pub min_file_refs: usize,
-    pub min_actionable_statements: usize,
-}
-
-impl Default for InsightDrivenGenConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            insight_weight: 0.7,
-            max_insights_per_artifact: 10,
-            use_llm_decisions: true,
-            self_review_enabled: true,
-            max_review_iterations: 3,
-            review_acceptance_threshold: 0.7,
-            min_value_score: 0.5,
-            max_inline_code_lines: 50,
-            reference_only_mode: false,
-            min_file_refs: 2,
-            min_actionable_statements: 3,
         }
     }
 }
@@ -2887,22 +2378,6 @@ impl Default for AgentGenerationConfig {
     }
 }
 
-/// Runtime config for a specific phase provider
-#[derive(Debug, Clone)]
-pub struct PhaseProviderConfig {
-    pub model: String,
-    pub timeout_secs: u64,
-}
-
-impl PhaseProviderConfig {
-    pub fn new(model: &str, timeout_secs: u64) -> Self {
-        Self {
-            model: model.to_string(),
-            timeout_secs,
-        }
-    }
-}
-
 // =============================================================================
 // EVIDENCE CONFIG
 // =============================================================================
@@ -2925,38 +2400,6 @@ impl EvidenceDepth {
             Self::Minimal | Self::FileOnly => 1,
             Self::Standard | Self::FileAndLine => 2,
             Self::Comprehensive | Self::FileLineContext => 5,
-        }
-    }
-}
-
-// =============================================================================
-// PROJECT TYPE QUALITY CONFIG
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProjectTypeQuality {
-    pub min_score: f32,
-    pub min_quality_score: f32,
-    pub max_iterations: usize,
-    pub required_sections: Vec<String>,
-    pub min_evidence_refs: usize,
-    pub min_file_references: usize,
-    pub min_evidence: f32,
-    pub evidence_depth: EvidenceDepth,
-}
-
-impl Default for ProjectTypeQuality {
-    fn default() -> Self {
-        Self {
-            min_score: 0.6,
-            min_quality_score: 0.7,
-            max_iterations: 30,
-            required_sections: vec![],
-            min_evidence_refs: 2,
-            min_file_references: 2,
-            min_evidence: 0.5,
-            evidence_depth: EvidenceDepth::Standard,
         }
     }
 }
@@ -3007,7 +2450,7 @@ pub struct DeepAnalysisConfig {
     pub min_confidence: f32,
     pub max_code_context_chars: usize,
     pub targeted_reanalysis: bool,
-    pub multi_agent: MultiAgentConfig,
+    // multi_agent moved to root Config
 }
 
 impl Default for DeepAnalysisConfig {
@@ -3021,7 +2464,6 @@ impl Default for DeepAnalysisConfig {
             min_confidence: 0.7,
             max_code_context_chars: 50_000,
             targeted_reanalysis: true,
-            multi_agent: MultiAgentConfig::default(),
         }
     }
 }
@@ -3057,152 +2499,68 @@ impl Default for StructuralValidationConfig {
 }
 
 // =============================================================================
-// VERIFICATION CONFIG
-// =============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct VerificationConfig {
-    pub enabled: bool,
-    pub check_evidence: bool,
-    pub check_consistency: bool,
-    pub min_confidence: f32,
-    pub cross_validation: CrossValidationConfig,
-}
-
-impl Default for VerificationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            check_evidence: true,
-            check_consistency: true,
-            min_confidence: 0.7,
-            cross_validation: CrossValidationConfig::default(),
-        }
-    }
-}
-
-// =============================================================================
-// CONFIG ACCESSORS (compatibility layer)
+// CONFIG ACCESSORS (direct field references)
 // =============================================================================
 
 impl Config {
-    pub fn network(&self) -> NetworkConfig {
-        NetworkConfig::default()
+    pub fn circuit_breaker(&self) -> &CircuitBreakerConfig {
+        &self.circuit_breaker
     }
 
-    pub fn retry(&self) -> RetryConfig {
-        RetryConfig::default()
+    pub fn refinement(&self) -> &RefinementConfig {
+        &self.refinement
     }
 
-    pub fn circuit_breaker(&self) -> CircuitBreakerConfig {
-        CircuitBreakerConfig::default()
+    pub fn learning(&self) -> &LearningConfig {
+        &self.learning
     }
 
-    pub fn refinement(&self) -> RefinementConfig {
-        RefinementConfig::default()
+    pub fn quality(&self) -> &QualityConfig {
+        &self.quality
     }
 
-    pub fn learning(&self) -> LearningConfig {
-        LearningConfig::default()
+    pub fn deep_review(&self) -> &DeepReviewConfig {
+        &self.deep_review
     }
 
-    pub fn quality(&self) -> QualityConfig {
-        QualityConfig {
-            enabled: true,
-            min_score: self.value.min_overall,
-            min_value_score: self.value.min_overall,
-            target_score: self.convergence.early_exit_threshold,
-            minimum_quality: self.value.min_overall,
-            min_file_refs: self.artifacts.skills.min_evidence_refs,
-            min_actionable_count: 3,
-            max_tier1_ratio: 0.2,
-            reference_only_mode: false,
-            scoring: TierScoringWeights::default(),
-            skill: SkillQualityConfig::default(),
-            agent: AgentQualityConfig::default(),
-            memory: MemoryQualityConfig::default(),
-            rule: RuleQualityConfig::default(),
-            project_specific: ProjectSpecificQuality::default(),
-            min_overall_score: self.value.min_overall,
-            semantic: SemanticQualityThresholds::default(),
-        }
+    pub fn semantic_validation(&self) -> &SemanticValidationConfig {
+        &self.semantic_validation
     }
 
-    pub fn deep_review(&self) -> DeepReviewConfig {
-        DeepReviewConfig {
-            enabled: true,
-            max_attempts: (self.convergence.max_iterations / 3) as u32,
-            required_passes: self.convergence.consecutive_passes as u32,
-            review_timeout_secs: self.llm.timeout_secs,
-            check_regression: true,
-            reject_tier1: true,
-            min_evidence_ratio: 0.5,
-        }
+    pub fn multi_agent(&self) -> &MultiAgentConfig {
+        &self.multi_agent
     }
 
-    pub fn semantic_validation(&self) -> SemanticValidationConfig {
-        SemanticValidationConfig::default()
+    pub fn cross_validation(&self) -> &CrossValidationConfig {
+        &self.cross_validation
     }
 
-    pub fn execution(&self) -> ExecutionConfig {
-        ExecutionConfig {
-            parallel_workers: self.performance.parallel_workers,
-            checkpoint_enabled: self.performance.resume_on_crash,
-            checkpoint_interval_secs: self.performance.checkpoint_interval_minutes * 60,
-            checkpoint_interval_minutes: self.performance.checkpoint_interval_minutes,
-        }
+    pub fn usability(&self) -> &UsabilityConfig {
+        &self.usability
     }
 
-    pub fn multi_agent(&self) -> MultiAgentConfig {
-        MultiAgentConfig::default()
+    pub fn cross_artifact(&self) -> &CrossArtifactConfig {
+        &self.cross_artifact
     }
 
-    pub fn cross_validation(&self) -> CrossValidationConfig {
-        CrossValidationConfig {
-            enabled: self.convergence.require_cross_artifact_pass,
-            ..Default::default()
-        }
+    pub fn quality_loop(&self) -> &QualityLoopConfig {
+        &self.quality_loop
     }
 
-    pub fn usability(&self) -> UsabilityConfig {
-        UsabilityConfig::default()
+    pub fn few_shot(&self) -> &FewShotConfig {
+        &self.few_shot
     }
 
-    pub fn cross_artifact(&self) -> CrossArtifactConfig {
-        CrossArtifactConfig {
-            enabled: self.convergence.require_cross_artifact_pass,
-            ..Default::default()
-        }
+    pub fn deep_analysis(&self) -> &DeepAnalysisConfig {
+        &self.deep_analysis
     }
 
-    pub fn quality_loop(&self) -> QualityLoopConfig {
-        QualityLoopConfig {
-            enabled: true,
-            max_iterations: self.convergence.max_iterations,
-            max_outer_iterations: self.convergence.max_iterations / 2,
-            target_score: self.convergence.early_exit_threshold,
-            min_improvement: self.convergence.min_improvement,
-            multi_agent: MultiAgentConfig::default(),
-            insight_driven: InsightDrivenGenConfig::default(),
-            analysis_confidence_threshold: 0.7,
-            synthesis_confidence_threshold: 0.8,
-            max_invalid_reference_ratio: 0.2,
-            reanalysis_gap_threshold: 0.3,
-        }
+    pub fn structural_validation(&self) -> &StructuralValidationConfig {
+        &self.structural_validation
     }
 
-    pub fn insight_driven(&self) -> InsightDrivenGenConfig {
-        InsightDrivenGenConfig::default()
-    }
-
-    pub fn agent_generation(&self) -> AgentGenerationConfig {
-        AgentGenerationConfig {
-            max_agents: self.generation.limits.max_agents,
-            min_evidence_refs: self.artifacts.agents.min_evidence_refs,
-            require_domain_expertise: self.artifacts.agents.require_domain_expertise,
-            default_tools: self.artifacts.agents.default_tools.clone(),
-        }
+    pub fn timeout(&self) -> &TimeoutConfig {
+        &self.timeout
     }
 
     pub fn evidence_depth(&self) -> EvidenceDepth {
@@ -3210,63 +2568,6 @@ impl Config {
             AnalysisDepth::Fast => EvidenceDepth::Minimal,
             AnalysisDepth::Standard => EvidenceDepth::Standard,
             AnalysisDepth::Complete => EvidenceDepth::Comprehensive,
-        }
-    }
-
-    pub fn project_type_quality(&self, _project_type: ProjectType) -> ProjectTypeQuality {
-        ProjectTypeQuality {
-            min_score: self.value.min_overall,
-            min_quality_score: self.value.min_overall,
-            max_iterations: self.convergence.max_iterations,
-            required_sections: self.artifacts.claude_md.sections.clone(),
-            min_evidence_refs: self.artifacts.skills.min_evidence_refs,
-            min_file_references: self.artifacts.skills.min_evidence_refs,
-            min_evidence: self.value.min_overall,
-            evidence_depth: self.evidence_depth(),
-        }
-    }
-
-    pub fn few_shots(&self) -> FewShotConfig {
-        FewShotConfig::default()
-    }
-
-    pub fn deep_analysis(&self) -> DeepAnalysisConfig {
-        DeepAnalysisConfig {
-            enabled: self.analysis.depth.enable_deep_analysis(),
-            max_depth: match self.analysis.depth {
-                AnalysisDepth::Fast => 1,
-                AnalysisDepth::Standard => 2,
-                AnalysisDepth::Complete => 5,
-            },
-            max_iterations: self.convergence.max_iterations,
-            follow_imports: true,
-            analyze_dependencies: self.analysis.detect_constraints,
-            min_confidence: self.value.min_overall,
-            max_code_context_chars: 50_000,
-            targeted_reanalysis: true,
-            multi_agent: MultiAgentConfig::default(),
-        }
-    }
-
-    pub fn structural_validation(&self) -> StructuralValidationConfig {
-        StructuralValidationConfig {
-            enabled: true,
-            check_file_refs: true,
-            check_syntax: true,
-            check_completeness: self.convergence.require_formal_pass,
-            min_module_coverage: 0.7,
-            core_module_threshold: 0.5,
-            required_modules: Vec::new(),
-        }
-    }
-
-    pub fn verification(&self) -> VerificationConfig {
-        VerificationConfig {
-            enabled: true,
-            check_evidence: true,
-            check_consistency: self.convergence.require_cross_artifact_pass,
-            min_confidence: self.value.min_overall,
-            cross_validation: CrossValidationConfig::default(),
         }
     }
 }
@@ -3335,36 +2636,6 @@ impl Default for TierScoringWeights {
             tier3_threshold: 0.7,
             tier2_threshold: 0.4,
             primary_content_ratio: 0.3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FeedbackConfig {
-    pub enabled: bool,
-    pub aggregation_threshold: f32,
-    pub max_feedback_items: usize,
-    pub dimension_pass_threshold: f32,
-    pub semantic_weight: f32,
-    pub structural_weight: f32,
-    pub cross_artifact_weight: f32,
-    pub usability_weight: f32,
-    pub evidence_weight: f32,
-}
-
-impl Default for FeedbackConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            aggregation_threshold: 0.7,
-            max_feedback_items: 20,
-            dimension_pass_threshold: 0.7,
-            semantic_weight: 0.25,
-            structural_weight: 0.2,
-            cross_artifact_weight: 0.2,
-            usability_weight: 0.15,
-            evidence_weight: 0.2,
         }
     }
 }
@@ -3478,6 +2749,40 @@ impl Default for CrossArtifactConfig {
 }
 
 // =============================================================================
+// TIMEOUT CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimeoutConfig {
+    pub session_timeout_secs: u64,
+    pub quality_loop_timeout_secs: u64,
+    pub analysis_phase_timeout_secs: u64,
+    pub generation_phase_timeout_secs: u64,
+    pub specialist_timeout_secs: u64,
+    pub llm_call_timeout_secs: u64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            session_timeout_secs: 3600,
+            quality_loop_timeout_secs: 1800,
+            analysis_phase_timeout_secs: 600,
+            generation_phase_timeout_secs: 300,
+            specialist_timeout_secs: 120,
+            llm_call_timeout_secs: 300,
+        }
+    }
+}
+
+impl TimeoutConfig {
+    pub fn effective_checkpoint_interval_secs(&self) -> u64 {
+        (self.quality_loop_timeout_secs / 4).max(60)
+    }
+}
+
+// =============================================================================
 // TESTS
 // =============================================================================
 
@@ -3528,38 +2833,6 @@ mod tests {
     }
 
     #[test]
-    fn test_convergence_state() {
-        let config = ConvergenceConfig {
-            consecutive_passes: 2,
-            max_iterations: 10,
-            ..Default::default()
-        };
-
-        let mut state = ConvergenceState::default();
-
-        // First pass
-        state.record_result(true, 0.7);
-        assert_eq!(state.should_terminate(&config), ConvergenceStatus::InProgress);
-
-        // Second consecutive pass
-        state.record_result(true, 0.75);
-        assert_eq!(state.should_terminate(&config), ConvergenceStatus::Converged);
-    }
-
-    #[test]
-    fn test_tier_pattern_matching() {
-        let tier0 = TierPatterns::default_tier0();
-        assert!(tier0.matches("Use cargo build to compile the project"));
-        assert!(tier0.matches("You should write tests for all functions"));
-        assert!(!tier0.matches("The database connection must be released before timeout"));
-
-        let tier3 = TierPatterns::default_tier3();
-        assert!(tier3.matches("This will fail if the lock is not acquired"));
-        assert!(tier3.matches("You must call init() before any other method"));
-        assert!(!tier3.matches("Use npm install to install dependencies"));
-    }
-
-    #[test]
     fn test_value_score_calculation() {
         let value_config = ValueConfig::default();
         let scores = ValueScores::new(0.8, 0.6, 0.7);
@@ -3588,8 +2861,16 @@ mod tests {
     #[test]
     fn test_domain_type() {
         assert_eq!(DomainType::FinTech.as_str(), "fintech");
-        assert!(DomainType::FinTech.default_compliance().contains(&"PCI-DSS"));
-        assert!(DomainType::Healthcare.default_compliance().contains(&"HIPAA"));
+        assert!(
+            DomainType::FinTech
+                .default_compliance()
+                .contains(&"PCI-DSS")
+        );
+        assert!(
+            DomainType::Healthcare
+                .default_compliance()
+                .contains(&"HIPAA")
+        );
     }
 
     #[test]
@@ -3603,26 +2884,6 @@ mod tests {
     // =========================================================================
     // Cross-field validation tests
     // =========================================================================
-
-    #[test]
-    fn test_clean_pass_max_attempts_validation() {
-        let mut config = Config::default();
-
-        // Valid: max_attempts >= consecutive_passes
-        config.validation.clean_pass.max_attempts = 5;
-        config.validation.clean_pass.consecutive_passes = 2;
-        assert!(config.validate().is_ok());
-
-        // Invalid: max_attempts < consecutive_passes
-        config.validation.clean_pass.max_attempts = 1;
-        config.validation.clean_pass.consecutive_passes = 3;
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("max_attempts"));
-    }
 
     #[test]
     fn test_convergence_passes_vs_iterations() {

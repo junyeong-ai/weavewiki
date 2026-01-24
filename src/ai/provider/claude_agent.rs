@@ -12,6 +12,7 @@ mod inner {
     use async_trait::async_trait;
     use claude_agent::client::{
         BetaFeature, CreateMessageRequest, ProviderConfig as SdkProviderConfig,
+        transform_for_strict,
     };
     use claude_agent::{Auth, Client, Message, OAuthConfig};
     use serde_json::Value;
@@ -85,10 +86,15 @@ mod inner {
                 builder = builder.oauth_config(OAuthConfig::default());
             }
 
+            // Always enable StructuredOutputs for JSON schema support
+            let mut sdk_config =
+                SdkProviderConfig::default().with_beta(BetaFeature::StructuredOutputs);
+
             if extended_context {
-                let sdk_config = SdkProviderConfig::default().with_beta(BetaFeature::Context1M);
-                builder = builder.config(sdk_config);
+                sdk_config = sdk_config.with_beta(BetaFeature::Context1M);
             }
+
+            builder = builder.config(sdk_config);
 
             builder.build().await.map_err(|e| {
                 crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
@@ -172,10 +178,7 @@ mod inner {
             let caps = registry.get_or_default(model);
             let context_window = caps.effective_context_window(AuthMode::ApiKey, false);
 
-            tracing::info!(
-                context_window,
-                "Using API key authentication"
-            );
+            tracing::info!(context_window, "Using API key authentication");
 
             Ok(Self {
                 client,
@@ -222,10 +225,7 @@ mod inner {
 
         /// Create provider from configuration
         pub async fn from_config(config: &ProviderConfig) -> Result<Self> {
-            let model = config
-                .model
-                .as_deref()
-                .unwrap_or(DEFAULT_MODEL);
+            let model = config.model.as_deref().unwrap_or(DEFAULT_MODEL);
 
             let (auth, auth_mode) = if let Some(api_key) = &config.api_key {
                 (Auth::ApiKey(api_key.clone()), AuthMode::ApiKey)
@@ -241,9 +241,7 @@ mod inner {
                 );
             }
 
-            let client =
-                Self::build_client(auth, config.api_key.as_deref(), use_extended)
-                    .await?;
+            let client = Self::build_client(auth, config.api_key.as_deref(), use_extended).await?;
 
             Ok(Self {
                 client,
@@ -263,19 +261,21 @@ mod inner {
     #[async_trait]
     impl LlmProvider for ClaudeAgentProvider {
         async fn generate(&self, prompt: &str, schema: &Value) -> Result<LlmResponse> {
+            use crate::ai::validation::extract_json_from_response;
+
             let start = Instant::now();
 
-            // Build system prompt with schema instructions
-            let system_prompt = format!(
-                "You are a documentation generation assistant. \
-                 Respond with valid JSON matching this schema:\n```json\n{}\n```\n\
-                 Output ONLY the JSON, no other text.",
-                serde_json::to_string_pretty(schema).unwrap_or_default()
-            );
-
-            let request = CreateMessageRequest::new(&self.model, vec![Message::user(prompt)])
-                .with_system(system_prompt)
+            // Build request with native JSON schema structured output
+            let mut request = CreateMessageRequest::new(&self.model, vec![Message::user(prompt)])
+                .with_system("You are a code documentation expert.")
                 .with_max_tokens(self.max_tokens as u32);
+
+            // Use native JSON schema when schema is provided
+            // Transform schema for strict mode (adds additionalProperties: false)
+            if !schema.is_null() && schema.is_object() {
+                let strict_schema = transform_for_strict(schema.clone());
+                request = request.with_json_schema(strict_schema);
+            }
 
             let response = self.client.send(request).await.map_err(|e| {
                 crate::types::ClaudegenError::LlmApi(format!("Claude API error: {e}"))
@@ -283,22 +283,8 @@ mod inner {
 
             let elapsed = start.elapsed();
 
-            // Extract text content
-            let text = response.text();
-
-            // Parse JSON from response
-            let content: Value = serde_json::from_str(&text).unwrap_or_else(|_| {
-                // Try to extract JSON from markdown code blocks
-                if let Some(json_start) = text.find("```json") {
-                    let after_start = &text[json_start + 7..];
-                    if let Some(json_end) = after_start.find("```") {
-                        let json_str = after_start[..json_end].trim();
-                        return serde_json::from_str(json_str)
-                            .unwrap_or(Value::String(text.clone()));
-                    }
-                }
-                Value::String(text.clone())
-            });
+            // Parse response with robust JSON extraction
+            let content = extract_json_from_response(&response.text())?;
 
             let usage = TokenUsage {
                 input_tokens: response.usage.input_tokens,
@@ -310,7 +296,7 @@ mod inner {
             Ok(LlmResponse::with_metrics(
                 content,
                 usage,
-                0.0, // Cost calculated externally
+                0.0,
                 ResponseTiming::from_duration(elapsed),
                 ResponseMetadata {
                     model: self.model.clone(),

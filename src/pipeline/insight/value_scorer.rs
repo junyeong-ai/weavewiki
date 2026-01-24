@@ -97,14 +97,24 @@ impl ValueScorer {
     fn category_mistake_score(&self, insight: &Insight) -> f32 {
         let cat_scores = &self.config.insight.scoring.category_scores;
         match insight.category {
-            InsightCategory::SecurityConstraint => cat_scores.security_constraint,
+            InsightCategory::SecurityConstraint | InsightCategory::Security => {
+                cat_scores.security_constraint
+            }
             InsightCategory::TechnicalConstraint => cat_scores.technical_constraint,
             InsightCategory::Compliance => cat_scores.compliance,
             InsightCategory::BusinessRule => cat_scores.business_rule,
             InsightCategory::Gotcha => cat_scores.gotcha,
-            InsightCategory::PerformanceConstraint => cat_scores.performance_constraint,
-            InsightCategory::ArchitectureIntent => cat_scores.architecture_intent,
+            InsightCategory::PerformanceConstraint | InsightCategory::Performance => {
+                cat_scores.performance_constraint
+            }
+            InsightCategory::ArchitectureIntent | InsightCategory::Architecture => {
+                cat_scores.architecture_intent
+            }
             InsightCategory::DomainKnowledge => cat_scores.domain_knowledge,
+            InsightCategory::Workflow | InsightCategory::Convention => {
+                cat_scores.technical_constraint
+            }
+            InsightCategory::General => cat_scores.domain_knowledge,
         }
     }
 
@@ -168,7 +178,9 @@ impl ValueScorer {
 
         for (keyword, bonus) in BUILTIN {
             if text.contains(*keyword)
-                && !scoring_config.mistake_prevention_keywords.contains_key(*keyword)
+                && !scoring_config
+                    .mistake_prevention_keywords
+                    .contains_key(*keyword)
             {
                 score += bonus;
             }
@@ -241,7 +253,9 @@ impl ValueScorer {
 
         for (keyword, bonus) in BUILTIN_HIDDEN {
             if text.contains(*keyword)
-                && !scoring_config.discoverability_keywords.contains_key(*keyword)
+                && !scoring_config
+                    .discoverability_keywords
+                    .contains_key(*keyword)
             {
                 score += bonus;
             }
@@ -302,12 +316,17 @@ impl ValueScorer {
             InsightCategory::TechnicalConstraint
             | InsightCategory::SecurityConstraint
             | InsightCategory::PerformanceConstraint
-            | InsightCategory::Compliance => config.constraint_category_bonus,
-            InsightCategory::BusinessRule | InsightCategory::DomainKnowledge => {
-                config.domain_category_bonus
+            | InsightCategory::Compliance
+            | InsightCategory::Security
+            | InsightCategory::Performance
+            | InsightCategory::Convention => config.constraint_category_bonus,
+            InsightCategory::BusinessRule
+            | InsightCategory::DomainKnowledge
+            | InsightCategory::General => config.domain_category_bonus,
+            InsightCategory::ArchitectureIntent | InsightCategory::Architecture => {
+                config.architecture_bonus
             }
-            InsightCategory::ArchitectureIntent => config.architecture_bonus,
-            InsightCategory::Gotcha => config.gotcha_bonus,
+            InsightCategory::Gotcha | InsightCategory::Workflow => config.gotcha_bonus,
         }
     }
 
@@ -329,7 +348,9 @@ impl ValueScorer {
         }
 
         // Actionable language bonus
-        const ACTIONABLE: &[&str] = &["must", "should", "avoid", "use", "ensure", "verify", "check"];
+        const ACTIONABLE: &[&str] = &[
+            "must", "should", "avoid", "use", "ensure", "verify", "check",
+        ];
         for keyword in ACTIONABLE {
             if text_lower.contains(*keyword) {
                 score += 0.03;
@@ -337,7 +358,14 @@ impl ValueScorer {
         }
 
         // Generic language penalty
-        const GENERIC: &[&str] = &["general", "usually", "sometimes", "might", "could", "possibly"];
+        const GENERIC: &[&str] = &[
+            "general",
+            "usually",
+            "sometimes",
+            "might",
+            "could",
+            "possibly",
+        ];
         for keyword in GENERIC {
             if text_lower.contains(*keyword) {
                 score -= 0.05;
@@ -365,7 +393,8 @@ mod tests {
             id: "test".to_string(),
             category: InsightCategory::SecurityConstraint,
             title: "SQL Injection Vulnerability".to_string(),
-            description: "Must sanitize all user input to prevent SQL injection attacks".to_string(),
+            description: "Must sanitize all user input to prevent SQL injection attacks"
+                .to_string(),
             prevention_info: Some("Use parameterized queries".to_string()),
             evidence: vec!["src/db.rs".to_string()],
             source: InsightSource::MistakeAnalysis,

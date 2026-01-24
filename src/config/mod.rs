@@ -2,10 +2,11 @@
 //!
 //! Unified configuration system with hierarchical resolution:
 //! 1. Built-in defaults
-//! 2. Global config (~/.claudegen/config.yaml)
-//! 3. Project config (.claudegen/config.yaml)
+//! 2. Global config (~/.config/claudegen/config.toml)
+//! 3. Project config (.claudegen/config.toml)
 //! 4. Environment variables (CLAUDEGEN_*)
-//! 5. CLI arguments (highest priority)
+//!
+//! All configuration types are defined in `types.rs` and re-exported from this module.
 
 mod loader;
 mod types;

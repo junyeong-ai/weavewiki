@@ -12,8 +12,8 @@ use tokio::fs;
 use crate::config::ProjectType;
 use crate::types::Result;
 
-use super::project_detection::{ProjectDetection, WorkspaceConfig, WorkspaceType};
 use super::OutputStrategy;
+use super::project_detection::{ProjectDetection, WorkspaceConfig, WorkspaceType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonorepoAnalysis {
@@ -138,7 +138,10 @@ impl MonorepoAnalyzer {
         for member in &workspace.members {
             let path = self.resolve_glob_path(&member.path).await;
             for resolved_path in path {
-                if let Some(info) = self.analyze_single_subproject(&resolved_path, workspace).await? {
+                if let Some(info) = self
+                    .analyze_single_subproject(&resolved_path, workspace)
+                    .await?
+                {
                     subprojects.push(info);
                 }
             }
@@ -153,22 +156,23 @@ impl MonorepoAnalyzer {
 
         if full_path.exists() && full_path.is_dir() {
             if pattern.contains('*')
-                && let Ok(mut entries) = fs::read_dir(&full_path).await {
-                    let mut paths = Vec::new();
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        if entry.path().is_dir() {
-                            let relative = entry
-                                .path()
-                                .strip_prefix(&self.project_root)
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            if !relative.is_empty() {
-                                paths.push(relative);
-                            }
+                && let Ok(mut entries) = fs::read_dir(&full_path).await
+            {
+                let mut paths = Vec::new();
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if entry.path().is_dir() {
+                        let relative = entry
+                            .path()
+                            .strip_prefix(&self.project_root)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if !relative.is_empty() {
+                            paths.push(relative);
                         }
                     }
-                    return paths;
                 }
+                return paths;
+            }
             return vec![clean_pattern.to_string()];
         }
 
@@ -230,17 +234,13 @@ impl MonorepoAnalyzer {
 
         // Fall back to workspace-type-based detection
         match workspace.workspace_type {
-            WorkspaceType::CargoWorkspace => {
-                self.detect_rust_subproject_type(path).await
-            }
+            WorkspaceType::CargoWorkspace => self.detect_rust_subproject_type(path).await,
             WorkspaceType::PnpmWorkspace
             | WorkspaceType::NpmWorkspace
             | WorkspaceType::YarnWorkspace
             | WorkspaceType::TurboRepo
             | WorkspaceType::NxWorkspace
-            | WorkspaceType::LernaMonorepo => {
-                self.detect_js_subproject_type(path).await
-            }
+            | WorkspaceType::LernaMonorepo => self.detect_js_subproject_type(path).await,
             WorkspaceType::GradleMultiProject | WorkspaceType::MavenMultiModule => {
                 self.detect_jvm_subproject_type(path).await
             }
@@ -252,9 +252,7 @@ impl MonorepoAnalyzer {
     async fn detect_rust_subproject_type(&self, path: &Path) -> (ProjectType, String) {
         let cargo_path = path.join("Cargo.toml");
         if let Ok(content) = fs::read_to_string(&cargo_path).await {
-            if content.contains("clap")
-                || content.contains("structopt")
-                || content.contains("argh")
+            if content.contains("clap") || content.contains("structopt") || content.contains("argh")
             {
                 return (ProjectType::Cli, "rust".to_string());
             }
@@ -308,10 +306,7 @@ impl MonorepoAnalyzer {
     async fn detect_jvm_subproject_type(&self, path: &Path) -> (ProjectType, String) {
         let build_gradle = path.join("build.gradle.kts");
         let lang = if build_gradle.exists() || path.join("build.gradle").exists() {
-            if path
-                .join("src/main/kotlin")
-                .exists()
-            {
+            if path.join("src/main/kotlin").exists() {
                 "kotlin"
             } else {
                 "java"
@@ -325,13 +320,13 @@ impl MonorepoAnalyzer {
             && (content.contains("spring-boot")
                 || content.contains("ktor")
                 || content.contains("micronaut"))
-            {
-                return (ProjectType::Backend, lang);
-            }
+        {
+            return (ProjectType::Backend, lang);
+        }
 
         if path.join("src/main").exists() {
-            let main_exists = path.join("src/main/kotlin").exists()
-                || path.join("src/main/java").exists();
+            let main_exists =
+                path.join("src/main/kotlin").exists() || path.join("src/main/java").exists();
             if main_exists {
                 return (ProjectType::Backend, lang);
             }
@@ -376,7 +371,7 @@ impl MonorepoAnalyzer {
                 if let Ok(content) = fs::read_to_string(path.join("package.json")).await {
                     for member in &workspace.members {
                         let member_name = member.name.as_deref().unwrap_or(&member.path);
-                        if content.contains(&"\"@".to_string() ) && content.contains(member_name) {
+                        if content.contains(&"\"@".to_string()) && content.contains(member_name) {
                             deps.push(member_name.to_string());
                         }
                     }
@@ -401,10 +396,7 @@ impl MonorepoAnalyzer {
                 "index.ts",
                 "index.js",
             ],
-            "kotlin" | "java" => vec![
-                "src/main/kotlin/Main.kt",
-                "src/main/java/Main.java",
-            ],
+            "kotlin" | "java" => vec!["src/main/kotlin/Main.kt", "src/main/java/Main.java"],
             "go" => vec!["main.go", "cmd/main.go"],
             _ => vec![],
         };
@@ -512,10 +504,7 @@ impl MonorepoAnalyzer {
             .into_iter()
             .map(|((proj_type, lang), sps)| {
                 let name = format!("{}-{}", proj_type.as_str(), lang);
-                let paths: Vec<String> = sps
-                    .iter()
-                    .map(|sp| format!("{}/**", sp.path))
-                    .collect();
+                let paths: Vec<String> = sps.iter().map(|sp| format!("{}/**", sp.path)).collect();
 
                 RulesGroup {
                     name,

@@ -73,7 +73,10 @@ impl SynthesizedAnalysis {
 
         tracing::debug!(
             resolved = resolved_count,
-            remaining = self.validation.conflicts.iter()
+            remaining = self
+                .validation
+                .conflicts
+                .iter()
                 .filter(|c| matches!(c.resolution, ConflictResolution::Unresolved))
                 .count(),
             "Conflict resolution complete"
@@ -90,11 +93,11 @@ impl SynthesizedAnalysis {
                 // Deep analysis reads actual code, so typically more reliable
                 if conflict.source_a == "deep_analysis" {
                     ConflictResolution::PreferSourceA(
-                        "Deep analysis reads actual code structure".into()
+                        "Deep analysis reads actual code structure".into(),
                     )
                 } else if conflict.source_b == "deep_analysis" {
                     ConflictResolution::PreferSourceB(
-                        "Deep analysis reads actual code structure".into()
+                        "Deep analysis reads actual code structure".into(),
                     )
                 } else {
                     // Both from same source type - merge with lower confidence
@@ -134,7 +137,8 @@ impl SynthesizedAnalysis {
                 // Dependencies: code parsing is authoritative
                 if conflict.source_a.contains("code") || conflict.source_a.contains("parse") {
                     ConflictResolution::PreferSourceA("Code parsing is authoritative".into())
-                } else if conflict.source_b.contains("code") || conflict.source_b.contains("parse") {
+                } else if conflict.source_b.contains("code") || conflict.source_b.contains("parse")
+                {
                     ConflictResolution::PreferSourceB("Code parsing is authoritative".into())
                 } else {
                     // Merge as both might be valid
@@ -185,7 +189,8 @@ impl SynthesizedAnalysis {
 
     /// Get all unresolved conflicts
     pub fn unresolved_conflicts(&self) -> Vec<&AnalysisConflict> {
-        self.validation.conflicts
+        self.validation
+            .conflicts
             .iter()
             .filter(|c| matches!(c.resolution, ConflictResolution::Unresolved))
             .collect()
@@ -193,7 +198,8 @@ impl SynthesizedAnalysis {
 
     /// Check if all conflicts are resolved
     pub fn all_conflicts_resolved(&self) -> bool {
-        self.validation.conflicts
+        self.validation
+            .conflicts
             .iter()
             .all(|c| !matches!(c.resolution, ConflictResolution::Unresolved))
     }
@@ -435,7 +441,10 @@ impl AnalysisSynthesizer {
             if valid_locations.len() == pattern.locations.len() && !pattern.locations.is_empty() {
                 validation.confirmed_findings.push(ConfirmedFinding {
                     category: FindingCategory::Pattern,
-                    description: format!("Pattern '{}' confirmed with valid file references", pattern.name),
+                    description: format!(
+                        "Pattern '{}' confirmed with valid file references",
+                        pattern.name
+                    ),
                     sources: vec!["deep_analysis".into(), "file_registry".into()],
                     confidence: 0.9,
                 });
@@ -456,10 +465,14 @@ impl AnalysisSynthesizer {
                 .filter(|e| file_registry.contains(&e.file))
                 .collect();
 
-            if valid_evidence.len() == constraint.evidence.len() && !constraint.evidence.is_empty() {
+            if valid_evidence.len() == constraint.evidence.len() && !constraint.evidence.is_empty()
+            {
                 validation.confirmed_findings.push(ConfirmedFinding {
                     category: FindingCategory::Constraint,
-                    description: format!("Constraint '{}' confirmed with evidence", constraint.title),
+                    description: format!(
+                        "Constraint '{}' confirmed with evidence",
+                        constraint.title
+                    ),
                     sources: vec!["deep_analysis".into(), "file_registry".into()],
                     confidence: 0.85,
                 });
@@ -534,11 +547,7 @@ impl AnalysisSynthesizer {
         validation: &mut CrossValidation,
     ) {
         // Check for files not covered by any analysis
-        let analyzed_files: HashSet<_> = deep
-            .insights
-            .iter()
-            .map(|i| i.file.as_str())
-            .collect();
+        let analyzed_files: HashSet<_> = deep.insights.iter().map(|i| i.file.as_str()).collect();
 
         let total_files = file_registry.file_count();
         let analyzed_count = analyzed_files.len();
@@ -577,16 +586,17 @@ impl AnalysisSynthesizer {
 
         // Check structural coverage
         if let Some(structural) = structural
-            && !structural.coverage_report.missing_modules.is_empty() {
-                validation.gaps.push(CoverageGap {
-                    area: "Module documentation".into(),
-                    reason: format!(
-                        "{} core modules not documented",
-                        structural.coverage_report.missing_modules.len()
-                    ),
-                    impact: GapImpact::High,
-                });
-            }
+            && !structural.coverage_report.missing_modules.is_empty()
+        {
+            validation.gaps.push(CoverageGap {
+                area: "Module documentation".into(),
+                reason: format!(
+                    "{} core modules not documented",
+                    structural.coverage_report.missing_modules.len()
+                ),
+                impact: GapImpact::High,
+            });
+        }
     }
 
     fn merge_modules(
@@ -635,11 +645,7 @@ impl AnalysisSynthesizer {
                         module.name.clone(),
                         MergedModule {
                             name: module.name.clone(),
-                            path: module
-                                .key_files
-                                .first()
-                                .cloned()
-                                .unwrap_or_default(),
+                            path: module.key_files.first().cloned().unwrap_or_default(),
                             responsibility: String::new(),
                             file_count: module.file_count,
                             key_files: module.key_files.clone(),
@@ -710,13 +716,12 @@ impl AnalysisSynthesizer {
         let gap_penalty = (gap_count * 0.05).min(0.3);
 
         // Architecture confidence
-        let architecture = if deep.structure.entry_points.is_empty()
-            && deep.structure.core_modules.is_empty()
-        {
-            0.2
-        } else {
-            base_confidence - gap_penalty * 0.5
-        };
+        let architecture =
+            if deep.structure.entry_points.is_empty() && deep.structure.core_modules.is_empty() {
+                0.2
+            } else {
+                base_confidence - gap_penalty * 0.5
+            };
 
         // Pattern confidence
         let patterns = if deep.patterns.is_empty() {
@@ -824,9 +829,7 @@ impl AnalysisSynthesizer {
             if matches!(conflict.resolution, ConflictResolution::Unresolved) {
                 targets.unresolved_conflicts.push(format!(
                     "{:?}: {} vs {}",
-                    conflict.category,
-                    conflict.claim_a,
-                    conflict.claim_b
+                    conflict.category, conflict.claim_a, conflict.claim_b
                 ));
             }
         }
@@ -871,7 +874,7 @@ impl AnalysisSynthesizer {
         synthesis: &mut SynthesizedAnalysis,
         ast_facts: &super::ast_enrichment::AstFacts,
     ) {
-        use super::ast_enrichment::ValidationResult;
+        use super::ast_enrichment::AstValidation;
 
         let mut validated_count = 0;
         let mut corrected_count = 0;
@@ -880,36 +883,33 @@ impl AnalysisSynthesizer {
         // Validate key abstraction locations
         for abstraction in &synthesis.deep.key_abstractions {
             let result = match abstraction.kind {
-                super::deep_analyzer::AbstractionKind::Function => {
-                    ast_facts.validate_function_reference(
+                super::deep_analyzer::AbstractionKind::Function => ast_facts
+                    .validate_function_reference(
                         &abstraction.name,
                         &abstraction.file,
                         abstraction.line,
-                    )
-                }
+                    ),
                 super::deep_analyzer::AbstractionKind::Struct
                 | super::deep_analyzer::AbstractionKind::Class
                 | super::deep_analyzer::AbstractionKind::Enum
-                | super::deep_analyzer::AbstractionKind::Type => {
-                    ast_facts.validate_type_reference(
-                        &abstraction.name,
-                        &abstraction.file,
-                        abstraction.line,
-                    )
-                }
-                _ => ValidationResult::Exact,
+                | super::deep_analyzer::AbstractionKind::Type => ast_facts.validate_type_reference(
+                    &abstraction.name,
+                    &abstraction.file,
+                    abstraction.line,
+                ),
+                _ => AstValidation::Exact,
             };
 
             match result {
-                ValidationResult::Exact => validated_count += 1,
-                ValidationResult::Close { .. } => {
+                AstValidation::Exact => validated_count += 1,
+                AstValidation::Close { .. } => {
                     validated_count += 1;
                     corrected_count += 1;
                 }
-                ValidationResult::WrongLine { .. } | ValidationResult::WrongFile { .. } => {
+                AstValidation::WrongLine { .. } | AstValidation::WrongFile { .. } => {
                     corrected_count += 1;
                 }
-                ValidationResult::NotFound => {
+                AstValidation::NotFound => {
                     invalidated_count += 1;
                 }
             }

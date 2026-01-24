@@ -84,58 +84,72 @@ pub enum TypeKind {
 
 impl AstFacts {
     /// Check if a function exists at the claimed location
-    pub fn validate_function_reference(&self, name: &str, file: &str, line: u32) -> ValidationResult {
+    pub fn validate_function_reference(&self, name: &str, file: &str, line: u32) -> AstValidation {
         let key = format!("{}:{}", file, name);
 
         if let Some(fact) = self.functions.get(&key) {
             if fact.line == line {
-                return ValidationResult::Exact;
+                return AstValidation::Exact;
             }
             // Allow small line number variance (within 5 lines)
             if (fact.line as i32 - line as i32).abs() <= 5 {
-                return ValidationResult::Close { actual_line: fact.line };
+                return AstValidation::Close {
+                    actual_line: fact.line,
+                };
             }
-            return ValidationResult::WrongLine { actual_line: fact.line };
+            return AstValidation::WrongLine {
+                actual_line: fact.line,
+            };
         }
 
         // Check if function exists anywhere in the file
         for (k, fact) in &self.functions {
             if k.ends_with(&format!(":{}", name)) && fact.file == file {
-                return ValidationResult::WrongLine { actual_line: fact.line };
+                return AstValidation::WrongLine {
+                    actual_line: fact.line,
+                };
             }
         }
 
         // Check if function exists in a different file
         for fact in self.functions.values() {
             if fact.name == name {
-                return ValidationResult::WrongFile { actual_file: fact.file.clone() };
+                return AstValidation::WrongFile {
+                    actual_file: fact.file.clone(),
+                };
             }
         }
 
-        ValidationResult::NotFound
+        AstValidation::NotFound
     }
 
     /// Check if a type (struct/enum/class) exists at the claimed location
-    pub fn validate_type_reference(&self, name: &str, file: &str, line: u32) -> ValidationResult {
+    pub fn validate_type_reference(&self, name: &str, file: &str, line: u32) -> AstValidation {
         let key = format!("{}:{}", file, name);
 
         if let Some(fact) = self.types.get(&key) {
             if fact.line == line {
-                return ValidationResult::Exact;
+                return AstValidation::Exact;
             }
             if (fact.line as i32 - line as i32).abs() <= 5 {
-                return ValidationResult::Close { actual_line: fact.line };
+                return AstValidation::Close {
+                    actual_line: fact.line,
+                };
             }
-            return ValidationResult::WrongLine { actual_line: fact.line };
+            return AstValidation::WrongLine {
+                actual_line: fact.line,
+            };
         }
 
         for fact in self.types.values() {
             if fact.name == name {
-                return ValidationResult::WrongFile { actual_file: fact.file.clone() };
+                return AstValidation::WrongFile {
+                    actual_file: fact.file.clone(),
+                };
             }
         }
 
-        ValidationResult::NotFound
+        AstValidation::NotFound
     }
 
     /// Get all public functions for a file
@@ -159,7 +173,8 @@ impl AstFacts {
         self.imports
             .iter()
             .flat_map(|(file, imports)| {
-                imports.iter()
+                imports
+                    .iter()
                     .filter(|i| i.is_internal)
                     .map(move |i| (file, i))
             })
@@ -186,7 +201,11 @@ impl AstFacts {
             total_functions: self.functions.len(),
             total_types: self.types.len(),
             total_traits: self.traits.len(),
-            public_functions: self.functions.values().filter(|f| f.visibility == Visibility::Public).count(),
+            public_functions: self
+                .functions
+                .values()
+                .filter(|f| f.visibility == Visibility::Public)
+                .count(),
             async_functions: self.functions.values().filter(|f| f.is_async).count(),
         }
     }
@@ -204,7 +223,7 @@ pub struct AstStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidationResult {
+pub enum AstValidation {
     /// Reference is exactly correct
     Exact,
     /// Reference is close (within 5 lines)
@@ -217,7 +236,7 @@ pub enum ValidationResult {
     NotFound,
 }
 
-impl ValidationResult {
+impl AstValidation {
     pub fn is_valid(&self) -> bool {
         matches!(self, Self::Exact | Self::Close { .. })
     }
@@ -293,11 +312,7 @@ impl AstEnricher {
         facts
     }
 
-    fn extract_file_facts(
-        file_path: &str,
-        content: &str,
-        parser: &dyn Parser,
-    ) -> Result<AstFacts> {
+    fn extract_file_facts(file_path: &str, content: &str, parser: &dyn Parser) -> Result<AstFacts> {
         let parse_result = parser.parse(file_path, content)?;
         let mut facts = AstFacts::default();
 
@@ -310,25 +325,32 @@ impl AstEnricher {
                         _ => Visibility::Private,
                     };
 
-                    let is_async = node.metadata.signature
+                    let is_async = node
+                        .metadata
+                        .signature
                         .as_ref()
                         .map(|s| s.is_async)
                         .unwrap_or(false);
 
-                    let param_count = node.metadata.signature
+                    let param_count = node
+                        .metadata
+                        .signature
                         .as_ref()
                         .map(|s| s.parameters.len())
                         .unwrap_or(0);
 
                     let key = format!("{}:{}", file_path, node.name);
-                    facts.functions.insert(key, FunctionFact {
-                        name: node.name.clone(),
-                        file: file_path.to_string(),
-                        line: node.evidence.start_line,
-                        visibility: vis,
-                        is_async,
-                        parameter_count: param_count,
-                    });
+                    facts.functions.insert(
+                        key,
+                        FunctionFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            visibility: vis,
+                            is_async,
+                            parameter_count: param_count,
+                        },
+                    );
                 }
                 NodeType::Class => {
                     let vis = match node.metadata.visibility {
@@ -338,14 +360,17 @@ impl AstEnricher {
                     };
 
                     let key = format!("{}:{}", file_path, node.name);
-                    facts.types.insert(key, TypeFact {
-                        name: node.name.clone(),
-                        file: file_path.to_string(),
-                        line: node.evidence.start_line,
-                        kind: TypeKind::Struct,
-                        visibility: vis,
-                        field_count: 0,
-                    });
+                    facts.types.insert(
+                        key,
+                        TypeFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            kind: TypeKind::Struct,
+                            visibility: vis,
+                            field_count: 0,
+                        },
+                    );
                 }
                 NodeType::Enum => {
                     let vis = match node.metadata.visibility {
@@ -355,23 +380,29 @@ impl AstEnricher {
                     };
 
                     let key = format!("{}:{}", file_path, node.name);
-                    facts.types.insert(key, TypeFact {
-                        name: node.name.clone(),
-                        file: file_path.to_string(),
-                        line: node.evidence.start_line,
-                        kind: TypeKind::Enum,
-                        visibility: vis,
-                        field_count: 0,
-                    });
+                    facts.types.insert(
+                        key,
+                        TypeFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            kind: TypeKind::Enum,
+                            visibility: vis,
+                            field_count: 0,
+                        },
+                    );
                 }
                 NodeType::Interface => {
                     let key = format!("{}:{}", file_path, node.name);
-                    facts.traits.insert(key, TraitFact {
-                        name: node.name.clone(),
-                        file: file_path.to_string(),
-                        line: node.evidence.start_line,
-                        method_count: 0,
-                    });
+                    facts.traits.insert(
+                        key,
+                        TraitFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            method_count: 0,
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -380,10 +411,11 @@ impl AstEnricher {
         // Extract imports from edges
         for edge in &parse_result.edges {
             if edge.edge_type == crate::types::EdgeType::DependsOn {
-                let is_internal = edge.target_id.contains("crate::")
-                    || edge.target_id.contains("super::");
+                let is_internal =
+                    edge.target_id.contains("crate::") || edge.target_id.contains("super::");
 
-                facts.imports
+                facts
+                    .imports
                     .entry(file_path.to_string())
                     .or_default()
                     .push(ImportFact {
@@ -467,7 +499,10 @@ pub enum ReferenceCheck {
 
 impl ReferenceCheck {
     pub fn is_valid(&self) -> bool {
-        matches!(self, Self::Valid | Self::ValidWithHint { .. } | Self::UnverifiedFile)
+        matches!(
+            self,
+            Self::Valid | Self::ValidWithHint { .. } | Self::UnverifiedFile
+        )
     }
 }
 
@@ -477,10 +512,10 @@ mod tests {
 
     #[test]
     fn test_validation_result_is_valid() {
-        assert!(ValidationResult::Exact.is_valid());
-        assert!(ValidationResult::Close { actual_line: 42 }.is_valid());
-        assert!(!ValidationResult::WrongLine { actual_line: 100 }.is_valid());
-        assert!(!ValidationResult::NotFound.is_valid());
+        assert!(AstValidation::Exact.is_valid());
+        assert!(AstValidation::Close { actual_line: 42 }.is_valid());
+        assert!(!AstValidation::WrongLine { actual_line: 100 }.is_valid());
+        assert!(!AstValidation::NotFound.is_valid());
     }
 
     #[test]
@@ -534,7 +569,7 @@ mod tests {
         );
 
         let result = facts.validate_function_reference("main", "src/main.rs", 15);
-        assert_eq!(result, ValidationResult::Exact);
+        assert_eq!(result, AstValidation::Exact);
     }
 
     #[test]
@@ -553,7 +588,7 @@ mod tests {
         );
 
         let result = facts.validate_function_reference("main", "src/main.rs", 17);
-        assert!(matches!(result, ValidationResult::Close { actual_line: 15 }));
+        assert!(matches!(result, AstValidation::Close { actual_line: 15 }));
     }
 
     #[test]

@@ -2,13 +2,13 @@
 //!
 //! Initialize claudegen in the current directory.
 
+use crate::cli::util::{CLAUDEGEN_DIR, create_graph_db};
 use crate::config::ConfigLoader;
-use crate::storage::Database;
 use crate::types::{ClaudegenError, Result};
 
 pub fn run(force: bool) -> Result<()> {
     let root = std::env::current_dir()?;
-    let claudegen_dir = root.join(".claudegen");
+    let claudegen_dir = root.join(CLAUDEGEN_DIR);
 
     if claudegen_dir.exists() && !force {
         return Err(ClaudegenError::Config(
@@ -31,9 +31,8 @@ pub fn run(force: bool) -> Result<()> {
         tracing::debug!("Global config init skipped: {}", e);
     }
 
-    // Initialize database
-    let db = Database::open(claudegen_dir.join("graph/graph.db"))?;
-    db.initialize()?;
+    // Initialize database using standard path
+    create_graph_db(&claudegen_dir)?;
 
     println!("✓ Initialized claudegen in .claudegen/");
     println!("  Project: {project_name}");

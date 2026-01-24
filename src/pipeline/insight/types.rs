@@ -5,68 +5,10 @@ use serde::{Deserialize, Serialize};
 use super::ValueScore;
 
 pub use crate::config::BusinessRuleType;
+pub use crate::types::insight::TierClassification;
 
-/// Tier classification for value assessment
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TierClassification {
-    /// Reject: Generic knowledge AI already knows
-    Tier0,
-    /// Low value: Can be found in code structure
-    Tier1,
-    /// Medium value: Requires analysis to discover
-    Tier2,
-    /// High value: Hidden knowledge, prevents mistakes
-    Tier3,
-}
-
-impl TierClassification {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Tier0 => "tier0",
-            Self::Tier1 => "tier1",
-            Self::Tier2 => "tier2",
-            Self::Tier3 => "tier3",
-        }
-    }
-
-    pub fn as_priority(&self) -> u8 {
-        match self {
-            Self::Tier0 => 0,
-            Self::Tier1 => 1,
-            Self::Tier2 => 2,
-            Self::Tier3 => 3,
-        }
-    }
-
-    pub fn value_multiplier(&self) -> f32 {
-        match self {
-            Self::Tier0 => 0.0,
-            Self::Tier1 => 0.3,
-            Self::Tier2 => 0.6,
-            Self::Tier3 => 1.0,
-        }
-    }
-}
-
-/// Target artifact classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtifactClassification {
-    ClaudeMd,
-    Rules,
-    Skills,
-    Agents,
-}
-
-impl ArtifactClassification {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ClaudeMd => "claude_md",
-            Self::Rules => "rules",
-            Self::Skills => "skills",
-            Self::Agents => "agents",
-        }
-    }
-}
+// ArtifactClassification re-exported from canonical location
+pub use crate::types::insight::ArtifactClassification;
 
 // ============================================================================
 // Keyword Matching Utilities
@@ -90,6 +32,46 @@ pub struct Insight {
     pub severity: Option<String>,
 }
 
+impl Insight {
+    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            category: InsightCategory::default(),
+            title: title.into(),
+            description: description.into(),
+            prevention_info: None,
+            evidence: Vec::new(),
+            source: InsightSource::ManualAnnotation,
+            severity: None,
+        }
+    }
+
+    pub fn with_category(mut self, category: InsightCategory) -> Self {
+        self.category = category;
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: Vec<String>) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    pub fn with_source(mut self, source: InsightSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_severity(mut self, severity: impl Into<String>) -> Self {
+        self.severity = Some(severity.into());
+        self
+    }
+
+    pub fn with_prevention(mut self, info: impl Into<String>) -> Self {
+        self.prevention_info = Some(info.into());
+        self
+    }
+}
+
 /// Insight with classification and scoring
 #[derive(Debug, Clone)]
 pub struct ExtractedInsight {
@@ -99,10 +81,31 @@ pub struct ExtractedInsight {
     pub value: ValueScore,
 }
 
+impl ExtractedInsight {
+    pub fn new(
+        insight: Insight,
+        tier: TierClassification,
+        artifact: ArtifactClassification,
+    ) -> Self {
+        Self {
+            insight,
+            tier,
+            artifact,
+            value: ValueScore::default(),
+        }
+    }
+
+    pub fn with_value(mut self, value: ValueScore) -> Self {
+        self.value = value;
+        self
+    }
+}
+
 /// Category of insight
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InsightCategory {
+    #[default]
     TechnicalConstraint,
     BusinessRule,
     SecurityConstraint,
@@ -111,6 +114,13 @@ pub enum InsightCategory {
     ArchitectureIntent,
     Gotcha,
     Compliance,
+    // Additional variants used by generation code
+    Workflow,
+    Convention,
+    Architecture,
+    Security,
+    Performance,
+    General,
 }
 
 impl InsightCategory {
@@ -124,6 +134,12 @@ impl InsightCategory {
             Self::ArchitectureIntent => "architecture_intent",
             Self::Gotcha => "gotcha",
             Self::Compliance => "compliance",
+            Self::Workflow => "workflow",
+            Self::Convention => "convention",
+            Self::Architecture => "architecture",
+            Self::Security => "security",
+            Self::Performance => "performance",
+            Self::General => "general",
         }
     }
 }

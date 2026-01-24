@@ -1,7 +1,7 @@
 //! Iteration State Module
 //!
-//! Sequential Thinking 기반 품질 루프 상태 관리.
-//! 동적 iteration 예산, 불확실성 추적, 자기 결정 종료를 제공한다.
+//! Quality loop state management with dynamic iteration budget,
+//! uncertainty tracking, and self-determined termination.
 
 use std::collections::VecDeque;
 
@@ -23,9 +23,6 @@ pub struct IterationState {
     pub tier3_trajectory: VecDeque<usize>,
     pub history: Vec<IterationRecord>,
 }
-
-/// Backward compatibility alias
-pub type ThinkingState = IterationState;
 
 #[derive(Debug, Clone)]
 pub struct RevisionMeta {
@@ -52,18 +49,12 @@ pub struct IterationRecord {
     pub needs_more_thinking: bool,
 }
 
-/// Backward compatibility alias
-pub type ThinkingRecord = IterationRecord;
-
 #[derive(Debug, Clone, Copy)]
 pub enum BudgetExtensionTrigger {
     QualityImproving { min_delta: f32 },
     HighUncertainty { threshold: f32 },
     ValueDiscovery,
 }
-
-/// Backward compatibility alias
-pub type ExtensionTrigger = BudgetExtensionTrigger;
 
 impl IterationState {
     pub fn new(base_iterations: usize, max_extension: usize) -> Self {
@@ -95,7 +86,9 @@ impl IterationState {
         }
 
         let should_extend = match trigger {
-            BudgetExtensionTrigger::QualityImproving { min_delta } => self.is_quality_improving(min_delta),
+            BudgetExtensionTrigger::QualityImproving { min_delta } => {
+                self.is_quality_improving(min_delta)
+            }
             BudgetExtensionTrigger::HighUncertainty { threshold } => self.uncertainty > threshold,
             BudgetExtensionTrigger::ValueDiscovery => self.is_tier3_increasing(),
         };
@@ -132,10 +125,16 @@ impl IterationState {
 
         let window_size = self.quality_trajectory.len().min(UNCERTAINTY_WINDOW);
         let start = self.quality_trajectory.len() - window_size;
-        let window: Vec<f32> = self.quality_trajectory.iter().skip(start).copied().collect();
+        let window: Vec<f32> = self
+            .quality_trajectory
+            .iter()
+            .skip(start)
+            .copied()
+            .collect();
 
         let mean = window.iter().sum::<f32>() / window.len() as f32;
-        let variance = window.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / window.len() as f32;
+        let variance =
+            window.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / window.len() as f32;
 
         self.uncertainty = (variance.sqrt() * 5.0).clamp(0.0, 1.0);
     }
@@ -286,13 +285,21 @@ mod tests {
         for q in [0.7, 0.71, 0.70, 0.72, 0.71] {
             state.record_quality(q);
         }
-        assert!(state.uncertainty < 0.2, "Expected low uncertainty, got {}", state.uncertainty);
+        assert!(
+            state.uncertainty < 0.2,
+            "Expected low uncertainty, got {}",
+            state.uncertainty
+        );
 
         let mut state2 = IterationState::new(10, 5);
         for q in [0.5, 0.8, 0.5, 0.8, 0.5] {
             state2.record_quality(q);
         }
-        assert!(state2.uncertainty > 0.3, "Expected high uncertainty, got {}", state2.uncertainty);
+        assert!(
+            state2.uncertainty > 0.3,
+            "Expected high uncertainty, got {}",
+            state2.uncertainty
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub use llm_classifier::{
     BatchClassificationRequest, ClassificationCache, ClassificationResult, DefaultLlmClassifier,
     InsightSummary, LlmClassifier,
 };
-pub use mistake_finder::{MistakeFinder, MistakeSeverity, PotentialMistake};
+pub use mistake_finder::{MistakeFinder, PotentialMistake};
 pub use types::{
     ArtifactClassification, BusinessRule, Constraint, ConstraintType, DomainKnowledge,
     ExtractedInsight, Insight, InsightCategory, InsightSource, Knowledge, Terminology,
@@ -107,33 +107,31 @@ impl InsightEngine {
         debug!("Collecting insights from all sources");
         self.collect_mistakes(&mut all_insights, ctx).await?;
         self.collect_constraints(&mut all_insights, ctx);
-        self.collect_domain_knowledge(&mut all_insights, ctx).await?;
+        self.collect_domain_knowledge(&mut all_insights, ctx)
+            .await?;
 
         stats.total_extracted = all_insights.len();
         debug!(total = stats.total_extracted, "Raw insights collected");
 
         // Phase 2: Batch classify all insights
         debug!("Classifying insights");
-        let classifications = self
-            .classifier
-            .classify_batch(&all_insights, None)
-            .await;
+        let classifications = self.classifier.classify_batch(&all_insights, None).await;
 
         // Phase 3: Score and filter
         debug!("Scoring and filtering");
         let mut classified_insights = Vec::with_capacity(all_insights.len());
 
         for (insight, result) in all_insights.into_iter().zip(classifications.into_iter()) {
-            if result.tier == TierClassification::Tier0 {
+            if result.tier == TierClassification::Tier0Hallucinated {
                 stats.tier0_rejected += 1;
                 trace!(id = %insight.id, "Rejected: Tier0");
                 continue;
             }
 
             match result.tier {
-                TierClassification::Tier1 => stats.tier1_low_value += 1,
-                TierClassification::Tier2 => stats.tier2_medium += 1,
-                TierClassification::Tier3 => stats.tier3_high_value += 1,
+                TierClassification::Tier1Generic => stats.tier1_low_value += 1,
+                TierClassification::Tier2Convention => stats.tier2_medium += 1,
+                TierClassification::Tier3Constraint => stats.tier3_high_value += 1,
                 _ => {}
             }
 
@@ -160,20 +158,21 @@ impl InsightEngine {
         // Phase 4: Deduplicate
         let (unique, dup_count) = self.deduplicate(classified_insights);
         stats.duplicates_removed = dup_count;
-        debug!(removed = dup_count, remaining = unique.len(), "Deduplication complete");
+        debug!(
+            removed = dup_count,
+            remaining = unique.len(),
+            "Deduplication complete"
+        );
 
         // Organize results
         let by_artifact = self.organize_by_artifact(&unique);
         let high_value: Vec<_> = unique
             .iter()
-            .filter(|i| i.tier == TierClassification::Tier3)
+            .filter(|i| i.tier == TierClassification::Tier3Constraint)
             .cloned()
             .collect();
-        let total_value = unique
-            .iter()
-            .map(|i| i.value.overall)
-            .sum::<f32>()
-            / unique.len().max(1) as f32;
+        let total_value =
+            unique.iter().map(|i| i.value.overall).sum::<f32>() / unique.len().max(1) as f32;
 
         debug!(
             high_value = high_value.len(),
@@ -208,7 +207,7 @@ impl InsightEngine {
                 prevention_info: Some(m.prevention),
                 evidence: m.evidence,
                 source: InsightSource::MistakeAnalysis,
-                severity: Some(m.severity.as_str().to_string()),
+                severity: Some(m.severity.to_string()),
             });
         }
         Ok(())
@@ -339,9 +338,13 @@ impl InsightEngine {
         for i in insights {
             match i.artifact {
                 ArtifactClassification::ClaudeMd => result.claude_md.push(i.clone()),
-                ArtifactClassification::Rules => result.rules.push(i.clone()),
-                ArtifactClassification::Skills => result.skills.push(i.clone()),
-                ArtifactClassification::Agents => result.agents.push(i.clone()),
+                ArtifactClassification::Rule => result.rules.push(i.clone()),
+                ArtifactClassification::Skill => result.skills.push(i.clone()),
+                ArtifactClassification::Agent => result.agents.push(i.clone()),
+                ArtifactClassification::Multiple => {
+                    result.skills.push(i.clone());
+                    result.rules.push(i.clone());
+                }
             }
         }
         result
@@ -459,8 +462,8 @@ mod tests {
                     source: InsightSource::ConstraintDetection,
                     severity: None,
                 },
-                tier: TierClassification::Tier3,
-                artifact: ArtifactClassification::Rules,
+                tier: TierClassification::Tier3Constraint,
+                artifact: ArtifactClassification::Rule,
                 value: ValueScore::default(),
             },
             ExtractedInsight {
@@ -474,7 +477,7 @@ mod tests {
                     source: InsightSource::DomainAnalysis,
                     severity: None,
                 },
-                tier: TierClassification::Tier2,
+                tier: TierClassification::Tier2Convention,
                 artifact: ArtifactClassification::ClaudeMd,
                 value: ValueScore::default(),
             },

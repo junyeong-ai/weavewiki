@@ -1,13 +1,15 @@
 //! Claude Code Rule types - Official spec compliant
-//!
-//! Rules are modular, topic-specific project instructions stored in `.claude/rules/`
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 
 use super::node::EvidenceLocation;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
-use serde::{Deserialize, Serialize};
+use crate::pipeline::generation::GenerationContext;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15,7 +17,17 @@ pub struct Rule {
     pub content: Vec<String>,
     #[serde(skip)]
     pub evidence: Vec<EvidenceLocation>,
+    #[serde(skip)]
+    pub generation_context: Option<Arc<GenerationContext>>,
 }
+
+impl PartialEq for Rule {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.paths == other.paths && self.content == other.content
+    }
+}
+
+impl Eq for Rule {}
 
 impl Rule {
     pub fn new(name: impl Into<String>, content: Vec<String>) -> Self {
@@ -24,6 +36,7 @@ impl Rule {
             paths: None,
             content,
             evidence: Vec::new(),
+            generation_context: None,
         }
     }
 
@@ -34,6 +47,11 @@ impl Rule {
 
     pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
+        self
+    }
+
+    pub fn with_generation_context(mut self, ctx: Arc<GenerationContext>) -> Self {
+        self.generation_context = Some(ctx);
         self
     }
 
@@ -59,7 +77,10 @@ impl Rule {
         let mut issues = Vec::new();
 
         if self.name.is_empty() {
-            issues.push(ValidationIssue::error("RULE_NAME_REQUIRED", "rule name is required"));
+            issues.push(ValidationIssue::error(
+                "RULE_NAME_REQUIRED",
+                "rule name is required",
+            ));
         }
 
         if !is_kebab_case(&self.name) {

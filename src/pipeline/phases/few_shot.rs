@@ -152,10 +152,7 @@ const FRONTEND_EXAMPLE: FewShotExample = FewShotExample {
         "State: TanStack Query + Context",
         "Styling: TailwindCSS",
     ],
-    constraints: &[
-        "No manual API modifications",
-        "No any types - strict mode",
-    ],
+    constraints: &["No manual API modifications", "No any types - strict mode"],
 };
 
 const MONOREPO_EXAMPLE: FewShotExample = FewShotExample {
@@ -182,10 +179,7 @@ const AGENT_EXAMPLE: FewShotExample = FewShotExample {
         "Token budget management",
         "Template-based prompts",
     ],
-    constraints: &[
-        "No hardcoded prompts",
-        "Tools need schema validation",
-    ],
+    constraints: &["No hardcoded prompts", "Tools need schema validation"],
 };
 
 // ============================================================================

@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::ProjectType;
 use crate::types::Result;
 
+use super::OutputStrategy;
 use super::constraint_extraction::ExtractedConstraints;
 use super::convention_inference::InferredConventions;
 use super::monorepo_analyzer::MonorepoAnalysis;
 use super::project_detection::ProjectDetection;
-use super::OutputStrategy;
 use crate::pipeline::analysis::SynthesizedAnalysis;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,6 @@ pub struct ClaudeMdPlan {
     pub content_scope: ContentScope,
     pub sections: Vec<PlannedSection>,
     pub include_architecture: bool,
-    pub include_commands: bool,
     pub include_conventions: bool,
     pub include_constraints: bool,
 }
@@ -204,17 +203,17 @@ impl OutputRouter {
     ) -> ClaudeMdPlan {
         let content_scope = match strategy {
             OutputStrategy::Unified => ContentScope::Full,
-            OutputStrategy::SplitByProject | OutputStrategy::Hierarchical => ContentScope::CommonOnly,
+            OutputStrategy::SplitByProject | OutputStrategy::Hierarchical => {
+                ContentScope::CommonOnly
+            }
             OutputStrategy::SplitByLanguage => ContentScope::OverviewOnly,
         };
 
-        let mut sections = vec![
-            PlannedSection {
-                name: "Overview".to_string(),
-                priority: SectionPriority::Required,
-                source: SectionSource::Detection,
-            },
-        ];
+        let mut sections = vec![PlannedSection {
+            name: "Overview".to_string(),
+            priority: SectionPriority::Required,
+            source: SectionSource::Detection,
+        }];
 
         if !conventions.architecture.pattern_name.is_empty() {
             sections.push(PlannedSection {
@@ -258,9 +257,9 @@ impl OutputRouter {
             content_scope,
             sections,
             include_architecture: true,
-            include_commands: true,
             include_conventions: content_scope == ContentScope::Full,
-            include_constraints: content_scope == ContentScope::Full && !constraints.anti_patterns.is_empty(),
+            include_constraints: content_scope == ContentScope::Full
+                && !constraints.anti_patterns.is_empty(),
         }
     }
 
@@ -371,14 +370,16 @@ impl OutputRouter {
         }
 
         if let Some(mono) = monorepo
-            && strategy.requires_subproject_agents() && mono.subprojects.len() > 1 {
-                planned_skills.push(PlannedSkill {
-                    name: "cross-project-update".to_string(),
-                    trigger: "Coordinated update across projects".to_string(),
-                    source: SkillSource::CrossProjectOperation,
-                    project_scope: None,
-                });
-            }
+            && strategy.requires_subproject_agents()
+            && mono.subprojects.len() > 1
+        {
+            planned_skills.push(PlannedSkill {
+                name: "cross-project-update".to_string(),
+                trigger: "Coordinated update across projects".to_string(),
+                source: SkillSource::CrossProjectOperation,
+                project_scope: None,
+            });
+        }
 
         SkillsPlan {
             generate_skills: !planned_skills.is_empty(),
@@ -415,7 +416,9 @@ impl OutputRouter {
                             role: format!(
                                 "{} domain expert with knowledge of: {}",
                                 module.name,
-                                module.constraints.iter()
+                                module
+                                    .constraints
+                                    .iter()
                                     .take(3)
                                     .map(|c| c.as_str())
                                     .collect::<Vec<_>>()
@@ -428,7 +431,10 @@ impl OutputRouter {
             }
 
             // Create constraint-based agents for areas with many gotchas
-            let constraint_areas = synth.deep.patterns.iter()
+            let constraint_areas = synth
+                .deep
+                .patterns
+                .iter()
                 .filter(|p| p.locations.len() >= 2)
                 .take(2);
 
@@ -437,7 +443,10 @@ impl OutputRouter {
                 if !is_generic_agent_name(&area_name) {
                     planned_agents.push(PlannedAgent {
                         name: format!("{}-debugger", area_name),
-                        role: format!("Debug {} related issues using internal knowledge", pattern.name),
+                        role: format!(
+                            "Debug {} related issues using internal knowledge",
+                            pattern.name
+                        ),
                         scope: AgentScope::Global,
                     });
                 }
@@ -447,20 +456,23 @@ impl OutputRouter {
         // Secondary: Add cross-project coordinator for monorepos
         if strategy.requires_subproject_agents()
             && let Some(mono) = monorepo
-                && mono.subprojects.len() >= 2 {
-                    planned_agents.push(PlannedAgent {
-                        name: "cross-package-coordinator".to_string(),
-                        role: format!(
-                            "Coordinate changes across {} packages with dependency awareness",
-                            mono.subprojects.len()
-                        ),
-                        scope: AgentScope::Global,
-                    });
-                }
+            && mono.subprojects.len() >= 2
+        {
+            planned_agents.push(PlannedAgent {
+                name: "cross-package-coordinator".to_string(),
+                role: format!(
+                    "Coordinate changes across {} packages with dependency awareness",
+                    mono.subprojects.len()
+                ),
+                scope: AgentScope::Global,
+            });
+        }
 
         // Tertiary: Add polyglot coordinator only if truly multi-language
         if detection.languages.len() > 1 {
-            let primary_langs: Vec<_> = detection.languages.iter()
+            let primary_langs: Vec<_> = detection
+                .languages
+                .iter()
                 .filter(|l| l.percentage > 10.0)
                 .map(|l| l.language.as_str())
                 .collect();
@@ -490,9 +502,21 @@ impl OutputRouter {
 /// Check if agent name is too generic (Tier 1)
 fn is_generic_agent_name(name: &str) -> bool {
     const GENERIC_PATTERNS: &[&str] = &[
-        "code-reviewer", "test-writer", "bug-fixer", "feature-developer",
-        "code-assistant", "helper", "navigator", "guide", "checker",
-        "general", "generic", "default", "main", "core", "basic",
+        "code-reviewer",
+        "test-writer",
+        "bug-fixer",
+        "feature-developer",
+        "code-assistant",
+        "helper",
+        "navigator",
+        "guide",
+        "checker",
+        "general",
+        "generic",
+        "default",
+        "main",
+        "core",
+        "basic",
     ];
     let name_lower = name.to_lowercase();
     GENERIC_PATTERNS.iter().any(|p| name_lower.contains(p))

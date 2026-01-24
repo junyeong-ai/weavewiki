@@ -80,17 +80,20 @@ pub struct IssuePattern {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QualityRange {
-    VeryLow,   // 0.0 - threshold[0]
-    Low,       // threshold[0] - threshold[1]
-    Medium,    // threshold[1] - threshold[2]
-    High,      // threshold[2] - threshold[3]
-    VeryHigh,  // threshold[3] - 1.0
+    VeryLow,  // 0.0 - threshold[0]
+    Low,      // threshold[0] - threshold[1]
+    Medium,   // threshold[1] - threshold[2]
+    High,     // threshold[2] - threshold[3]
+    VeryHigh, // threshold[3] - 1.0
 }
 
 impl QualityRange {
     /// Classify quality score using default thresholds
     pub fn from_score(score: f32) -> Self {
-        Self::from_score_with_thresholds(score, &LearningConfig::default().quality_thresholds.as_array())
+        Self::from_score_with_thresholds(
+            score,
+            &LearningConfig::default().quality_thresholds.as_array(),
+        )
     }
 
     /// Classify quality score using custom thresholds
@@ -154,14 +157,21 @@ impl LearningHistory {
         // Bound iterations to prevent unbounded growth
         let max_iterations = self.config.max_stored_iterations;
         if self.iterations.len() > max_iterations {
-            self.iterations.drain(0..self.iterations.len() - max_iterations);
+            self.iterations
+                .drain(0..self.iterations.len() - max_iterations);
         }
     }
 
     pub fn record_outcome(&mut self, outcome: StrategyOutcome) {
-        *self.session_stats.strategy_usage.entry(outcome.strategy_name.clone()).or_insert(0) += 1;
+        *self
+            .session_stats
+            .strategy_usage
+            .entry(outcome.strategy_name.clone())
+            .or_insert(0) += 1;
 
-        let (successes, total) = self.session_stats.strategy_success
+        let (successes, total) = self
+            .session_stats
+            .strategy_success
             .entry(outcome.strategy_name.clone())
             .or_insert((0, 0));
         *total += 1;
@@ -169,7 +179,8 @@ impl LearningHistory {
             *successes += 1;
         }
 
-        let outcomes = self.strategy_outcomes
+        let outcomes = self
+            .strategy_outcomes
             .entry(outcome.strategy_name.clone())
             .or_default();
         outcomes.push(outcome.clone());
@@ -225,7 +236,9 @@ impl LearningHistory {
     /// Prune oldest failing patterns to stay within bounds
     fn prune_oldest_failing_patterns(&mut self) {
         // Remove patterns with oldest last_failure_iteration (least recent)
-        let mut patterns: Vec<_> = self.failing_patterns.iter()
+        let mut patterns: Vec<_> = self
+            .failing_patterns
+            .iter()
             .map(|(k, v)| (k.clone(), v.last_failure_iteration))
             .collect();
         patterns.sort_by_key(|(_, iteration)| *iteration);
@@ -256,7 +269,9 @@ impl LearningHistory {
 
         if let Some(record) = self.failing_patterns.get(&pattern) {
             // Skip if strategy has failed 3+ times for this pattern
-            if record.failed_strategies.contains(&strategy_name.to_string())
+            if record
+                .failed_strategies
+                .contains(&strategy_name.to_string())
                 && record.failure_count >= 3
             {
                 tracing::debug!(
@@ -307,15 +322,20 @@ impl LearningHistory {
             self.prune_oldest_patterns();
         }
 
-        let entry = self.issue_patterns.entry(pattern).or_insert(ResolutionPath {
-            best_strategy: outcome.strategy_name.clone(),
-            success_rate: 0.0,
-            avg_improvement: 0.0,
-            sample_count: 0,
-        });
+        let entry = self
+            .issue_patterns
+            .entry(pattern)
+            .or_insert(ResolutionPath {
+                best_strategy: outcome.strategy_name.clone(),
+                success_rate: 0.0,
+                avg_improvement: 0.0,
+                sample_count: 0,
+            });
 
         let new_count = entry.sample_count + 1;
-        entry.avg_improvement = (entry.avg_improvement * entry.sample_count as f32 + outcome.improvement()) / new_count as f32;
+        entry.avg_improvement = (entry.avg_improvement * entry.sample_count as f32
+            + outcome.improvement())
+            / new_count as f32;
         entry.sample_count = new_count;
 
         let strategy_outcomes = self.strategy_outcomes.get(&outcome.strategy_name);
@@ -331,7 +351,9 @@ impl LearningHistory {
 
     fn prune_oldest_patterns(&mut self) {
         // Remove patterns with lowest sample counts (least useful)
-        let mut patterns: Vec<_> = self.issue_patterns.iter()
+        let mut patterns: Vec<_> = self
+            .issue_patterns
+            .iter()
             .map(|(k, v)| (k.clone(), v.sample_count))
             .collect();
         patterns.sort_by_key(|(_, count)| *count);
@@ -343,7 +365,12 @@ impl LearningHistory {
         }
     }
 
-    pub fn recommend_strategy(&self, issue_kind: &IssueKind, item_name: &str, current_quality: f32) -> Option<String> {
+    pub fn recommend_strategy(
+        &self,
+        issue_kind: &IssueKind,
+        item_name: &str,
+        current_quality: f32,
+    ) -> Option<String> {
         let pattern = IssuePattern {
             issue_type: format!("{:?}", issue_kind),
             artifact_type: self.extract_artifact_type(item_name),
@@ -355,10 +382,10 @@ impl LearningHistory {
 
         if let Some(path) = self.issue_patterns.get(&pattern)
             && path.success_rate >= self.config.recommend_success_threshold
-                && path.sample_count >= self.config.recommend_min_samples
-            {
-                return Some(path.best_strategy.clone());
-            }
+            && path.sample_count >= self.config.recommend_min_samples
+        {
+            return Some(path.best_strategy.clone());
+        }
 
         self.find_similar_pattern(&pattern)
             .and_then(|p| self.issue_patterns.get(&p))
@@ -371,8 +398,13 @@ impl LearningHistory {
             .keys()
             .filter(|p| p.issue_type == target.issue_type)
             .min_by_key(|p| {
-                let type_match = if p.artifact_type == target.artifact_type { 0 } else { 1 };
-                let range_diff = self.quality_range_distance(&p.quality_range, &target.quality_range);
+                let type_match = if p.artifact_type == target.artifact_type {
+                    0
+                } else {
+                    1
+                };
+                let range_diff =
+                    self.quality_range_distance(&p.quality_range, &target.quality_range);
                 type_match * 10 + range_diff
             })
             .cloned()
@@ -392,12 +424,12 @@ impl LearningHistory {
     }
 
     pub fn get_best_strategies(&self, top_n: usize) -> Vec<(String, f32)> {
-        let mut strategies: Vec<_> = self.session_stats.strategy_success
+        let mut strategies: Vec<_> = self
+            .session_stats
+            .strategy_success
             .iter()
             .filter(|(_, (_, total))| *total >= 2)
-            .map(|(name, (successes, total))| {
-                (name.clone(), *successes as f32 / *total as f32)
-            })
+            .map(|(name, (successes, total))| (name.clone(), *successes as f32 / *total as f32))
             .collect();
 
         strategies.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -408,7 +440,8 @@ impl LearningHistory {
         let min_attempts = self.config.failing_strategy_min_attempts;
         let threshold = self.config.failing_strategy_threshold;
 
-        self.session_stats.strategy_success
+        self.session_stats
+            .strategy_success
             .iter()
             .filter(|(_, (successes, total))| {
                 *total >= min_attempts && (*successes as f32 / *total as f32) < threshold
@@ -421,7 +454,8 @@ impl LearningHistory {
         let window = self.config.escalation_window;
         let threshold = self.config.escalation_threshold;
 
-        let recent_outcomes: Vec<_> = self.iterations
+        let recent_outcomes: Vec<_> = self
+            .iterations
             .iter()
             .rev()
             .take(window)
@@ -432,13 +466,22 @@ impl LearningHistory {
             return false;
         }
 
-        let recent_success_rate = recent_outcomes.iter().filter(|o| o.success).count() as f32 / recent_outcomes.len() as f32;
+        let recent_success_rate = recent_outcomes.iter().filter(|o| o.success).count() as f32
+            / recent_outcomes.len() as f32;
         recent_success_rate < threshold
     }
 
     pub fn get_progress_summary(&self) -> ProgressSummary {
-        let initial_quality = self.iterations.first().map(|r| r.quality_before).unwrap_or(0.0);
-        let current_quality = self.iterations.last().map(|r| r.quality_after).unwrap_or(0.0);
+        let initial_quality = self
+            .iterations
+            .first()
+            .map(|r| r.quality_before)
+            .unwrap_or(0.0);
+        let current_quality = self
+            .iterations
+            .last()
+            .map(|r| r.quality_after)
+            .unwrap_or(0.0);
 
         ProgressSummary {
             iterations: self.session_stats.total_iterations,
@@ -469,34 +512,48 @@ impl LearningHistory {
         fs::create_dir_all(&learning_dir).await?;
 
         // Convert HashMaps to Vecs for JSON serialization (JSON keys must be strings)
-        let patterns_vec: Vec<PatternEntry> = self.issue_patterns
+        let patterns_vec: Vec<PatternEntry> = self
+            .issue_patterns
             .iter()
-            .map(|(k, v)| PatternEntry { pattern: k.clone(), resolution: v.clone() })
+            .map(|(k, v)| PatternEntry {
+                pattern: k.clone(),
+                resolution: v.clone(),
+            })
             .collect();
 
         // Save resolution patterns (successful strategies for patterns)
         let patterns_path = learning_dir.join("patterns.json");
-        let patterns_json = serde_json::to_string_pretty(&patterns_vec)
-            .map_err(|e| crate::types::ClaudegenError::Config(format!("Failed to serialize patterns: {}", e)))?;
+        let patterns_json = serde_json::to_string_pretty(&patterns_vec).map_err(|e| {
+            crate::types::ClaudegenError::Config(format!("Failed to serialize patterns: {}", e))
+        })?;
         fs::write(&patterns_path, patterns_json).await?;
 
         // Convert failing patterns HashMap to Vec
-        let failing_vec: Vec<FailingPatternEntry> = self.failing_patterns
+        let failing_vec: Vec<FailingPatternEntry> = self
+            .failing_patterns
             .iter()
-            .map(|(k, v)| FailingPatternEntry { pattern: k.clone(), record: v.clone() })
+            .map(|(k, v)| FailingPatternEntry {
+                pattern: k.clone(),
+                record: v.clone(),
+            })
             .collect();
 
         // Save failing patterns (strategies to avoid)
         let failing_path = learning_dir.join("failing_patterns.json");
-        let failing_json = serde_json::to_string_pretty(&failing_vec)
-            .map_err(|e| crate::types::ClaudegenError::Config(format!("Failed to serialize failing patterns: {}", e)))?;
+        let failing_json = serde_json::to_string_pretty(&failing_vec).map_err(|e| {
+            crate::types::ClaudegenError::Config(format!(
+                "Failed to serialize failing patterns: {}",
+                e
+            ))
+        })?;
         fs::write(&failing_path, failing_json).await?;
 
         // Save session summary for analytics
         let summary = self.get_progress_summary();
         let summary_path = learning_dir.join("last_session.json");
-        let summary_json = serde_json::to_string_pretty(&summary)
-            .map_err(|e| crate::types::ClaudegenError::Config(format!("Failed to serialize summary: {}", e)))?;
+        let summary_json = serde_json::to_string_pretty(&summary).map_err(|e| {
+            crate::types::ClaudegenError::Config(format!("Failed to serialize summary: {}", e))
+        })?;
         fs::write(&summary_path, summary_json).await?;
 
         tracing::info!(
@@ -520,20 +577,33 @@ impl LearningHistory {
         let patterns_path = learning_dir.join("patterns.json");
         let issue_patterns: HashMap<IssuePattern, ResolutionPath> = if patterns_path.exists() {
             let content = fs::read_to_string(&patterns_path).await?;
-            let patterns_vec: Vec<PatternEntry> = serde_json::from_str(&content)
-                .map_err(|e| crate::types::ClaudegenError::Config(format!("Failed to parse patterns: {}", e)))?;
-            patterns_vec.into_iter().map(|e| (e.pattern, e.resolution)).collect()
+            let patterns_vec: Vec<PatternEntry> = serde_json::from_str(&content).map_err(|e| {
+                crate::types::ClaudegenError::Config(format!("Failed to parse patterns: {}", e))
+            })?;
+            patterns_vec
+                .into_iter()
+                .map(|e| (e.pattern, e.resolution))
+                .collect()
         } else {
             HashMap::new()
         };
 
         // Load failing patterns (stored as Vec, convert back to HashMap)
         let failing_path = learning_dir.join("failing_patterns.json");
-        let failing_patterns: HashMap<IssuePattern, FailingPatternRecord> = if failing_path.exists() {
+        let failing_patterns: HashMap<IssuePattern, FailingPatternRecord> = if failing_path.exists()
+        {
             let content = fs::read_to_string(&failing_path).await?;
-            let failing_vec: Vec<FailingPatternEntry> = serde_json::from_str(&content)
-                .map_err(|e| crate::types::ClaudegenError::Config(format!("Failed to parse failing patterns: {}", e)))?;
-            failing_vec.into_iter().map(|e| (e.pattern, e.record)).collect()
+            let failing_vec: Vec<FailingPatternEntry> =
+                serde_json::from_str(&content).map_err(|e| {
+                    crate::types::ClaudegenError::Config(format!(
+                        "Failed to parse failing patterns: {}",
+                        e
+                    ))
+                })?;
+            failing_vec
+                .into_iter()
+                .map(|e| (e.pattern, e.record))
+                .collect()
         } else {
             HashMap::new()
         };
@@ -546,11 +616,11 @@ impl LearningHistory {
 
         Ok(Self {
             config,
-            iterations: Vec::new(),  // Fresh for new session
-            strategy_outcomes: HashMap::new(),  // Fresh for new session
-            issue_patterns,  // Loaded from disk
-            failing_patterns,  // Loaded from disk
-            session_stats: SessionStats::default(),  // Fresh for new session
+            iterations: Vec::new(),                 // Fresh for new session
+            strategy_outcomes: HashMap::new(),      // Fresh for new session
+            issue_patterns,                         // Loaded from disk
+            failing_patterns,                       // Loaded from disk
+            session_stats: SessionStats::default(), // Fresh for new session
         })
     }
 
@@ -735,7 +805,11 @@ mod tests {
 
         let record = failing_patterns.get(&pattern).unwrap();
         assert_eq!(record.failure_count, 1);
-        assert!(record.failed_strategies.contains(&"SemanticStrategy".to_string()));
+        assert!(
+            record
+                .failed_strategies
+                .contains(&"SemanticStrategy".to_string())
+        );
     }
 
     #[test]
@@ -883,8 +957,16 @@ mod tests {
 
         let record = failing_patterns.get(&pattern).unwrap();
         assert_eq!(record.failure_count, 2);
-        assert!(record.failed_strategies.contains(&"SemanticStrategy".to_string()));
-        assert!(record.failed_strategies.contains(&"EvidenceStrategy".to_string()));
+        assert!(
+            record
+                .failed_strategies
+                .contains(&"SemanticStrategy".to_string())
+        );
+        assert!(
+            record
+                .failed_strategies
+                .contains(&"EvidenceStrategy".to_string())
+        );
     }
 
     #[test]
@@ -977,7 +1059,10 @@ mod tests {
 
         assert_eq!(record.failed_strategies, deserialized.failed_strategies);
         assert_eq!(record.failure_count, deserialized.failure_count);
-        assert_eq!(record.last_failure_iteration, deserialized.last_failure_iteration);
+        assert_eq!(
+            record.last_failure_iteration,
+            deserialized.last_failure_iteration
+        );
     }
 
     #[test]
@@ -1023,11 +1108,21 @@ mod tests {
 
         // Verify files exist
         assert!(temp_dir.join(".claudegen/learning/patterns.json").exists());
-        assert!(temp_dir.join(".claudegen/learning/failing_patterns.json").exists());
-        assert!(temp_dir.join(".claudegen/learning/last_session.json").exists());
+        assert!(
+            temp_dir
+                .join(".claudegen/learning/failing_patterns.json")
+                .exists()
+        );
+        assert!(
+            temp_dir
+                .join(".claudegen/learning/last_session.json")
+                .exists()
+        );
 
         // Load and verify
-        let loaded = LearningHistory::load(&temp_dir, LearningConfig::default()).await.unwrap();
+        let loaded = LearningHistory::load(&temp_dir, LearningConfig::default())
+            .await
+            .unwrap();
 
         // Session data should be fresh
         assert!(loaded.iterations.is_empty());

@@ -28,6 +28,29 @@ pub struct EnrichedPlan {
     pub coverage: ConstraintCoverage,
     /// Suggested additional artifacts to cover uncovered constraints
     pub suggested_artifacts: Vec<SuggestedArtifact>,
+    /// Key abstractions from deep analysis (previously lost)
+    pub key_abstractions: Vec<EnrichedAbstraction>,
+    /// File insights with gotchas (previously lost)
+    pub file_insights: Vec<EnrichedFileInsight>,
+}
+
+/// Key abstraction enriched with context
+#[derive(Debug, Clone)]
+pub struct EnrichedAbstraction {
+    pub name: String,
+    pub kind: String,
+    pub file_ref: String,
+    pub description: String,
+    pub usage_notes: Vec<String>,
+}
+
+/// File insight enriched with context
+#[derive(Debug, Clone)]
+pub struct EnrichedFileInsight {
+    pub file: String,
+    pub purpose: String,
+    pub gotchas: Vec<String>,
+    pub key_exports: Vec<String>,
 }
 
 /// A constraint enriched with context for injection into artifacts
@@ -38,7 +61,7 @@ pub struct EnrichedConstraint {
     /// Category (gotcha, hidden_dependency, anti_pattern, order_dependency)
     pub category: ConstraintCategory,
     /// Severity level
-    pub severity: ConstraintSeverity,
+    pub severity: Severity,
     /// File references that evidence this constraint
     pub file_refs: Vec<String>,
     /// Related modules
@@ -88,7 +111,7 @@ pub struct ConstraintCoverage {
 pub struct UncoveredConstraint {
     pub description: String,
     pub category: ConstraintCategory,
-    pub severity: ConstraintSeverity,
+    pub severity: Severity,
     pub suggested_artifact_type: SuggestedArtifactType,
 }
 
@@ -120,13 +143,7 @@ pub enum ConstraintCategory {
     SecurityConstraint,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ConstraintSeverity {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
+use crate::types::Severity;
 
 /// Enrichment Engine that bridges synthesis to generation
 pub struct EnrichmentEngine {
@@ -242,13 +259,65 @@ impl EnrichmentEngine {
         // Generate suggestions for uncovered constraints
         let suggested_artifacts = self.generate_suggestions(&uncovered);
 
+        // Extract key abstractions (previously lost in pipeline)
+        let key_abstractions = self.extract_key_abstractions(synthesis);
+
+        // Extract file insights (previously lost in pipeline)
+        let file_insights = self.extract_file_insights(synthesis);
+
         EnrichedPlan {
             plan,
             skill_constraints,
             agent_knowledge,
             coverage,
             suggested_artifacts,
+            key_abstractions,
+            file_insights,
         }
+    }
+
+    fn extract_key_abstractions(
+        &self,
+        synthesis: Option<&SynthesizedAnalysis>,
+    ) -> Vec<EnrichedAbstraction> {
+        let Some(synth) = synthesis else {
+            return Vec::new();
+        };
+
+        synth
+            .deep
+            .key_abstractions
+            .iter()
+            .map(|a| EnrichedAbstraction {
+                name: a.name.clone(),
+                kind: format!("{:?}", a.kind),
+                file_ref: format!("@{}:{}", a.file, a.line),
+                description: a.description.clone(),
+                usage_notes: a.usage_notes.clone(),
+            })
+            .collect()
+    }
+
+    fn extract_file_insights(
+        &self,
+        synthesis: Option<&SynthesizedAnalysis>,
+    ) -> Vec<EnrichedFileInsight> {
+        let Some(synth) = synthesis else {
+            return Vec::new();
+        };
+
+        synth
+            .deep
+            .insights
+            .iter()
+            .filter(|i| !i.gotchas.is_empty())
+            .map(|i| EnrichedFileInsight {
+                file: i.file.clone(),
+                purpose: i.purpose.clone(),
+                gotchas: i.gotchas.clone(),
+                key_exports: i.key_exports.clone(),
+            })
+            .collect()
     }
 
     /// Collect all constraints from synthesis and extraction
@@ -264,7 +333,7 @@ impl EnrichmentEngine {
             result.push(EnrichedConstraint {
                 description: gotcha.description.clone(),
                 category: ConstraintCategory::Gotcha,
-                severity: ConstraintSeverity::Medium, // Gotcha doesn't have severity field
+                severity: Severity::Medium, // Gotcha doesn't have severity field
                 file_refs: gotcha.related_files.clone(),
                 related_modules: Vec::new(),
             });
@@ -273,18 +342,10 @@ impl EnrichmentEngine {
         // From ExtractedConstraints - Anti-patterns
         for anti in &constraints.anti_patterns {
             let severity = match anti.severity {
-                crate::pipeline::phases::constraint_extraction::Severity::Low => {
-                    ConstraintSeverity::Low
-                }
-                crate::pipeline::phases::constraint_extraction::Severity::Medium => {
-                    ConstraintSeverity::Medium
-                }
-                crate::pipeline::phases::constraint_extraction::Severity::High => {
-                    ConstraintSeverity::High
-                }
-                crate::pipeline::phases::constraint_extraction::Severity::Critical => {
-                    ConstraintSeverity::Critical
-                }
+                crate::types::Severity::Low => Severity::Low,
+                crate::types::Severity::Medium => Severity::Medium,
+                crate::types::Severity::High => Severity::High,
+                crate::types::Severity::Critical => Severity::Critical,
             };
             let file_refs: Vec<String> = anti
                 .evidence
@@ -324,7 +385,7 @@ impl EnrichmentEngine {
             result.push(EnrichedConstraint {
                 description: format!("{} → {}: {}", dep.source, dep.target, dep.description),
                 category: ConstraintCategory::HiddenDependency,
-                severity: ConstraintSeverity::High,
+                severity: Severity::High,
                 file_refs,
                 related_modules: vec![dep.source.clone(), dep.target.clone()],
             });
@@ -338,20 +399,7 @@ impl EnrichmentEngine {
                     .iter()
                     .any(|c| c.description.contains(&constraint.description))
                 {
-                    let severity = match constraint.severity {
-                        crate::pipeline::analysis::deep_analyzer::ConstraintSeverity::Low => {
-                            ConstraintSeverity::Low
-                        }
-                        crate::pipeline::analysis::deep_analyzer::ConstraintSeverity::Medium => {
-                            ConstraintSeverity::Medium
-                        }
-                        crate::pipeline::analysis::deep_analyzer::ConstraintSeverity::High => {
-                            ConstraintSeverity::High
-                        }
-                        crate::pipeline::analysis::deep_analyzer::ConstraintSeverity::Critical => {
-                            ConstraintSeverity::Critical
-                        }
-                    };
+                    let severity = constraint.severity;
 
                     let file_refs: Vec<String> = constraint
                         .evidence
@@ -383,11 +431,26 @@ impl EnrichmentEngine {
                             result.push(EnrichedConstraint {
                                 description: constraint.clone(),
                                 category: ConstraintCategory::Gotcha,
-                                severity: ConstraintSeverity::Medium,
+                                severity: Severity::Medium,
                                 file_refs: vec![format!("@{}", module.path)],
                                 related_modules: vec![module.name.clone()],
                             });
                         }
+                    }
+                }
+            }
+
+            // File insights with gotchas (previously lost in pipeline)
+            for insight in &synth.deep.insights {
+                for gotcha in &insight.gotchas {
+                    if !result.iter().any(|c| c.description == *gotcha) {
+                        result.push(EnrichedConstraint {
+                            description: gotcha.clone(),
+                            category: ConstraintCategory::Gotcha,
+                            severity: Severity::High,
+                            file_refs: vec![format!("@{}", insight.file)],
+                            related_modules: Vec::new(),
+                        });
                     }
                 }
             }
@@ -427,7 +490,7 @@ impl EnrichmentEngine {
                         keywords.iter().any(|kw| m_lower.contains(kw))
                     })
                     // Or high severity constraints that affect common areas
-                    || (c.severity >= ConstraintSeverity::High && self.is_common_constraint(c))
+                    || (c.severity >= Severity::High && self.is_common_constraint(c))
             })
             .cloned()
             .collect();
@@ -520,10 +583,8 @@ impl EnrichmentEngine {
                     use crate::pipeline::analysis::deep_analyzer::ConstraintKind;
                     match constraint.kind {
                         ConstraintKind::AntiPattern => {
-                            anti_patterns.push(format!(
-                                "{}: {}",
-                                constraint.title, constraint.description
-                            ));
+                            anti_patterns
+                                .push(format!("{}: {}", constraint.title, constraint.description));
                         }
                         ConstraintKind::HiddenDependency | ConstraintKind::Invariant => {
                             gotchas.push(format!(
@@ -532,10 +593,8 @@ impl EnrichmentEngine {
                             ));
                         }
                         ConstraintKind::WorkflowRequirement | ConstraintKind::NamingConvention => {
-                            order_dependencies.push(format!(
-                                "{}: {}",
-                                constraint.title, constraint.description
-                            ));
+                            order_dependencies
+                                .push(format!("{}: {}", constraint.title, constraint.description));
                         }
                     }
 
@@ -583,7 +642,7 @@ impl EnrichmentEngine {
                 SuggestedArtifactType::Rule
             }
             _ => {
-                if constraint.severity >= ConstraintSeverity::High {
+                if constraint.severity >= Severity::High {
                     SuggestedArtifactType::Agent
                 } else {
                     SuggestedArtifactType::Skill
@@ -597,7 +656,10 @@ impl EnrichmentEngine {
         // Group by suggested artifact type
         let mut by_type: HashMap<SuggestedArtifactType, Vec<&UncoveredConstraint>> = HashMap::new();
         for c in uncovered {
-            by_type.entry(c.suggested_artifact_type).or_default().push(c);
+            by_type
+                .entry(c.suggested_artifact_type)
+                .or_default()
+                .push(c);
         }
 
         let mut suggestions = Vec::new();
@@ -707,10 +769,10 @@ impl EnrichmentEngine {
 impl EnrichedConstraint {
     pub fn format_for_skill(&self) -> String {
         let severity_marker = match self.severity {
-            ConstraintSeverity::Critical => "⚠️ CRITICAL:",
-            ConstraintSeverity::High => "⚠️",
-            ConstraintSeverity::Medium => "📌",
-            ConstraintSeverity::Low => "💡",
+            Severity::Critical => "⚠️ CRITICAL:",
+            Severity::High => "⚠️",
+            Severity::Medium => "📌",
+            Severity::Low => "💡",
         };
 
         let mut result = format!("{} {}", severity_marker, self.description);
@@ -795,9 +857,9 @@ mod tests {
 
     #[test]
     fn test_severity_ordering() {
-        assert!(ConstraintSeverity::Critical > ConstraintSeverity::High);
-        assert!(ConstraintSeverity::High > ConstraintSeverity::Medium);
-        assert!(ConstraintSeverity::Medium > ConstraintSeverity::Low);
+        assert!(Severity::Critical > Severity::High);
+        assert!(Severity::High > Severity::Medium);
+        assert!(Severity::Medium > Severity::Low);
     }
 
     #[test]
@@ -805,7 +867,7 @@ mod tests {
         let constraint = EnrichedConstraint {
             description: "Provider must be Arc-shared".to_string(),
             category: ConstraintCategory::Concurrency,
-            severity: ConstraintSeverity::Critical,
+            severity: Severity::Critical,
             file_refs: vec!["@src/ai/provider.rs:42".to_string()],
             related_modules: vec!["ai".to_string()],
         };

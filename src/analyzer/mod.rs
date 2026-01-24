@@ -9,4 +9,4 @@ pub mod parser;
 pub mod scanner;
 pub mod structure;
 
-pub use structure::{StructureAnalysis, StructureAnalyzer};
+pub use structure::{ProjectStructure, StructureAnalyzer};

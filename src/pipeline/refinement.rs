@@ -9,29 +9,27 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ai::{with_timeout, LlmProvider};
+use crate::ai::{LlmProvider, with_timeout};
 use crate::config::Config;
 use crate::types::{Agent, DiagnosticLevel, Result, Rule, Skill};
 
-use super::analysis::architectural_analyzer::{
-    ArchitecturalAnalyzer, StructuralValidationResult,
-};
-use super::quality_assessment::{
-    ConvergenceChecker, ConvergencePath, ConvergenceReport, Improvement,
-    TerminationDecision, TerminationReason,
-};
-use super::iteration_state::{IterationState as ThinkingLoopState, BudgetExtensionTrigger, IterationRecord};
+use super::analysis::architectural_analyzer::{ArchitecturalAnalyzer, StructuralValidationResult};
 use super::context::VerifiedFileRegistry;
 use super::feedback::{AggregatedFeedback, FeedbackAggregator};
+use super::iteration_state::{BudgetExtensionTrigger, IterationRecord, IterationState};
 use super::learning::{LearningHistory, StrategyOutcome as LearningOutcome};
 use super::patterns;
 use super::phases::output_router::OutputPlan;
-use super::strategy::{IssueKind as StrategyIssueKind, StrategyContext, StrategyOutcome, StrategyRotator};
-use super::validation::{
-    CrossArtifactResult, CrossValidationResult, IssueCategory as SemanticCategory,
-    SemanticQualityResult, TierFilterResult, UsabilityResult,
+use super::quality::{Artifacts, JudgmentResult, LlmJudge, QualityIssue};
+use super::quality_assessment::{
+    AssessmentPath, Improvement, QualityAssessment, QualityAssessor, TerminationDecision,
+    TerminationReason,
 };
-use crate::types::Severity as SemanticSeverity;
+use super::strategy::{
+    IssueKind as StrategyIssueKind, StrategyAttempt, StrategyContext, StrategyIssue,
+    StrategyRotator,
+};
+use super::validation::{CrossValidationResult, TierFilterResult};
 
 /// Artifact item type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +51,6 @@ impl std::fmt::Display for ItemType {
     }
 }
 
-/// Tier 1 violation placeholder
-#[derive(Debug, Clone)]
-pub struct Tier1Violation {
-    pub item_type: ItemType,
-    pub item_name: String,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct RefinementResult {
     pub skills: Vec<Skill>,
@@ -69,35 +59,139 @@ pub struct RefinementResult {
     pub iterations: usize,
     pub converged: bool,
     pub final_quality: f32,
-    pub semantic_quality: Option<SemanticQualityResult>,
+    pub judgment: Option<JudgmentResult>,
     pub structural_quality: Option<StructuralValidationResult>,
     pub aggregated_feedback: Option<AggregatedFeedback>,
     pub learning_summary: Option<super::learning::ProgressSummary>,
-    pub convergence_report: Option<super::quality_assessment::ConvergenceReport>,
+    pub convergence_report: Option<super::quality_assessment::QualityAssessment>,
 }
 
 #[derive(Debug, Clone)]
-pub struct RefinementIssue {
+pub struct DetectedArtifactIssue {
     pub item_type: ItemType,
     pub item_name: String,
-    pub issue: IssueKind,
+    pub issue: DetectedIssue,
     pub severity: DiagnosticLevel,
 }
 
 #[derive(Debug, Clone)]
-pub enum IssueKind {
-    TooShort { actual: usize, min: usize },
-    MissingReferences { expected: usize, actual: usize },
-    MissingSections { expected: usize, actual: usize },
-    Tier1Content { violation: String },
+pub enum DetectedIssue {
+    TooShort {
+        actual: usize,
+        min: usize,
+    },
+    MissingReferences {
+        expected: usize,
+        actual: usize,
+    },
+    MissingSections {
+        expected: usize,
+        actual: usize,
+    },
+    Tier1Content {
+        violation: String,
+    },
     PlanMismatch,
-    LowActionability { score: f32, threshold: f32 },
-    TooGeneric { description: String },
-    WeakEvidence { description: String },
-    Redundant { description: String },
-    Shallow { description: String },
-    MissingModule { module_name: String, file_count: usize, key_files: Vec<String> },
-    PartialModuleCoverage { module_name: String, coverage: f32 },
+    LowActionability {
+        score: f32,
+        threshold: f32,
+    },
+    TooGeneric {
+        description: String,
+    },
+    WeakEvidence {
+        description: String,
+    },
+    Redundant {
+        description: String,
+    },
+    Shallow {
+        description: String,
+    },
+    MissingModule {
+        module_name: String,
+        file_count: usize,
+        key_files: Vec<String>,
+    },
+    PartialModuleCoverage {
+        module_name: String,
+        coverage: f32,
+    },
+}
+
+impl DetectedIssue {
+    /// Convert to StrategyIssue for refinement context
+    pub fn to_strategy_issue(&self) -> StrategyIssue {
+        let kind = StrategyIssueKind::from(self);
+        let (severity, message) = match self {
+            Self::LowActionability { score, threshold } => (
+                DiagnosticLevel::Warning,
+                format!(
+                    "Low actionability ({:.0}% vs {:.0}% target)",
+                    score * 100.0,
+                    threshold * 100.0
+                ),
+            ),
+            Self::TooGeneric { description } => (
+                DiagnosticLevel::Warning,
+                format!("Too generic: {description}"),
+            ),
+            Self::WeakEvidence { description } => (
+                DiagnosticLevel::Warning,
+                format!("Weak evidence: {description}"),
+            ),
+            Self::Shallow { description } => (
+                DiagnosticLevel::Warning,
+                format!("Shallow coverage: {description}"),
+            ),
+            Self::MissingReferences { expected, actual } => (
+                DiagnosticLevel::Error,
+                format!("Missing references: {actual} of {expected} required"),
+            ),
+            Self::TooShort { actual, min } => (
+                DiagnosticLevel::Error,
+                format!("Too short: {actual} chars (min: {min})"),
+            ),
+            Self::MissingSections { expected, actual } => (
+                DiagnosticLevel::Error,
+                format!("Missing sections: {actual} of {expected} required"),
+            ),
+            Self::Redundant { description } => (
+                DiagnosticLevel::Info,
+                format!("Redundant: {description}"),
+            ),
+            Self::Tier1Content { violation } => (
+                DiagnosticLevel::Error,
+                format!("Tier 1 content: {violation}"),
+            ),
+            Self::PlanMismatch => (
+                DiagnosticLevel::Warning,
+                "Item missing from output plan".to_string(),
+            ),
+            Self::MissingModule {
+                module_name,
+                file_count,
+                key_files,
+            } => (
+                DiagnosticLevel::Error,
+                format!(
+                    "Missing module: '{module_name}' ({file_count} files) - key: {}",
+                    key_files.join(", ")
+                ),
+            ),
+            Self::PartialModuleCoverage {
+                module_name,
+                coverage,
+            } => (
+                DiagnosticLevel::Warning,
+                format!(
+                    "Partial coverage: '{module_name}' at {:.0}%",
+                    coverage * 100.0
+                ),
+            ),
+        };
+        StrategyIssue::new(kind, severity, message)
+    }
 }
 
 /// Snapshot of refinement state for rollback functionality
@@ -108,6 +202,32 @@ struct RefinementSnapshot {
     rules: Vec<Rule>,
     quality: f32,
     iteration: usize,
+}
+
+/// Result of self-critique inner loop
+#[derive(Debug, Clone)]
+pub enum CritiqueResult {
+    /// No issues found, artifacts are clean
+    Clean { quality: f32 },
+    /// Issues found and fixed within iteration limit
+    Fixed {
+        iterations: usize,
+        final_quality: f32,
+    },
+    /// Max iterations reached, some issues may remain
+    MaxIterationsReached {
+        iterations: usize,
+        remaining_issues: usize,
+        final_quality: f32,
+    },
+    /// Skipped due to quality already above threshold
+    Skipped { reason: String },
+}
+
+/// Validation results context for report building
+struct ValidationContext<'a> {
+    judgment: &'a JudgmentResult,
+    structural: Option<&'a StructuralValidationResult>,
 }
 
 /// Configuration context for refinement loop (immutable during iteration)
@@ -165,13 +285,13 @@ impl RefinementLoopConfig {
 }
 
 /// Mutable state tracked across refinement iterations
-/// Note: quality_trajectory and tier3_trajectory are tracked in ThinkingLoopState
+/// Note: quality_trajectory and tier3_trajectory are tracked in IterationState
 struct RefinementState {
     prev_quality: Option<f32>,
     stagnation_count: usize,
     last_structural_result: Option<StructuralValidationResult>,
     strategy_failures: HashMap<String, usize>,
-    last_semantic_result: Option<SemanticQualityResult>,
+    last_judgment: Option<JudgmentResult>,
     critical_improvements: Vec<Improvement>,
     best_state: Option<RefinementSnapshot>,
     rollback_count: usize,
@@ -186,7 +306,7 @@ impl RefinementState {
             stagnation_count: 0,
             last_structural_result: None,
             strategy_failures: HashMap::new(),
-            last_semantic_result: None,
+            last_judgment: None,
             critical_improvements: Vec::new(),
             best_state: None,
             rollback_count: 0,
@@ -203,7 +323,7 @@ impl RefinementState {
     }
 }
 
-/// Simplified validators - actual validation via LLM Judge
+/// Structural validator - semantic validation handled by LlmJudge
 struct Validators {
     structural: Option<ArchitecturalAnalyzer>,
 }
@@ -220,17 +340,6 @@ impl Validators {
         Self { structural }
     }
 
-    async fn run_semantic(
-        &self,
-        _skills: &[Skill],
-        _agents: &[Agent],
-        _rules: &[Rule],
-        _claude_md: &crate::types::ProjectMemory,
-        _project_context: &str,
-    ) -> Result<SemanticQualityResult> {
-        Ok(SemanticQualityResult::default())
-    }
-
     async fn run_structural(
         &self,
         file_registry: &VerifiedFileRegistry,
@@ -240,30 +349,14 @@ impl Validators {
         claude_md: &crate::types::ProjectMemory,
     ) -> Result<Option<StructuralValidationResult>> {
         if let Some(ref analyzer) = self.structural {
-            Ok(Some(analyzer.validate(file_registry, skills, agents, rules, claude_md).await?))
+            Ok(Some(
+                analyzer
+                    .validate(file_registry, skills, agents, rules, claude_md)
+                    .await?,
+            ))
         } else {
             Ok(None)
         }
-    }
-
-    fn run_cross_artifact(
-        &self,
-        _skills: &[Skill],
-        _agents: &[Agent],
-        _rules: &[Rule],
-        _claude_md: &crate::types::ProjectMemory,
-    ) -> Option<CrossArtifactResult> {
-        Some(CrossArtifactResult::default())
-    }
-
-    fn run_usability(
-        &self,
-        _skills: &[Skill],
-        _agents: &[Agent],
-        _rules: &[Rule],
-        _claude_md: &crate::types::ProjectMemory,
-    ) -> Option<UsabilityResult> {
-        Some(UsabilityResult::default())
     }
 }
 
@@ -275,6 +368,7 @@ pub struct RefinementEngine {
     strategy_rotator: StrategyRotator,
     learning_history: LearningHistory,
     feedback_aggregator: FeedbackAggregator,
+    judge: LlmJudge,
 }
 
 impl RefinementEngine {
@@ -291,6 +385,7 @@ impl RefinementEngine {
         let learning_history = LearningHistory::new();
         let target_quality = config.quality().target_score;
         let feedback_aggregator = FeedbackAggregator::new(target_quality);
+        let judge = LlmJudge::new(Arc::clone(&provider));
 
         Self {
             project_root,
@@ -300,6 +395,7 @@ impl RefinementEngine {
             strategy_rotator,
             learning_history,
             feedback_aggregator,
+            judge,
         }
     }
 
@@ -315,9 +411,12 @@ impl RefinementEngine {
         );
         let target_quality = config.quality().target_score;
         let feedback_aggregator = FeedbackAggregator::new(target_quality);
+        let judge = LlmJudge::new(Arc::clone(&provider));
 
         let learning_history = if LearningHistory::has_persisted_data(&project_root) {
-            match LearningHistory::load(&project_root, crate::config::LearningConfig::default()).await {
+            match LearningHistory::load(&project_root, crate::config::LearningConfig::default())
+                .await
+            {
                 Ok(loaded) => {
                     let pattern_count = loaded.pattern_count();
                     let failing_count = loaded.get_failing_patterns().len();
@@ -347,6 +446,7 @@ impl RefinementEngine {
             strategy_rotator,
             learning_history,
             feedback_aggregator,
+            judge,
         })
     }
 
@@ -368,6 +468,272 @@ impl RefinementEngine {
         .await
     }
 
+    /// Self-critique inner loop: iteratively improve artifacts until clean or max iterations
+    pub async fn self_critique_loop(
+        &self,
+        skills: &mut Vec<Skill>,
+        agents: &mut Vec<Agent>,
+        rules: &mut Vec<Rule>,
+    ) -> Result<CritiqueResult> {
+        let critique_cfg = &self.config.refinement().self_critique;
+
+        if !critique_cfg.enabled {
+            return Ok(CritiqueResult::Skipped {
+                reason: "Self-critique disabled".to_string(),
+            });
+        }
+
+        let artifacts = Artifacts {
+            skills: skills.clone(),
+            agents: agents.clone(),
+            rules: rules.clone(),
+        };
+
+        // Initial quality check
+        let initial_judgment = self.judge.evaluate_artifacts(&artifacts).await?;
+        let initial_quality = initial_judgment.overall_score;
+
+        if initial_quality >= critique_cfg.quality_skip_threshold {
+            return Ok(CritiqueResult::Skipped {
+                reason: format!(
+                    "Quality {:.1}% already above threshold {:.1}%",
+                    initial_quality * 100.0,
+                    critique_cfg.quality_skip_threshold * 100.0
+                ),
+            });
+        }
+
+        if initial_judgment.issues.is_empty() {
+            return Ok(CritiqueResult::Clean {
+                quality: initial_quality,
+            });
+        }
+
+        let mut current_quality = initial_quality;
+        let mut iteration = 0;
+
+        while iteration < critique_cfg.max_iterations {
+            iteration += 1;
+
+            let artifacts = Artifacts {
+                skills: skills.clone(),
+                agents: agents.clone(),
+                rules: rules.clone(),
+            };
+
+            let judgment = self.judge.evaluate_artifacts(&artifacts).await?;
+
+            if judgment.issues.is_empty() {
+                tracing::debug!(
+                    iteration,
+                    quality = format!("{:.1}%", judgment.overall_score * 100.0),
+                    "Self-critique: no issues found"
+                );
+                return Ok(CritiqueResult::Fixed {
+                    iterations: iteration,
+                    final_quality: judgment.overall_score,
+                });
+            }
+
+            // Apply fixes based on suggestions
+            let fixes_applied = self
+                .apply_critique_fixes(skills, agents, rules, &judgment)
+                .await?;
+
+            if fixes_applied == 0 {
+                tracing::debug!(
+                    iteration,
+                    remaining_issues = judgment.issues.len(),
+                    "Self-critique: no fixes could be applied"
+                );
+                break;
+            }
+
+            // Re-evaluate after fixes to measure actual improvement
+            let post_fix_artifacts = Artifacts {
+                skills: skills.clone(),
+                agents: agents.clone(),
+                rules: rules.clone(),
+            };
+            let post_fix_judgment = self.judge.evaluate_artifacts(&post_fix_artifacts).await?;
+            let new_quality = post_fix_judgment.overall_score;
+            let improvement = new_quality - current_quality;
+
+            tracing::debug!(
+                iteration,
+                quality = format!("{:.1}%", new_quality * 100.0),
+                improvement = format!("{:+.1}%", improvement * 100.0),
+                fixes_applied,
+                remaining_issues = post_fix_judgment.issues.len(),
+                "Self-critique iteration"
+            );
+
+            if improvement < critique_cfg.min_improvement && iteration > 1 {
+                tracing::debug!(
+                    iteration,
+                    improvement = format!("{:.3}", improvement),
+                    threshold = format!("{:.3}", critique_cfg.min_improvement),
+                    "Self-critique: insufficient improvement, stopping"
+                );
+                break;
+            }
+
+            current_quality = new_quality;
+        }
+
+        // Final evaluation
+        let final_artifacts = Artifacts {
+            skills: skills.clone(),
+            agents: agents.clone(),
+            rules: rules.clone(),
+        };
+        let final_judgment = self.judge.evaluate_artifacts(&final_artifacts).await?;
+
+        Ok(CritiqueResult::MaxIterationsReached {
+            iterations: iteration,
+            remaining_issues: final_judgment.issues.len(),
+            final_quality: final_judgment.overall_score,
+        })
+    }
+
+    /// Apply fixes based on judgment suggestions
+    async fn apply_critique_fixes(
+        &self,
+        skills: &mut Vec<Skill>,
+        agents: &mut Vec<Agent>,
+        rules: &mut Vec<Rule>,
+        judgment: &JudgmentResult,
+    ) -> Result<usize> {
+        let mut fixes_applied = 0;
+
+        for issue in &judgment.issues {
+            // Find matching artifact and apply fix based on issue code
+            match issue.code.as_str() {
+                "weak_evidence" | "missing_references" => {
+                    // These require evidence strategy - mark for later
+                    fixes_applied += self.mark_for_evidence_fix(skills, agents, rules, issue);
+                }
+                "too_generic" | "tier1_content" => {
+                    // Remove or flag generic content
+                    fixes_applied += self.remove_generic_content(skills, agents, rules, issue);
+                }
+                "low_actionability" => {
+                    // Add actionable details from suggestions
+                    fixes_applied +=
+                        self.enhance_actionability(skills, agents, rules, &judgment.suggestions);
+                }
+                _ => {
+                    // Unknown issue type - log and skip
+                    tracing::trace!(code = %issue.code, "Unknown critique issue code");
+                }
+            }
+        }
+
+        Ok(fixes_applied)
+    }
+
+    fn mark_for_evidence_fix(
+        &self,
+        skills: &[Skill],
+        _agents: &[Agent],
+        _rules: &[Rule],
+        issue: &QualityIssue,
+    ) -> usize {
+        // Evidence issues are handled by EvidenceStrategy in the main refinement loop.
+        // Here we just log which artifacts need attention.
+        for skill in skills.iter() {
+            if issue.message.contains(&skill.name)
+                || issue.evidence.iter().any(|e| e.contains(&skill.name))
+            {
+                tracing::debug!(
+                    skill = %skill.name,
+                    issue = %issue.code,
+                    "Skill flagged for evidence enhancement (will be handled by EvidenceStrategy)"
+                );
+            }
+        }
+        // Return 0 - actual fixes deferred to EvidenceStrategy
+        0
+    }
+
+    fn remove_generic_content(
+        &self,
+        skills: &mut Vec<Skill>,
+        agents: &mut Vec<Agent>,
+        rules: &mut Vec<Rule>,
+        issue: &QualityIssue,
+    ) -> usize {
+        let mut removed = 0;
+
+        // Remove skills flagged as generic
+        let initial_skills = skills.len();
+        skills.retain(|s| {
+            let is_generic = issue.message.contains(&s.name)
+                || issue.evidence.iter().any(|e| e.contains(&s.name));
+            if is_generic {
+                tracing::debug!(skill = %s.name, "Removing generic skill");
+            }
+            !is_generic
+        });
+        removed += initial_skills - skills.len();
+
+        // Remove agents flagged as generic
+        let initial_agents = agents.len();
+        agents.retain(|a| {
+            let is_generic = issue.message.contains(&a.name)
+                || issue.evidence.iter().any(|e| e.contains(&a.name));
+            !is_generic
+        });
+        removed += initial_agents - agents.len();
+
+        // Remove rules flagged as generic
+        let initial_rules = rules.len();
+        rules.retain(|r| {
+            let is_generic = issue.message.contains(&r.name)
+                || issue.evidence.iter().any(|e| e.contains(&r.name));
+            !is_generic
+        });
+        removed += initial_rules - rules.len();
+
+        removed
+    }
+
+    fn enhance_actionability(
+        &self,
+        skills: &mut [Skill],
+        agents: &mut [Agent],
+        _rules: &mut [Rule],
+        suggestions: &[super::quality::Suggestion],
+    ) -> usize {
+        let mut enhanced = 0;
+
+        for suggestion in suggestions {
+            if suggestion.action.contains("actionable") || suggestion.action.contains("specific") {
+                // Find and enhance matching skills
+                for skill in skills.iter_mut() {
+                    if suggestion.rationale.contains(&skill.name) {
+                        skill
+                            .body
+                            .push_str(&format!("\n\n### Action Items\n{}", suggestion.action));
+                        enhanced += 1;
+                    }
+                }
+
+                // Find and enhance matching agents
+                for agent in agents.iter_mut() {
+                    if suggestion.rationale.contains(&agent.name) {
+                        agent
+                            .prompt
+                            .push_str(&format!("\n\n### Action Items\n{}", suggestion.action));
+                        enhanced += 1;
+                    }
+                }
+            }
+        }
+
+        enhanced
+    }
+
     async fn refine_inner(
         &mut self,
         mut skills: Vec<Skill>,
@@ -382,45 +748,46 @@ impl RefinementEngine {
             Some(r) => r.clone(),
             None => VerifiedFileRegistry::build(&self.project_root).await?,
         };
-        let project_context = format!("Project root: {}", self.project_root.display());
+        let _project_context = format!("Project root: {}", self.project_root.display());
         let claude_md_content = claude_md.to_markdown();
         let mut state = RefinementState::new();
-        let mut thinking = ThinkingLoopState::new(cfg.base_iterations, cfg.max_extension);
+        let mut thinking = IterationState::new(cfg.base_iterations, cfg.max_extension);
 
         while thinking.should_continue() {
             let iteration = thinking.iteration;
             state.decay_strategy_failures();
 
             // Phase 1: Tier filtering (simplified - actual filtering done by LLM Judge)
-            let _tier_result = TierFilterResult::evaluate(&skills, &agents, &rules, &claude_md_content);
-            let tier1_violations: Vec<Tier1Violation> = Vec::new(); // Violations tracked via LLM Judge
-            // Keep all artifacts - filtering decision moved to quality validation
+            let _tier_result =
+                TierFilterResult::check(&skills, &agents, &rules, &claude_md_content);
+            // Keep all artifacts - filtering decision moved to quality validation via LLM Judge
 
             // Phase 2: Run all validations
             let cv_result = self.assess_quality(&skills, &agents, &rules, claude_md, output_plan);
-            let semantic_result = validators
-                .run_semantic(&skills, &agents, &rules, claude_md, &project_context)
-                .await?;
+            let artifacts = Artifacts {
+                skills: skills.clone(),
+                agents: agents.clone(),
+                rules: rules.clone(),
+            };
+            let judgment = self.judge.evaluate_artifacts(&artifacts).await?;
+            state.last_judgment = Some(judgment.clone());
+
             let structural_result = validators
                 .run_structural(&file_registry, &skills, &agents, &rules, claude_md)
                 .await?;
             if structural_result.is_some() {
                 state.last_structural_result = structural_result.clone();
             }
-            let cross_artifact_result = validators.run_cross_artifact(&skills, &agents, &rules, claude_md);
-            let usability_result = validators.run_usability(&skills, &agents, &rules, claude_md);
 
             // Phase 3: Aggregate feedback
             let aggregated_feedback = self.feedback_aggregator.aggregate(
-                &semantic_result,
+                &judgment,
                 structural_result.as_ref(),
-                cross_artifact_result.as_ref(),
-                usability_result.as_ref(),
                 Some(&cv_result),
             );
 
             let surface_quality = if cv_result.passed { 0.8 } else { 0.5 };
-            let semantic_quality = semantic_result.overall_score;
+            let quality_score = judgment.overall_score;
             let combined_quality = aggregated_feedback.overall_score;
 
             thinking.record_quality(combined_quality);
@@ -433,7 +800,13 @@ impl RefinementEngine {
             if thinking.tier3_trajectory.len() >= VALUE_PLATEAU_WINDOW
                 && combined_quality >= cfg.min_quality_for_value_exit
             {
-                let recent: Vec<usize> = thinking.tier3_trajectory.iter().rev().take(VALUE_PLATEAU_WINDOW).copied().collect();
+                let recent: Vec<usize> = thinking
+                    .tier3_trajectory
+                    .iter()
+                    .rev()
+                    .take(VALUE_PLATEAU_WINDOW)
+                    .copied()
+                    .collect();
                 let max_recent = recent.iter().max().copied().unwrap_or(0);
                 let min_recent = recent.iter().min().copied().unwrap_or(0);
                 if max_recent == min_recent && tier3_count > 0 {
@@ -445,14 +818,14 @@ impl RefinementEngine {
                     );
 
                     let report = self.build_success_report(
-                        ConvergencePath::ValuePlateau,
+                        AssessmentPath::ValuePlateau,
                         iteration + 1,
                         thinking.quality_trajectory_vec(),
                         state.critical_improvements.clone(),
-                        &semantic_result,
-                        structural_result.as_ref(),
-                        cross_artifact_result.as_ref(),
-                        usability_result.as_ref(),
+                        ValidationContext {
+                            judgment: &judgment,
+                            structural: structural_result.as_ref(),
+                        },
                     );
                     self.persist_learning().await;
 
@@ -463,7 +836,7 @@ impl RefinementEngine {
                         iterations: iteration + 1,
                         converged: true,
                         final_quality: combined_quality,
-                        semantic_quality: Some(semantic_result),
+                        judgment: Some(judgment),
                         structural_quality: structural_result,
                         aggregated_feedback: Some(aggregated_feedback),
                         learning_summary: Some(self.learning_history.get_progress_summary()),
@@ -492,7 +865,9 @@ impl RefinementEngine {
 
                 if let (Some(best), Some(_)) = (&state.best_state, state.prev_quality) {
                     let degradation = best.quality - combined_quality;
-                    if degradation > cfg.rollback_threshold && state.rollback_count < cfg.max_rollbacks {
+                    if degradation > cfg.rollback_threshold
+                        && state.rollback_count < cfg.max_rollbacks
+                    {
                         tracing::warn!(
                             iteration = iteration + 1,
                             current = format!("{:.1}%", combined_quality * 100.0),
@@ -526,27 +901,8 @@ impl RefinementEngine {
                 .map(|s| if s.passed { "✓" } else { "✗" })
                 .unwrap_or("-");
 
-            let cross_artifact_status = cross_artifact_result
-                .as_ref()
-                .map(|c| if c.passed { "✓" } else { "✗" })
-                .unwrap_or("-");
-
-            let usability_status = usability_result
-                .as_ref()
-                .map(|u| if u.passed { "✓" } else { "✗" })
-                .unwrap_or("-");
-
-            let dimension_status = format!(
-                "A:{} S:{} E:{} R:{} D:{} M:{} CA:{} U:{}",
-                if semantic_result.actionability.passed { "✓" } else { "✗" },
-                if semantic_result.specificity.passed { "✓" } else { "✗" },
-                if semantic_result.evidence_quality.passed { "✓" } else { "✗" },
-                if semantic_result.redundancy.passed { "✓" } else { "✗" },
-                if semantic_result.depth.passed { "✓" } else { "✗" },
-                structural_status,
-                cross_artifact_status,
-                usability_status,
-            );
+            let tier_status = format!("{:?}", judgment.tier);
+            let issues_count = judgment.issues.len();
 
             // Log structural coverage info
             if let Some(ref sr) = structural_result {
@@ -563,24 +919,24 @@ impl RefinementEngine {
             tracing::info!(
                 iteration = iteration + 1,
                 surface = format!("{:.1}%", surface_quality * 100.0),
-                semantic = format!("{:.1}%", semantic_quality * 100.0),
+                quality = format!("{:.1}%", quality_score * 100.0),
                 combined = format!("{:.1}%", combined_quality * 100.0),
-                aggregated = format!("{:.1}%", aggregated_feedback.overall_score * 100.0),
-                dimensions = dimension_status,
+                tier = tier_status,
+                issues = issues_count,
+                structural = structural_status,
                 target = format!("{:.1}%", cfg.target_quality * 100.0),
                 "Quality assessment"
             );
 
             // Phase 7: Termination decision with uncertainty
             let dimensions_for_check = build_dimensions_status(
-                &semantic_result,
+                &judgment,
                 structural_result.as_ref(),
-                cross_artifact_result.as_ref(),
-                usability_result.as_ref(),
                 &self.config.refinement().dimension_thresholds,
             );
 
-            let convergence_checker = ConvergenceChecker::new(cfg.target_quality, cfg.require_all_dimensions);
+            let convergence_checker =
+                QualityAssessor::new(cfg.target_quality, cfg.require_all_dimensions);
             let termination_decision = convergence_checker.check_with_thinking(
                 combined_quality,
                 &dimensions_for_check,
@@ -601,25 +957,36 @@ impl RefinementEngine {
                     || state.consecutive_convergence_passes >= cfg.post_convergence_passes_required;
 
                 // Oscillation override: too many convergence detections without progress
-                let oscillation_override = state.total_convergence_detections > cfg.max_convergence_detections
+                let oscillation_override = state.total_convergence_detections
+                    > cfg.max_convergence_detections
                     && thinking.uncertainty < cfg.high_uncertainty_threshold;
 
                 if verification_passed || oscillation_override {
                     let (convergence_path, decision_rationale) = match &termination_decision {
-                        TerminationDecision::Terminate(TerminationReason::EarlyExit { quality, uncertainty }) => (
-                            ConvergencePath::EarlyExit,
-                            format!("Early exit: quality={:.1}%, uncertainty={:.2}", quality * 100.0, uncertainty),
+                        TerminationDecision::Terminate(TerminationReason::EarlyExit {
+                            quality,
+                            uncertainty,
+                        }) => (
+                            AssessmentPath::EarlyExit,
+                            format!(
+                                "Early exit: quality={:.1}%, uncertainty={:.2}",
+                                quality * 100.0,
+                                uncertainty
+                            ),
                         ),
-                        TerminationDecision::Terminate(TerminationReason::Converged(path)) => (
-                            *path,
-                            format!("Converged via {}", path.as_str()),
-                        ),
+                        TerminationDecision::Terminate(TerminationReason::Converged(path)) => {
+                            (*path, format!("Converged via {}", path.as_str()))
+                        }
                         TerminationDecision::Terminate(TerminationReason::Satisfied) => (
-                            ConvergencePath::QualityTargetMet,
+                            AssessmentPath::QualityTargetMet,
                             "Satisfied all requirements".to_string(),
                         ),
                         _ => (
-                            if oscillation_override { ConvergencePath::OscillationSettled } else { ConvergencePath::QualityTargetMet },
+                            if oscillation_override {
+                                AssessmentPath::OscillationSettled
+                            } else {
+                                AssessmentPath::QualityTargetMet
+                            },
                             "Verification passed".to_string(),
                         ),
                     };
@@ -637,7 +1004,12 @@ impl RefinementEngine {
                     let (final_skills, final_agents, final_rules, final_quality) =
                         if let Some(ref best) = state.best_state {
                             if best.quality > combined_quality {
-                                (best.skills.clone(), best.agents.clone(), best.rules.clone(), best.quality)
+                                (
+                                    best.skills.clone(),
+                                    best.agents.clone(),
+                                    best.rules.clone(),
+                                    best.quality,
+                                )
                             } else {
                                 (skills, agents, rules, combined_quality)
                             }
@@ -652,10 +1024,10 @@ impl RefinementEngine {
                         iteration + 1,
                         thinking.quality_trajectory_vec(),
                         state.critical_improvements.clone(),
-                        &semantic_result,
-                        structural_result.as_ref(),
-                        cross_artifact_result.as_ref(),
-                        usability_result.as_ref(),
+                        ValidationContext {
+                            judgment: &judgment,
+                            structural: structural_result.as_ref(),
+                        },
                     );
                     self.persist_learning().await;
 
@@ -666,7 +1038,7 @@ impl RefinementEngine {
                         iterations: iteration + 1,
                         converged: true,
                         final_quality,
-                        semantic_quality: Some(semantic_result),
+                        judgment: Some(judgment),
                         structural_quality: structural_result,
                         aggregated_feedback: Some(aggregated_feedback),
                         learning_summary: Some(self.learning_history.get_progress_summary()),
@@ -681,15 +1053,22 @@ impl RefinementEngine {
             let refinement_cfg = self.config.refinement();
             if let Some(prev) = state.prev_quality {
                 let delta = (combined_quality - prev).abs();
-                let improved = combined_quality > prev + refinement_cfg.min_improvement_per_iteration;
+                let improved =
+                    combined_quality > prev + refinement_cfg.min_improvement_per_iteration;
 
                 let is_oscillating = refinement_cfg.detect_oscillation
                     && thinking.quality_trajectory.len() >= refinement_cfg.oscillation_window
                     && {
-                        let window: Vec<f32> = thinking.quality_trajectory
+                        let window: Vec<f32> = thinking
+                            .quality_trajectory
                             .iter()
                             .copied()
-                            .skip(thinking.quality_trajectory.len().saturating_sub(refinement_cfg.oscillation_window))
+                            .skip(
+                                thinking
+                                    .quality_trajectory
+                                    .len()
+                                    .saturating_sub(refinement_cfg.oscillation_window),
+                            )
                             .collect();
                         detect_oscillation(&window, refinement_cfg.oscillation_min_amplitude)
                     };
@@ -741,15 +1120,9 @@ impl RefinementEngine {
                 }
             }
             state.prev_quality = Some(combined_quality);
-            state.last_semantic_result = Some(semantic_result.clone());
 
-            let mut issues = self.identify_issues_with_semantic(
-                &cv_result,
-                &tier1_violations,
-                &skills,
-                &agents,
-                &semantic_result,
-            );
+            let mut issues =
+                self.identify_issues_with_judgment(&cv_result, &skills, &agents, &judgment);
 
             // Add structural issues (missing modules, partial coverage)
             self.add_structural_issues(&mut issues, &structural_result);
@@ -760,11 +1133,13 @@ impl RefinementEngine {
             // Phase 9: Check for no issues remaining
             if issues.is_empty() && iteration >= cfg.min_iterations_for_exit {
                 let quality_acceptable = meets_target
-                    || (!cfg.require_all_dimensions && combined_quality >= cfg.target_quality * 0.9);
+                    || (!cfg.require_all_dimensions
+                        && combined_quality >= cfg.target_quality * 0.9);
 
                 if (converged || !cfg.require_all_dimensions) && quality_acceptable {
                     let no_issues_verification_passed = !cfg.post_convergence_verification
-                        || state.consecutive_convergence_passes >= cfg.post_convergence_passes_required;
+                        || state.consecutive_convergence_passes
+                            >= cfg.post_convergence_passes_required;
 
                     if no_issues_verification_passed {
                         tracing::info!(
@@ -775,14 +1150,14 @@ impl RefinementEngine {
                         );
 
                         let report = self.build_success_report(
-                            ConvergencePath::NoIssuesRemaining,
+                            AssessmentPath::NoIssuesRemaining,
                             iteration + 1,
                             thinking.quality_trajectory_vec(),
                             state.critical_improvements.clone(),
-                            &semantic_result,
-                            structural_result.as_ref(),
-                            cross_artifact_result.as_ref(),
-                            usability_result.as_ref(),
+                            ValidationContext {
+                                judgment: &judgment,
+                                structural: structural_result.as_ref(),
+                            },
                         );
                         self.persist_learning().await;
 
@@ -793,7 +1168,7 @@ impl RefinementEngine {
                             iterations: iteration + 1,
                             converged: meets_target,
                             final_quality: combined_quality,
-                            semantic_quality: Some(semantic_result),
+                            judgment: Some(judgment),
                             structural_quality: structural_result,
                             aggregated_feedback: Some(aggregated_feedback),
                             learning_summary: Some(self.learning_history.get_progress_summary()),
@@ -825,7 +1200,7 @@ impl RefinementEngine {
                     agents,
                     rules,
                     &issues,
-                    &semantic_result,
+                    &judgment,
                     &aggregated_feedback,
                     &file_registry,
                     iteration,
@@ -840,8 +1215,37 @@ impl RefinementEngine {
             agents = new_agents;
             rules = new_rules;
 
+            // Phase 10.5: Self-critique inner loop
+            let critique_result = self
+                .self_critique_loop(&mut skills, &mut agents, &mut rules)
+                .await?;
+            match &critique_result {
+                CritiqueResult::Fixed {
+                    iterations: crit_iters,
+                    final_quality,
+                } => {
+                    tracing::debug!(
+                        iteration = iteration + 1,
+                        critique_iterations = crit_iters,
+                        quality = format!("{:.1}%", final_quality * 100.0),
+                        "Self-critique applied fixes"
+                    );
+                }
+                CritiqueResult::MaxIterationsReached {
+                    remaining_issues, ..
+                } if *remaining_issues > 0 => {
+                    tracing::debug!(
+                        iteration = iteration + 1,
+                        remaining_issues,
+                        "Self-critique reached max iterations with remaining issues"
+                    );
+                }
+                _ => {}
+            }
+
             // Extract changes made from improvements (before moving iter_improvements)
-            let changes_made: Vec<String> = iter_improvements.iter()
+            let changes_made: Vec<String> = iter_improvements
+                .iter()
                 .map(|imp| imp.description.clone())
                 .collect();
 
@@ -849,12 +1253,14 @@ impl RefinementEngine {
 
             // Check if iteration extension is warranted
             if thinking.iteration >= thinking.estimated_total {
-                let extended_quality = thinking.maybe_extend(BudgetExtensionTrigger::QualityImproving {
-                    min_delta: cfg.quality_improving_delta,
-                });
-                let extended_uncertainty = thinking.maybe_extend(BudgetExtensionTrigger::HighUncertainty {
-                    threshold: cfg.high_uncertainty_threshold,
-                });
+                let extended_quality =
+                    thinking.maybe_extend(BudgetExtensionTrigger::QualityImproving {
+                        min_delta: cfg.quality_improving_delta,
+                    });
+                let extended_uncertainty =
+                    thinking.maybe_extend(BudgetExtensionTrigger::HighUncertainty {
+                        threshold: cfg.high_uncertainty_threshold,
+                    });
                 let extended_value = thinking.maybe_extend(BudgetExtensionTrigger::ValueDiscovery);
 
                 if extended_quality || extended_uncertainty || extended_value {
@@ -872,9 +1278,16 @@ impl RefinementEngine {
 
             // Build rationale based on current state
             let decision_rationale = if converged {
-                format!("Converged: quality={:.1}%, uncertainty={:.2}", combined_quality * 100.0, thinking.uncertainty)
+                format!(
+                    "Converged: quality={:.1}%, uncertainty={:.2}",
+                    combined_quality * 100.0,
+                    thinking.uncertainty
+                )
             } else if thinking.uncertainty > cfg.high_uncertainty_threshold {
-                format!("Continue: high uncertainty ({:.2} > {:.2})", thinking.uncertainty, cfg.high_uncertainty_threshold)
+                format!(
+                    "Continue: high uncertainty ({:.2} > {:.2})",
+                    thinking.uncertainty, cfg.high_uncertainty_threshold
+                )
             } else if thinking.is_quality_improving(cfg.quality_improving_delta) {
                 "Continue: quality improving".to_string()
             } else {
@@ -882,7 +1295,8 @@ impl RefinementEngine {
             };
 
             // Extract issues addressed in this iteration
-            let issues_addressed: Vec<String> = issues.iter()
+            let issues_addressed: Vec<String> = issues
+                .iter()
                 .take(cfg.issues_per_iteration)
                 .map(|i| format!("{}:{}", i.item_type, i.item_name))
                 .collect();
@@ -898,7 +1312,8 @@ impl RefinementEngine {
 
             // Include revision info if this iteration follows a rollback
             if let Some(ref revision) = thinking.revision {
-                thinking_record = thinking_record.with_revision(revision.revises_iteration, &revision.reason);
+                thinking_record =
+                    thinking_record.with_revision(revision.revises_iteration, &revision.reason);
                 thinking.end_revision();
             }
 
@@ -907,15 +1322,16 @@ impl RefinementEngine {
 
         // Final quality assessment after max iterations
         let final_cv = self.assess_quality(&skills, &agents, &rules, claude_md, output_plan);
-        let final_semantic = validators
-            .run_semantic(&skills, &agents, &rules, claude_md, &project_context)
-            .await?;
+        let final_artifacts = Artifacts {
+            skills: skills.clone(),
+            agents: agents.clone(),
+            rules: rules.clone(),
+        };
+        let final_judgment = self.judge.evaluate_artifacts(&final_artifacts).await?;
 
         let final_aggregated = self.feedback_aggregator.aggregate(
-            &final_semantic,
+            &final_judgment,
             state.last_structural_result.as_ref(),
-            None,
-            None,
             Some(&final_cv),
         );
         let final_quality = final_aggregated.overall_score;
@@ -931,7 +1347,12 @@ impl RefinementEngine {
                         "Max iterations reached: using best state from iteration {}",
                         best.iteration
                     );
-                    (best.skills.clone(), best.agents.clone(), best.rules.clone(), best.quality)
+                    (
+                        best.skills.clone(),
+                        best.agents.clone(),
+                        best.rules.clone(),
+                        best.quality,
+                    )
                 } else {
                     (skills, agents, rules, final_quality)
                 }
@@ -942,39 +1363,31 @@ impl RefinementEngine {
         tracing::warn!(
             iterations = cfg.max_total(),
             quality = format!("{:.1}%", output_quality * 100.0),
-            semantic = format!("{:.1}%", final_semantic.overall_score * 100.0),
-            dimensions = format!(
-                "A:{} S:{} E:{} R:{} D:{}",
-                if final_semantic.actionability.passed { "✓" } else { "✗" },
-                if final_semantic.specificity.passed { "✓" } else { "✗" },
-                if final_semantic.evidence_quality.passed { "✓" } else { "✗" },
-                if final_semantic.redundancy.passed { "✓" } else { "✗" },
-                if final_semantic.depth.passed { "✓" } else { "✗" },
-            ),
+            judgment_score = format!("{:.1}%", final_judgment.overall_score * 100.0),
+            tier = ?final_judgment.tier,
+            issues = final_judgment.issues.len(),
             "Max iterations reached"
         );
 
         let dimensions_status = build_dimensions_status(
-            &final_semantic,
+            &final_judgment,
             state.last_structural_result.as_ref(),
-            None,
-            None,
             &self.config.refinement().dimension_thresholds,
         );
 
-        let remaining_issues: Vec<super::quality_assessment::RemainingIssue> = final_semantic
+        let remaining_issues: Vec<super::quality_assessment::RemainingIssue> = final_judgment
             .issues
             .iter()
             .map(|issue| super::quality_assessment::RemainingIssue {
-                target: issue.target.clone(),
-                category: format!("{:?}", issue.category),
+                target: issue.code.clone(),
+                category: "quality".to_string(),
                 severity: format!("{:?}", issue.severity),
-                description: issue.description.clone(),
+                description: issue.message.clone(),
                 attempts: cfg.max_total(),
             })
             .collect();
 
-        let report = ConvergenceReport::failure(
+        let report = QualityAssessment::failure(
             cfg.max_total(),
             thinking.quality_trajectory_vec(),
             dimensions_status,
@@ -990,7 +1403,7 @@ impl RefinementEngine {
             iterations: cfg.max_total(),
             converged: false,
             final_quality: output_quality,
-            semantic_quality: state.last_semantic_result.or(Some(final_semantic)),
+            judgment: state.last_judgment.or(Some(final_judgment)),
             structural_quality: state.last_structural_result,
             aggregated_feedback: None,
             learning_summary: Some(self.learning_history.get_progress_summary()),
@@ -1000,23 +1413,18 @@ impl RefinementEngine {
 
     fn build_success_report(
         &self,
-        path: ConvergencePath,
+        path: AssessmentPath,
         iteration: usize,
         quality_trajectory: Vec<f32>,
         critical_improvements: Vec<Improvement>,
-        semantic_result: &SemanticQualityResult,
-        structural_result: Option<&StructuralValidationResult>,
-        cross_artifact_result: Option<&CrossArtifactResult>,
-        usability_result: Option<&UsabilityResult>,
-    ) -> ConvergenceReport {
+        validation: ValidationContext<'_>,
+    ) -> QualityAssessment {
         let dimensions_status = build_dimensions_status(
-            semantic_result,
-            structural_result,
-            cross_artifact_result,
-            usability_result,
+            validation.judgment,
+            validation.structural,
             &self.config.refinement().dimension_thresholds,
         );
-        ConvergenceReport::success(
+        QualityAssessment::success(
             path,
             iteration,
             quality_trajectory,
@@ -1039,32 +1447,22 @@ impl RefinementEngine {
         claude_md: &crate::types::ProjectMemory,
         _output_plan: &OutputPlan,
     ) -> CrossValidationResult {
-        // Simplified: actual validation via LLM Judge
-        CrossValidationResult::validate(skills, agents, rules, claude_md)
+        let empty_registry = VerifiedFileRegistry::empty();
+        let registry = self.file_registry.as_ref().unwrap_or(&empty_registry);
+        CrossValidationResult::check(skills, agents, rules, claude_md, registry)
     }
 
-    fn identify_issues_with_semantic(
+    fn identify_issues_with_judgment(
         &self,
         cv_result: &CrossValidationResult,
-        tier1_violations: &[Tier1Violation],
         skills: &[Skill],
         agents: &[Agent],
-        semantic_result: &SemanticQualityResult,
-    ) -> Vec<RefinementIssue> {
+        judgment: &JudgmentResult,
+    ) -> Vec<DetectedArtifactIssue> {
+        use super::quality::IssueSeverity;
+
         let mut issues = Vec::new();
         let quality_cfg = self.config.quality();
-        let semantic_cfg = self.config.semantic_validation();
-
-        for violation in tier1_violations {
-            issues.push(RefinementIssue {
-                item_type: violation.item_type,
-                item_name: violation.item_name.clone(),
-                issue: IssueKind::Tier1Content {
-                    violation: violation.reason.clone(),
-                },
-                severity: DiagnosticLevel::Warning,
-            });
-        }
 
         for skill in skills {
             issues.extend(self.check_skill_quality(skill, &quality_cfg.skill));
@@ -1076,77 +1474,53 @@ impl RefinementEngine {
 
         for missing in &cv_result.plan_consistency.missing_coverage {
             let (item_type, name) = parse_missing_item(missing);
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type,
                 item_name: name,
-                issue: IssueKind::PlanMismatch,
+                issue: DetectedIssue::PlanMismatch,
                 severity: DiagnosticLevel::Error,
             });
         }
 
-        for semantic_issue in &semantic_result.issues {
-            let (item_type, item_name) = parse_semantic_target(&semantic_issue.target);
-            let severity = match semantic_issue.severity {
-                SemanticSeverity::Critical => DiagnosticLevel::Error,
-                SemanticSeverity::High => DiagnosticLevel::Error,
-                SemanticSeverity::Medium => DiagnosticLevel::Warning,
-                SemanticSeverity::Low => DiagnosticLevel::Info,
+        for quality_issue in &judgment.issues {
+            let severity = match quality_issue.severity {
+                IssueSeverity::Critical => DiagnosticLevel::Error,
+                IssueSeverity::Major => DiagnosticLevel::Warning,
+                IssueSeverity::Minor => DiagnosticLevel::Info,
             };
 
-            let issue_kind = match semantic_issue.category {
-                SemanticCategory::Actionability => IssueKind::LowActionability {
-                    score: semantic_result.actionability.score,
-                    threshold: semantic_cfg.min_actionability,
-                },
-                SemanticCategory::Specificity => IssueKind::TooGeneric {
-                    description: semantic_issue.description.clone(),
-                },
-                SemanticCategory::Evidence => IssueKind::WeakEvidence {
-                    description: semantic_issue.description.clone(),
-                },
-                SemanticCategory::Redundancy => IssueKind::Redundant {
-                    description: semantic_issue.description.clone(),
-                },
-                SemanticCategory::Depth => IssueKind::Shallow {
-                    description: semantic_issue.description.clone(),
-                },
-                SemanticCategory::MissingReference => IssueKind::MissingReferences {
-                    expected: semantic_cfg.min_actionable_items,
-                    actual: 0,
-                },
+            let issue_kind = if quality_issue.code.contains("GENERIC")
+                || quality_issue.code.contains("TIER1")
+            {
+                DetectedIssue::TooGeneric {
+                    description: quality_issue.message.clone(),
+                }
+            } else if quality_issue.code.contains("EVIDENCE")
+                || quality_issue.code.contains("REF")
+            {
+                DetectedIssue::WeakEvidence {
+                    description: quality_issue.message.clone(),
+                }
+            } else if quality_issue.code.contains("REDUNDANT") {
+                DetectedIssue::Redundant {
+                    description: quality_issue.message.clone(),
+                }
+            } else if quality_issue.code.contains("SHALLOW") || quality_issue.code.contains("SHORT")
+            {
+                DetectedIssue::Shallow {
+                    description: quality_issue.message.clone(),
+                }
+            } else {
+                DetectedIssue::TooGeneric {
+                    description: quality_issue.message.clone(),
+                }
             };
 
-            issues.push(RefinementIssue {
-                item_type,
-                item_name,
+            issues.push(DetectedArtifactIssue {
+                item_type: ItemType::ClaudeMd,
+                item_name: quality_issue.code.clone(),
                 issue: issue_kind,
                 severity,
-            });
-        }
-
-        if !semantic_result.actionability.passed {
-            issues.push(RefinementIssue {
-                item_type: ItemType::ClaudeMd,
-                item_name: "CLAUDE.md".to_string(),
-                issue: IssueKind::LowActionability {
-                    score: semantic_result.actionability.score,
-                    threshold: semantic_cfg.min_actionability,
-                },
-                severity: DiagnosticLevel::Warning,
-            });
-        }
-
-        if !semantic_result.specificity.passed && semantic_cfg.reject_generic_content {
-            issues.push(RefinementIssue {
-                item_type: ItemType::ClaudeMd,
-                item_name: "All content".to_string(),
-                issue: IssueKind::TooGeneric {
-                    description: format!(
-                        "Specificity score below threshold: {:.0}%",
-                        semantic_result.specificity.score * 100.0
-                    ),
-                },
-                severity: DiagnosticLevel::Warning,
             });
         }
 
@@ -1156,7 +1530,7 @@ impl RefinementEngine {
 
     fn add_structural_issues(
         &self,
-        issues: &mut Vec<RefinementIssue>,
+        issues: &mut Vec<DetectedArtifactIssue>,
         structural_result: &Option<StructuralValidationResult>,
     ) {
         let Some(structural) = structural_result else {
@@ -1165,10 +1539,10 @@ impl RefinementEngine {
 
         // Add issues for missing modules
         for missing in &structural.coverage_report.missing_modules {
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type: ItemType::ClaudeMd,
                 item_name: format!("module:{}", missing.module.name),
-                issue: IssueKind::MissingModule {
+                issue: DetectedIssue::MissingModule {
                     module_name: missing.module.name.clone(),
                     file_count: missing.module.file_count,
                     key_files: missing.module.key_files.clone(),
@@ -1180,10 +1554,10 @@ impl RefinementEngine {
         // Add issues for partially covered modules
         for partial in &structural.coverage_report.partially_covered {
             if partial.coverage_score < 0.5 {
-                issues.push(RefinementIssue {
+                issues.push(DetectedArtifactIssue {
                     item_type: ItemType::ClaudeMd,
                     item_name: format!("module:{}", partial.module.name),
-                    issue: IssueKind::PartialModuleCoverage {
+                    issue: DetectedIssue::PartialModuleCoverage {
                         module_name: partial.module.name.clone(),
                         coverage: partial.coverage_score,
                     },
@@ -1197,14 +1571,14 @@ impl RefinementEngine {
         &self,
         skill: &Skill,
         cfg: &crate::config::SkillQualityConfig,
-    ) -> Vec<RefinementIssue> {
+    ) -> Vec<DetectedArtifactIssue> {
         let mut issues = Vec::new();
 
         if skill.body.len() < cfg.min_chars {
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type: ItemType::Skill,
                 item_name: skill.name.clone(),
-                issue: IssueKind::TooShort {
+                issue: DetectedIssue::TooShort {
                     actual: skill.body.len(),
                     min: cfg.min_chars,
                 },
@@ -1214,10 +1588,10 @@ impl RefinementEngine {
 
         let ref_count = count_file_references(&skill.body);
         if ref_count < cfg.target_file_refs {
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type: ItemType::Skill,
                 item_name: skill.name.clone(),
-                issue: IssueKind::MissingReferences {
+                issue: DetectedIssue::MissingReferences {
                     expected: cfg.target_file_refs,
                     actual: ref_count,
                 },
@@ -1232,14 +1606,14 @@ impl RefinementEngine {
         &self,
         agent: &Agent,
         cfg: &crate::config::AgentQualityConfig,
-    ) -> Vec<RefinementIssue> {
+    ) -> Vec<DetectedArtifactIssue> {
         let mut issues = Vec::new();
 
         if agent.prompt.len() < cfg.min_chars {
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type: ItemType::Agent,
                 item_name: agent.name.clone(),
-                issue: IssueKind::TooShort {
+                issue: DetectedIssue::TooShort {
                     actual: agent.prompt.len(),
                     min: cfg.min_chars,
                 },
@@ -1249,10 +1623,10 @@ impl RefinementEngine {
 
         let section_count = agent.prompt.matches("##").count();
         if section_count < cfg.min_sections {
-            issues.push(RefinementIssue {
+            issues.push(DetectedArtifactIssue {
                 item_type: ItemType::Agent,
                 item_name: agent.name.clone(),
-                issue: IssueKind::MissingSections {
+                issue: DetectedIssue::MissingSections {
                     expected: cfg.min_sections,
                     actual: section_count,
                 },
@@ -1269,8 +1643,8 @@ impl RefinementEngine {
         mut skills: Vec<Skill>,
         mut agents: Vec<Agent>,
         mut rules: Vec<Rule>,
-        issues: &[RefinementIssue],
-        semantic_result: &SemanticQualityResult,
+        issues: &[DetectedArtifactIssue],
+        judgment: &JudgmentResult,
         aggregated_feedback: &AggregatedFeedback,
         file_registry: &VerifiedFileRegistry,
         iteration: usize,
@@ -1278,7 +1652,13 @@ impl RefinementEngine {
         strategy_retry_limit: usize,
         strategy_failures: &mut std::collections::HashMap<String, usize>,
         combined_quality: f32, // For learning-based strategy recommendation
-    ) -> Result<(Vec<Skill>, Vec<Agent>, Vec<Rule>, Vec<super::quality_assessment::Improvement>, Vec<String>)> {
+    ) -> Result<(
+        Vec<Skill>,
+        Vec<Agent>,
+        Vec<Rule>,
+        Vec<super::quality_assessment::Improvement>,
+        Vec<String>,
+    )> {
         let mut improvements = Vec::new();
         let mut strategies_used = Vec::new();
         let error_issues: Vec<_> = issues
@@ -1287,15 +1667,19 @@ impl RefinementEngine {
             .collect();
 
         for issue in error_issues {
-            if matches!(issue.issue, IssueKind::PlanMismatch) {
+            if matches!(issue.issue, DetectedIssue::PlanMismatch) {
                 match issue.item_type {
                     ItemType::Skill => {
-                        if let Some(skill) = self.regenerate_skill(&issue.item_name, file_registry).await {
+                        if let Some(skill) =
+                            self.regenerate_skill(&issue.item_name, file_registry).await
+                        {
                             skills.push(skill);
                         }
                     }
                     ItemType::Agent => {
-                        if let Some(agent) = self.regenerate_agent(&issue.item_name, file_registry).await {
+                        if let Some(agent) =
+                            self.regenerate_agent(&issue.item_name, file_registry).await
+                        {
                             agents.push(agent);
                         }
                     }
@@ -1309,15 +1693,15 @@ impl RefinementEngine {
             .filter(|i| {
                 matches!(
                     i.issue,
-                    IssueKind::LowActionability { .. }
-                        | IssueKind::TooGeneric { .. }
-                        | IssueKind::WeakEvidence { .. }
-                        | IssueKind::Shallow { .. }
-                        | IssueKind::MissingReferences { .. }
-                        | IssueKind::TooShort { .. }
-                        | IssueKind::MissingSections { .. }
-                        | IssueKind::MissingModule { .. }
-                        | IssueKind::PartialModuleCoverage { .. }
+                    DetectedIssue::LowActionability { .. }
+                        | DetectedIssue::TooGeneric { .. }
+                        | DetectedIssue::WeakEvidence { .. }
+                        | DetectedIssue::Shallow { .. }
+                        | DetectedIssue::MissingReferences { .. }
+                        | DetectedIssue::TooShort { .. }
+                        | DetectedIssue::MissingSections { .. }
+                        | DetectedIssue::MissingModule { .. }
+                        | DetectedIssue::PartialModuleCoverage { .. }
                 )
             })
             .take(issues_per_iteration)
@@ -1340,7 +1724,8 @@ impl RefinementEngine {
             let strategy_issue_kind = StrategyIssueKind::from(&issue.issue);
 
             // Try learning-based strategy selection first
-            let strategy = self.learning_history
+            let strategy = self
+                .learning_history
                 .recommend_strategy(&strategy_issue_kind, &issue.item_name, combined_quality)
                 .and_then(|name| {
                     tracing::debug!(
@@ -1351,12 +1736,17 @@ impl RefinementEngine {
                     self.strategy_rotator.get_strategy_by_name(&name)
                 })
                 .unwrap_or_else(|| {
-                    self.strategy_rotator.select_strategy(&issue.item_name, &strategy_issue_kind)
+                    self.strategy_rotator
+                        .select_strategy(&issue.item_name, &strategy_issue_kind)
                 });
 
             // Build suggestions with key_files from MissingModule issues
-            let mut suggestions = semantic_result.suggestions.clone();
-            if let IssueKind::MissingModule { key_files, .. } = &issue.issue {
+            let mut suggestions: Vec<String> = judgment
+                .suggestions
+                .iter()
+                .map(|s| s.action.clone())
+                .collect();
+            if let DetectedIssue::MissingModule { key_files, .. } = &issue.issue {
                 for file in key_files {
                     suggestions.push(format!("Key file: {}", file));
                 }
@@ -1364,17 +1754,28 @@ impl RefinementEngine {
 
             // Extract validation feedback from aggregated feedback for targeted refinement
             let validation_feedback = Some(super::strategy::ValidationFeedback {
-                missing_modules: aggregated_feedback.analysis_feedback.missing_modules.clone(),
-                weak_coverage_areas: aggregated_feedback.analysis_feedback.weak_coverage_areas.clone(),
-                module_constraints: aggregated_feedback.analysis_feedback.refinement_hints.clone(),
+                missing_modules: aggregated_feedback
+                    .analysis_feedback
+                    .missing_modules
+                    .clone(),
+                weak_coverage_areas: aggregated_feedback
+                    .analysis_feedback
+                    .weak_coverage_areas
+                    .clone(),
+                module_constraints: aggregated_feedback
+                    .analysis_feedback
+                    .refinement_hints
+                    .clone(),
             });
 
-            let context = StrategyContext {
-                file_registry,
-                issue_description: format_issue_description(&issue.issue),
-                suggestions,
-                validation_feedback,
-                quality_acceptance_delta: self.config.refinement().quality_acceptance_delta,
+            let context = StrategyContext::new(file_registry)
+                .with_issues(vec![issue.issue.to_strategy_issue()])
+                .with_suggestions(suggestions)
+                .with_acceptance_delta(self.config.refinement().quality_acceptance_delta);
+            let context = if let Some(feedback) = validation_feedback {
+                context.with_validation_feedback(feedback)
+            } else {
+                context
             };
 
             // Track quality before/after for learning history
@@ -1434,7 +1835,7 @@ impl RefinementEngine {
                 self.strategy_rotator.record_outcome(
                     &issue.item_name,
                     &strategy_issue_kind,
-                    StrategyOutcome {
+                    StrategyAttempt {
                         strategy_name: strategy.name().to_string(),
                         success,
                         quality_delta: result.quality_delta,
@@ -1478,7 +1879,11 @@ impl RefinementEngine {
         Ok((skills, agents, rules, improvements, strategies_used))
     }
 
-    async fn regenerate_skill(&self, name: &str, file_registry: &VerifiedFileRegistry) -> Option<Skill> {
+    async fn regenerate_skill(
+        &self,
+        name: &str,
+        file_registry: &VerifiedFileRegistry,
+    ) -> Option<Skill> {
         let file_context = file_registry.to_prompt_context(50);
 
         let prompt = format!(
@@ -1528,7 +1933,11 @@ Return JSON: {{"name": "...", "description": "...", "body": "..."}}"###,
                 if body.len() >= 100 {
                     Some(Skill::new(skill_name, desc, body.to_string()).with_user_invocable(true))
                 } else {
-                    tracing::warn!(skill = name, body_len = body.len(), "Generated skill too short");
+                    tracing::warn!(
+                        skill = name,
+                        body_len = body.len(),
+                        "Generated skill too short"
+                    );
                     None
                 }
             }
@@ -1539,7 +1948,11 @@ Return JSON: {{"name": "...", "description": "...", "body": "..."}}"###,
         }
     }
 
-    async fn regenerate_agent(&self, name: &str, file_registry: &VerifiedFileRegistry) -> Option<Agent> {
+    async fn regenerate_agent(
+        &self,
+        name: &str,
+        file_registry: &VerifiedFileRegistry,
+    ) -> Option<Agent> {
         let file_context = file_registry.to_prompt_context(50);
 
         let prompt = format!(
@@ -1589,7 +2002,11 @@ Return JSON: {{"name": "...", "description": "...", "prompt": "..."}}"###,
                 if prompt_text.len() >= 100 {
                     Some(Agent::new(agent_name, description, prompt_text.to_string()))
                 } else {
-                    tracing::warn!(agent = name, prompt_len = prompt_text.len(), "Generated agent too short");
+                    tracing::warn!(
+                        agent = name,
+                        prompt_len = prompt_text.len(),
+                        "Generated agent too short"
+                    );
                     None
                 }
             }
@@ -1597,46 +2014,6 @@ Return JSON: {{"name": "...", "description": "...", "prompt": "..."}}"###,
                 tracing::error!(agent = name, error = %e, "Failed to regenerate agent");
                 None
             }
-        }
-    }
-}
-
-fn format_issue_description(issue: &IssueKind) -> String {
-    match issue {
-        IssueKind::LowActionability { score, threshold } => format!(
-            "LOW ACTIONABILITY ({:.0}% vs {:.0}% target)",
-            score * 100.0,
-            threshold * 100.0
-        ),
-        IssueKind::TooGeneric { description } => format!("TOO GENERIC: {}", description),
-        IssueKind::WeakEvidence { description } => format!("WEAK EVIDENCE: {}", description),
-        IssueKind::Shallow { description } => format!("SHALLOW: {}", description),
-        IssueKind::MissingReferences { expected, actual } => {
-            format!("MISSING REFERENCES: {} of {} required", actual, expected)
-        }
-        IssueKind::TooShort { actual, min } => {
-            format!("TOO SHORT: {} chars (min: {})", actual, min)
-        }
-        IssueKind::MissingSections { expected, actual } => {
-            format!("MISSING SECTIONS: {} of {} required", actual, expected)
-        }
-        IssueKind::Redundant { description } => format!("REDUNDANT: {}", description),
-        IssueKind::Tier1Content { violation } => format!("TIER1 CONTENT: {}", violation),
-        IssueKind::PlanMismatch => "PLAN MISMATCH: Item missing from output".to_string(),
-        IssueKind::MissingModule { module_name, file_count, key_files } => {
-            format!(
-                "MISSING MODULE: '{}' ({} files) - key files: {}",
-                module_name,
-                file_count,
-                key_files.join(", ")
-            )
-        }
-        IssueKind::PartialModuleCoverage { module_name, coverage } => {
-            format!(
-                "PARTIAL MODULE COVERAGE: '{}' at {:.0}%",
-                module_name,
-                coverage * 100.0
-            )
         }
     }
 }
@@ -1657,23 +2034,9 @@ fn parse_missing_item(missing: &str) -> (ItemType, String) {
     }
 }
 
-fn parse_semantic_target(target: &str) -> (ItemType, String) {
-    if let Some(name) = target.strip_prefix("Skill:") {
-        (ItemType::Skill, name.to_string())
-    } else if let Some(name) = target.strip_prefix("Agent:") {
-        (ItemType::Agent, name.to_string())
-    } else if let Some(name) = target.strip_prefix("Rule:") {
-        (ItemType::Rule, name.to_string())
-    } else {
-        (ItemType::ClaudeMd, target.to_string())
-    }
-}
-
 fn build_dimensions_status(
-    semantic: &SemanticQualityResult,
+    judgment: &JudgmentResult,
     structural: Option<&StructuralValidationResult>,
-    cross_artifact: Option<&CrossArtifactResult>,
-    usability: Option<&UsabilityResult>,
     thresholds: &crate::config::DimensionThresholds,
 ) -> super::quality_assessment::DimensionsStatus {
     use super::quality_assessment::{DimensionScore, DimensionsStatus};
@@ -1683,23 +2046,23 @@ fn build_dimensions_status(
     DimensionsStatus {
         actionability: DimensionScore::new(
             "actionability",
-            semantic.actionability.score,
+            judgment.overall_score,
             semantic_threshold,
         ),
         specificity: DimensionScore::new(
             "specificity",
-            semantic.specificity.score,
+            judgment.overall_score,
             semantic_threshold * 0.8,
         ),
         evidence_quality: DimensionScore::new(
             "evidence_quality",
-            semantic.evidence_quality.score,
+            judgment.overall_score,
             thresholds.evidence,
         ),
-        depth: DimensionScore::new("depth", semantic.depth.score, semantic_threshold * 0.8),
+        depth: DimensionScore::new("depth", judgment.overall_score, semantic_threshold * 0.8),
         redundancy: DimensionScore::new_inverted(
             "redundancy",
-            semantic.redundancy.score,
+            1.0 - judgment.overall_score,
             0.3,
         ),
         structural_coverage: structural.map(|s| {
@@ -1709,16 +2072,8 @@ fn build_dimensions_status(
                 thresholds.surface,
             )
         }),
-        cross_artifact: cross_artifact.map(|c| {
-            DimensionScore::new(
-                "cross_artifact",
-                (c.overlap_score + c.consistency_score) / 2.0,
-                thresholds.cross_artifact,
-            )
-        }),
-        usability: usability.map(|u| {
-            DimensionScore::new("usability", u.score, thresholds.usability)
-        }),
+        cross_artifact: None,
+        usability: None,
     }
 }
 
@@ -1776,9 +2131,10 @@ fn detect_oscillation(window: &[f32], min_amplitude: f32) -> bool {
 
         let current_direction = window[i] > window[i - 1];
         if let Some(prev) = prev_direction
-            && prev != current_direction {
-                direction_changes += 1;
-            }
+            && prev != current_direction
+        {
+            direction_changes += 1;
+        }
         prev_direction = Some(current_direction);
     }
 
@@ -1825,22 +2181,24 @@ mod tests {
     }
 
     #[test]
-    fn test_format_issue_description() {
-        let issue = IssueKind::LowActionability {
+    fn test_detected_issue_to_strategy_issue() {
+        let issue = DetectedIssue::LowActionability {
             score: 0.3,
             threshold: 0.6,
         };
-        let desc = format_issue_description(&issue);
-        assert!(desc.contains("30%"));
-        assert!(desc.contains("60%"));
+        let strategy_issue = issue.to_strategy_issue();
+        assert!(strategy_issue.message.contains("30%"));
+        assert!(strategy_issue.message.contains("60%"));
+        assert_eq!(strategy_issue.kind, StrategyIssueKind::LowActionability);
 
-        let issue = IssueKind::TooShort {
+        let issue = DetectedIssue::TooShort {
             actual: 100,
             min: 300,
         };
-        let desc = format_issue_description(&issue);
-        assert!(desc.contains("100"));
-        assert!(desc.contains("300"));
+        let strategy_issue = issue.to_strategy_issue();
+        assert!(strategy_issue.message.contains("100"));
+        assert!(strategy_issue.message.contains("300"));
+        assert_eq!(strategy_issue.kind, StrategyIssueKind::TooShort);
     }
 
     #[test]

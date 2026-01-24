@@ -120,15 +120,20 @@ impl JsonRepairer {
 
         // Remove ```json ... ``` or ``` ... ```
         if result.starts_with("```")
-            && let Some(first_newline) = result.find('\n') {
-                // Safe: find() returns byte index at char boundary ('\n' is 1 byte)
-                result = result.get(first_newline + 1..).unwrap_or("").to_string();
-            }
+            && let Some(first_newline) = result.find('\n')
+        {
+            // Safe: find() returns byte index at char boundary ('\n' is 1 byte)
+            result = result.get(first_newline + 1..).unwrap_or("").to_string();
+        }
 
         if result.ends_with("```") {
             // Safe: "```" is 3 ASCII bytes, ends_with confirms they exist
             let len = result.len();
-            result = result.get(..len.saturating_sub(3)).unwrap_or("").trim_end().to_string();
+            result = result
+                .get(..len.saturating_sub(3))
+                .unwrap_or("")
+                .trim_end()
+                .to_string();
         }
 
         result

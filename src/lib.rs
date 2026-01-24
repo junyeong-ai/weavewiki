@@ -2,9 +2,9 @@
 //!
 //! Analyzes codebases and generates Claude Code plugins following official structure:
 //! - CLAUDE.md (project memory)
-//! - .claudegen/.claude-plugin/plugin.json (plugin manifest)
-//! - .claudegen/skills/{name}/SKILL.md (automated skills)
-//! - .claudegen/agents/{name}.md (specialized agents)
+//! - {project-name}-plugin/.claude-plugin/plugin.json (plugin manifest)
+//! - {project-name}-plugin/skills/{name}/SKILL.md (automated skills)
+//! - {project-name}-plugin/agents/{name}.md (specialized agents)
 
 #![recursion_limit = "256"]
 
@@ -16,7 +16,7 @@ pub mod constants;
 pub mod pipeline;
 pub mod storage;
 pub mod types;
-pub mod verifier;
+pub mod utils;
 
 pub use config::{Config, ConfigLoader};
 pub use storage::database::PoolConfig;
@@ -25,8 +25,9 @@ pub use types::error::{ClaudegenError, ErrorCategory, Result, ResultExt};
 
 pub use ai::{
     GlobalTokenBudget, LlmProvider, LlmResponse, MetricsCollector, ProviderChain,
-    ProviderChainBuilder, SharedBudget, SharedMetrics, TimeoutConfig, with_timeout,
+    ProviderChainBuilder, SharedBudget, SharedMetrics, with_timeout,
 };
+pub use config::TimeoutConfig;
 
 #[cfg(feature = "claude-agent")]
 pub use ai::ClaudeAgentProvider;
@@ -36,4 +37,11 @@ pub use analyzer::{
     scanner::FileScanner,
 };
 
-pub use pipeline::{AdaptivePipeline, AdaptivePipelineOutput};
+pub use pipeline::{
+    AdaptivePipeline,
+    AdaptivePipelineOutput,
+    GateResult,
+    // Quality gate
+    QualityGate,
+    QualityGateConfig,
+};

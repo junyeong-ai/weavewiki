@@ -29,7 +29,7 @@ console = "0.16"
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml_ng = "0.10"
+serde_yaml_bw = "2.5"
 
 rusqlite = { version = "0.38", features = ["bundled"] }
 r2d2 = "0.8"

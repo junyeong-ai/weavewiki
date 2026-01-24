@@ -1,13 +1,10 @@
 //! CLI Common Utilities
 //!
 //! Shared initialization and context management for CLI commands.
-//! Eliminates duplicate code across command handlers.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use crate::config::{Config, ConfigLoader};
-use crate::storage::{Database, SharedDatabase};
+use crate::storage::Database;
 use crate::types::{ClaudegenError, Result};
 
 /// claudegen directory name
@@ -16,82 +13,14 @@ pub const CLAUDEGEN_DIR: &str = ".claudegen";
 /// Graph database relative path
 pub const GRAPH_DB_PATH: &str = "graph/graph.db";
 
-/// Plugin output relative path
-pub const PLUGIN_PATH: &str = ".claude-plugin";
-
 /// Config file relative path
 pub const CONFIG_PATH: &str = "config.toml";
 
-/// Command execution context
-///
-/// Provides unified access to common resources needed by CLI commands.
-/// Created via `CommandContext::load()` for commands that need full context,
-/// or via helper functions for simpler needs.
-#[derive(Clone)]
-pub struct CommandContext {
-    /// claudegen directory path (.claudegen)
-    pub claudegen_dir: PathBuf,
-    /// Shared database handle
-    pub db: SharedDatabase,
-    /// Loaded configuration
-    pub config: Config,
-    /// Project root directory
-    pub project_root: PathBuf,
-}
+/// State file relative path (tracks last output directory)
+pub const STATE_PATH: &str = "state.toml";
 
-impl CommandContext {
-    /// Load full command context
-    ///
-    /// Validates initialization, loads config, and opens database.
-    /// Use this for commands that need all resources.
-    pub fn load() -> Result<Self> {
-        let claudegen_dir = require_initialized()?;
-        let db = open_graph_db(&claudegen_dir)?;
-        let config = ConfigLoader::load()?;
-        let project_root = std::env::current_dir().map_err(ClaudegenError::Io)?;
-
-        Ok(Self {
-            claudegen_dir,
-            db: Arc::new(db),
-            config,
-            project_root,
-        })
-    }
-
-    /// Load context without database
-    ///
-    /// For commands that only need config and paths.
-    pub fn load_without_db() -> Result<Self> {
-        let claudegen_dir = require_initialized()?;
-        let config = ConfigLoader::load()?;
-        let project_root = std::env::current_dir().map_err(ClaudegenError::Io)?;
-
-        // Create in-memory db as placeholder
-        let db = Database::open_in_memory()?;
-
-        Ok(Self {
-            claudegen_dir,
-            db: Arc::new(db),
-            config,
-            project_root,
-        })
-    }
-
-    /// Get plugin output directory path
-    pub fn plugin_dir(&self) -> PathBuf {
-        self.claudegen_dir.join(PLUGIN_PATH)
-    }
-
-    /// Get graph database path
-    pub fn db_path(&self) -> PathBuf {
-        self.claudegen_dir.join(GRAPH_DB_PATH)
-    }
-
-    /// Check if plugin has been generated
-    pub fn plugin_exists(&self) -> bool {
-        self.plugin_dir().join("plugin.json").exists()
-    }
-}
+/// Default validation report filename
+pub const DEFAULT_REPORT_FILENAME: &str = "validation-report.json";
 
 /// Require claudegen to be initialized
 ///
@@ -170,6 +99,68 @@ pub fn graph_db_exists() -> bool {
     Path::new(CLAUDEGEN_DIR).join(GRAPH_DB_PATH).exists()
 }
 
-// Tests disabled: Changing current directory in tests causes race conditions
-// when running tests in parallel. The functionality is tested through
-// integration tests instead.
+/// Project state for tracking runtime info
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct ProjectState {
+    /// Last plugin output directory
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_output_dir: Option<PathBuf>,
+    /// Last generation timestamp
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_generated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ProjectState {
+    /// Load project state from CWD's .claudegen/state.toml
+    pub fn load() -> Result<Self> {
+        Self::load_from(Path::new("."))
+    }
+
+    /// Load project state from specified root's .claudegen/state.toml
+    pub fn load_from(root: &Path) -> Result<Self> {
+        let state_path = root.join(CLAUDEGEN_DIR).join(STATE_PATH);
+        if !state_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let content = std::fs::read_to_string(&state_path)?;
+        toml::from_str(&content)
+            .map_err(|e| ClaudegenError::Config(format!("Invalid state file: {e}")))
+    }
+
+    /// Save project state to .claudegen/state.toml
+    pub fn save(&self) -> Result<()> {
+        let claudegen_dir = Path::new(CLAUDEGEN_DIR);
+        if !claudegen_dir.exists() {
+            std::fs::create_dir_all(claudegen_dir)?;
+        }
+
+        let state_path = claudegen_dir.join(STATE_PATH);
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| ClaudegenError::Config(format!("Failed to serialize state: {e}")))?;
+        std::fs::write(&state_path, content)?;
+        Ok(())
+    }
+
+    /// Update the last output directory (converts to absolute path)
+    pub fn set_output_dir(&mut self, path: PathBuf) {
+        // Canonicalize to absolute path for cross-CWD reliability
+        let absolute_path = if path.is_absolute() {
+            path
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&path),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "Failed to get current directory, saving relative path (may cause issues)"
+                    );
+                    path
+                }
+            }
+        };
+        self.last_output_dir = Some(absolute_path);
+        self.last_generated_at = Some(chrono::Utc::now());
+    }
+}

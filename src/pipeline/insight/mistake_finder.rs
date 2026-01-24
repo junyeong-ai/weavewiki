@@ -15,35 +15,7 @@ use crate::types::Result;
 
 use super::InsightContext;
 
-/// Severity of potential mistake
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MistakeSeverity {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
-
-impl MistakeSeverity {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Critical => "critical",
-        }
-    }
-
-    pub fn score(&self) -> f32 {
-        match self {
-            Self::Low => 0.3,
-            Self::Medium => 0.5,
-            Self::High => 0.7,
-            Self::Critical => 1.0,
-        }
-    }
-}
+use crate::types::Severity;
 
 /// A potential mistake AI could make
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +23,7 @@ pub struct PotentialMistake {
     pub title: String,
     pub description: String,
     pub category: MistakeCategory,
-    pub severity: MistakeSeverity,
+    pub severity: Severity,
     pub prevention: String,
     pub evidence: Vec<String>,
     pub likelihood: f32,
@@ -128,12 +100,17 @@ impl MistakeFinder {
         mistakes.retain(|m| m.likelihood >= min_likelihood);
 
         mistakes.sort_by(|a, b| {
-            let score_a = a.severity.score() * a.likelihood;
-            let score_b = b.severity.score() * b.likelihood;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            let score_a = a.severity.weight() * a.likelihood;
+            let score_b = b.severity.weight() * b.likelihood;
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        debug!(count = mistakes.len(), min_likelihood, "Found potential mistakes");
+        debug!(
+            count = mistakes.len(),
+            min_likelihood, "Found potential mistakes"
+        );
 
         Ok(mistakes)
     }
@@ -161,7 +138,7 @@ impl MistakeFinder {
                         dep.description
                     ),
                     category: MistakeCategory::Concurrency,
-                    severity: MistakeSeverity::High,
+                    severity: Severity::High,
                     prevention: format!(
                         "Always use proper synchronization when accessing shared state. {}",
                         dep.impact
@@ -188,7 +165,7 @@ impl MistakeFinder {
                     ctx.conventions.async_pattern.style, runtime_info
                 ),
                 category: MistakeCategory::Concurrency,
-                severity: MistakeSeverity::Medium,
+                severity: Severity::Medium,
                 prevention: format!(
                     "Follow the project's async conventions with {:?} style. Avoid blocking operations.",
                     ctx.conventions.async_pattern.style
@@ -215,7 +192,7 @@ impl MistakeFinder {
                     title: format!("Initialization order: {} before {}", dep.source, dep.target),
                     description: dep.description.clone(),
                     category: MistakeCategory::InitOrder,
-                    severity: MistakeSeverity::High,
+                    severity: Severity::High,
                     prevention: format!(
                         "Ensure {} is initialized/called before {}. {}",
                         dep.source, dep.target, dep.impact
@@ -242,7 +219,7 @@ impl MistakeFinder {
                 error_pattern.style
             ),
             category: MistakeCategory::ErrorHandling,
-            severity: MistakeSeverity::Medium,
+            severity: Severity::Medium,
             prevention: format!(
                 "Use {:?} style for error handling. Propagation: {}",
                 error_pattern.style, error_pattern.propagation_pattern
@@ -260,7 +237,7 @@ impl MistakeFinder {
                     title: gotcha.title.clone(),
                     description: gotcha.description.clone(),
                     category: MistakeCategory::ErrorHandling,
-                    severity: MistakeSeverity::High,
+                    severity: Severity::High,
                     prevention: gotcha.solution.clone(),
                     evidence: gotcha.related_files.clone(),
                     likelihood: 0.7,
@@ -286,7 +263,7 @@ impl MistakeFinder {
                     title: gotcha.title.clone(),
                     description: gotcha.description.clone(),
                     category: MistakeCategory::ResourceManagement,
-                    severity: MistakeSeverity::High,
+                    severity: Severity::High,
                     prevention: gotcha.solution.clone(),
                     evidence: gotcha.related_files.clone(),
                     likelihood: 0.75,
@@ -303,7 +280,7 @@ impl MistakeFinder {
                     title: format!("Resource rule: {}", rule.name),
                     description: rule.description.clone(),
                     category: MistakeCategory::ResourceManagement,
-                    severity: MistakeSeverity::Medium,
+                    severity: Severity::Medium,
                     prevention: rule.description.clone(),
                     evidence: rule.evidence.iter().map(|e| e.file.clone()).collect(),
                     likelihood: 0.6,
@@ -389,7 +366,8 @@ Return JSON array:
 
         summary.push_str(&format!(
             "Error Handling: {:?} ({})\n",
-            ctx.conventions.error_handling.style, ctx.conventions.error_handling.propagation_pattern
+            ctx.conventions.error_handling.style,
+            ctx.conventions.error_handling.propagation_pattern
         ));
 
         if ctx.conventions.async_pattern.style != AsyncStyle::Synchronous {
@@ -432,13 +410,16 @@ Return JSON array:
         let severity_str = item.get("severity")?.as_str()?;
         let prevention = item.get("prevention")?.as_str()?.to_string();
         let category_str = item.get("category")?.as_str()?;
-        let likelihood = item.get("likelihood").and_then(|v| v.as_f64()).unwrap_or(0.6) as f32;
+        let likelihood = item
+            .get("likelihood")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.6) as f32;
 
         let severity = match severity_str {
-            "critical" => MistakeSeverity::Critical,
-            "high" => MistakeSeverity::High,
-            "medium" => MistakeSeverity::Medium,
-            _ => MistakeSeverity::Low,
+            "critical" => Severity::Critical,
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            _ => Severity::Low,
         };
 
         let category = match category_str {
@@ -471,7 +452,7 @@ mod tests {
     use crate::ai::{LlmResponse, ResponseMetadata, ResponseTiming, TokenUsage};
     use crate::pipeline::context::VerifiedFileRegistry;
     use crate::pipeline::phases::constraint_extraction::{
-        ExtractedConstraints, Gotcha, HiddenDependency, HiddenDepType, ImplicitRule,
+        ExtractedConstraints, Gotcha, HiddenDepType, HiddenDependency, ImplicitRule,
     };
     use crate::pipeline::phases::convention_inference::{
         ArchitectureConvention, AsyncPattern, AsyncStyle, ErrorHandlingPattern, ErrorStyle,
@@ -545,19 +526,19 @@ mod tests {
     }
 
     #[test]
-    fn test_mistake_severity_as_str() {
-        assert_eq!(MistakeSeverity::Low.as_str(), "low");
-        assert_eq!(MistakeSeverity::Medium.as_str(), "medium");
-        assert_eq!(MistakeSeverity::High.as_str(), "high");
-        assert_eq!(MistakeSeverity::Critical.as_str(), "critical");
+    fn test_mistake_severity_display() {
+        assert_eq!(Severity::Low.to_string(), "low");
+        assert_eq!(Severity::Medium.to_string(), "medium");
+        assert_eq!(Severity::High.to_string(), "high");
+        assert_eq!(Severity::Critical.to_string(), "critical");
     }
 
     #[test]
-    fn test_mistake_severity_score() {
-        assert!((MistakeSeverity::Low.score() - 0.3).abs() < f32::EPSILON);
-        assert!((MistakeSeverity::Medium.score() - 0.5).abs() < f32::EPSILON);
-        assert!((MistakeSeverity::High.score() - 0.7).abs() < f32::EPSILON);
-        assert!((MistakeSeverity::Critical.score() - 1.0).abs() < f32::EPSILON);
+    fn test_mistake_severity_weight() {
+        assert!((Severity::Low.weight() - 0.1).abs() < f32::EPSILON);
+        assert!((Severity::Medium.weight() - 0.4).abs() < f32::EPSILON);
+        assert!((Severity::High.weight() - 0.7).abs() < f32::EPSILON);
+        assert!((Severity::Critical.weight() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -686,7 +667,8 @@ mod tests {
 
         constraints.gotchas.push(Gotcha {
             title: "Connection pool exhaustion".to_string(),
-            description: "Connection pool can be exhausted if connections are not returned".to_string(),
+            description: "Connection pool can be exhausted if connections are not returned"
+                .to_string(),
             when: "Under heavy load".to_string(),
             solution: "Always use try-finally or RAII for connections".to_string(),
             related_files: vec!["src/db/pool.rs".to_string()],
@@ -710,7 +692,8 @@ mod tests {
             name: "Resource cleanup".to_string(),
             description: "All database connections must be returned to pool".to_string(),
             applies_to: vec!["src/db/".to_string()],
-            enforcement: crate::pipeline::phases::constraint_extraction::RuleEnforcement::Convention,
+            enforcement:
+                crate::pipeline::phases::constraint_extraction::RuleEnforcement::Convention,
             evidence: Vec::new(),
         });
 
@@ -738,7 +721,7 @@ mod tests {
         assert!(mistake.is_some());
         let m = mistake.unwrap();
         assert_eq!(m.title, "Memory leak in cache");
-        assert_eq!(m.severity, MistakeSeverity::High);
+        assert_eq!(m.severity, Severity::High);
         assert_eq!(m.category, MistakeCategory::ResourceManagement);
         assert!((m.likelihood - 0.8).abs() < f32::EPSILON);
     }
@@ -768,7 +751,7 @@ mod tests {
 
         let mistake = finder.parse_llm_mistake(&item);
         assert!(mistake.is_some());
-        assert_eq!(mistake.unwrap().severity, MistakeSeverity::Low);
+        assert_eq!(mistake.unwrap().severity, Severity::Low);
     }
 
     #[test]

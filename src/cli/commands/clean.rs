@@ -1,10 +1,11 @@
 //! Clean Command - Clears generated data, caches, and checkpoints
 
+use crate::cli::util::{CLAUDEGEN_DIR, GRAPH_DB_PATH};
 use crate::types::Result;
 use std::path::Path;
 
 pub async fn run(all: bool, cache: bool, checkpoints: bool, sessions: bool) -> Result<()> {
-    let claudegen_dir = Path::new(".claudegen");
+    let claudegen_dir = Path::new(CLAUDEGEN_DIR);
 
     if all {
         if claudegen_dir.exists() {
@@ -33,7 +34,7 @@ pub async fn run(all: bool, cache: bool, checkpoints: bool, sessions: bool) -> R
     }
 
     if sessions {
-        let db_path = Path::new(".claudegen").join("claudegen.db");
+        let db_path = claudegen_dir.join(GRAPH_DB_PATH);
         if db_path.exists() {
             let db = crate::storage::Database::open(&db_path)?;
             db.execute(

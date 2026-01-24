@@ -103,14 +103,20 @@ impl ProjectMemory {
         let mut issues = Vec::new();
 
         if self.overview.is_empty() {
-            issues.push(ValidationIssue::error("MEMORY_OVERVIEW_REQUIRED", "overview is required"));
+            issues.push(ValidationIssue::error(
+                "MEMORY_OVERVIEW_REQUIRED",
+                "overview is required",
+            ));
         }
 
         let line_count = self.to_markdown().lines().count();
         if line_count > MAX_RECOMMENDED_MEMORY_LINES {
             issues.push(ValidationIssue::warning(
                 "MEMORY_TOO_LONG",
-                format!("exceeds {} lines (current: {})", MAX_RECOMMENDED_MEMORY_LINES, line_count),
+                format!(
+                    "exceeds {} lines (current: {})",
+                    MAX_RECOMMENDED_MEMORY_LINES, line_count
+                ),
             ));
         }
 

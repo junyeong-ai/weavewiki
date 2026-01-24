@@ -57,9 +57,7 @@ impl OpenAiProvider {
             .api_base
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-        let model = config
-            .model
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let model = config.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
@@ -76,31 +74,14 @@ impl OpenAiProvider {
         })
     }
 
-    fn build_request(&self, prompt: &str, schema: &Value) -> ChatCompletionRequest {
-        let system_content = if schema.is_null() {
-            "You are a code documentation expert. Always respond with valid JSON.".to_string()
-        } else {
-            // Serialize schema to pretty JSON for the system prompt
-            // In the rare case serialization fails, log warning and use compact format
-            let schema_str = match serde_json::to_string_pretty(schema) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to pretty-print schema, using compact format: {}", e);
-                    // Fall back to compact serialization (should not fail if pretty failed)
-                    serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_string())
-                }
-            };
-            format!(
-                "You are a code documentation expert. Always respond with valid JSON matching this schema:\n\n```json\n{schema_str}\n```\n\nRespond ONLY with valid JSON, no explanation."
-            )
-        };
-
+    fn build_request(&self, prompt: &str, _schema: &Value) -> ChatCompletionRequest {
         ChatCompletionRequest {
             model: self.model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
-                    content: system_content,
+                    content: "You are a code documentation expert. Respond with valid JSON only."
+                        .to_string(),
                 },
                 ChatMessage {
                     role: "user".to_string(),

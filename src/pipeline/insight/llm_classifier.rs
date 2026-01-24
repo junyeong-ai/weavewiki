@@ -45,7 +45,7 @@ pub struct ClassificationResult {
 impl Default for ClassificationResult {
     fn default() -> Self {
         Self {
-            tier: TierClassification::Tier2,
+            tier: TierClassification::Tier2Convention,
             artifact: ArtifactClassification::ClaudeMd,
             tier_confidence: 0.5,
             artifact_confidence: 0.5,
@@ -183,10 +183,11 @@ impl ClassificationCache {
         let entries = self.entries.read().ok()?;
 
         if let Some(entry) = entries.get(&key)
-            && entry.created_at.elapsed() < self.ttl {
-                trace!(insight_id = %insight.id, "Cache hit");
-                return Some(entry.result.clone());
-            }
+            && entry.created_at.elapsed() < self.ttl
+        {
+            trace!(insight_id = %insight.id, "Cache hit");
+            return Some(entry.result.clone());
+        }
         None
     }
 
@@ -408,20 +409,20 @@ Return classifications in the same order as the input."#
     /// Convert tier number to enum
     fn tier_from_number(n: u8) -> TierClassification {
         match n {
-            0 => TierClassification::Tier0,
-            1 => TierClassification::Tier1,
-            2 => TierClassification::Tier2,
-            3 => TierClassification::Tier3,
-            _ => TierClassification::Tier2, // Default fallback
+            0 => TierClassification::Tier0Hallucinated,
+            1 => TierClassification::Tier1Generic,
+            2 => TierClassification::Tier2Convention,
+            3 => TierClassification::Tier3Constraint,
+            _ => TierClassification::Tier2Convention, // Default fallback
         }
     }
 
     /// Convert artifact string to enum
     fn artifact_from_string(s: &str) -> ArtifactClassification {
         match s.to_lowercase().as_str() {
-            "rules" => ArtifactClassification::Rules,
-            "skills" => ArtifactClassification::Skills,
-            "agents" => ArtifactClassification::Agents,
+            "rules" => ArtifactClassification::Rule,
+            "skills" => ArtifactClassification::Skill,
+            "agents" => ArtifactClassification::Agent,
             "claude_md" | "claudemd" => ArtifactClassification::ClaudeMd,
             _ => ArtifactClassification::ClaudeMd, // Default fallback
         }
@@ -435,7 +436,7 @@ Return classifications in the same order as the input."#
         // Very short content is likely low value
         if text.len() < 20 {
             return Some(ClassificationResult {
-                tier: TierClassification::Tier0,
+                tier: TierClassification::Tier0Hallucinated,
                 artifact: ArtifactClassification::ClaudeMd,
                 tier_confidence: 0.9,
                 artifact_confidence: 0.5,
@@ -456,8 +457,8 @@ Return classifications in the same order as the input."#
         for pattern in TIER3_STRONG {
             if text.contains(pattern) {
                 return Some(ClassificationResult {
-                    tier: TierClassification::Tier3,
-                    artifact: ArtifactClassification::Rules,
+                    tier: TierClassification::Tier3Constraint,
+                    artifact: ArtifactClassification::Rule,
                     tier_confidence: 0.95,
                     artifact_confidence: 0.8,
                     reasoning: Some(format!("Contains critical pattern: {}", pattern)),
@@ -553,16 +554,18 @@ impl LlmClassifier for DefaultLlmClassifier {
 
         // Process in batches
         for chunk in need_llm.chunks(self.batch_size) {
-            let summaries: Vec<InsightSummary> =
-                chunk.iter().map(|(_, i)| InsightSummary::from(*i)).collect();
+            let summaries: Vec<InsightSummary> = chunk
+                .iter()
+                .map(|(_, i)| InsightSummary::from(*i))
+                .collect();
 
             let prompt = self.build_batch_prompt(&summaries, project_context);
             let schema = Self::batch_response_schema(summaries.len());
 
             match self.provider.generate(&prompt, &schema).await {
                 Ok(response) => {
-                    let batch_result: LlmBatchResponse =
-                        serde_json::from_value(response.content).unwrap_or_else(|e| {
+                    let batch_result: LlmBatchResponse = serde_json::from_value(response.content)
+                        .unwrap_or_else(|e| {
                             warn!("Failed to parse batch response: {}", e);
                             LlmBatchResponse {
                                 classifications: Vec::new(),
@@ -635,7 +638,11 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        async fn generate(&self, _prompt: &str, _schema: &serde_json::Value) -> Result<LlmResponse> {
+        async fn generate(
+            &self,
+            _prompt: &str,
+            _schema: &serde_json::Value,
+        ) -> Result<LlmResponse> {
             Ok(LlmResponse {
                 content: self.response.clone(),
                 usage: TokenUsage::default(),
@@ -687,8 +694,8 @@ mod tests {
         let cache = ClassificationCache::new(24, 100);
         let insight = create_test_insight("Test", "Description");
         let result = ClassificationResult {
-            tier: TierClassification::Tier3,
-            artifact: ArtifactClassification::Rules,
+            tier: TierClassification::Tier3Constraint,
+            artifact: ArtifactClassification::Rule,
             tier_confidence: 0.9,
             artifact_confidence: 0.8,
             reasoning: Some("Test".to_string()),
@@ -697,8 +704,8 @@ mod tests {
         cache.put(&insight, result.clone());
         let cached = cache.get(&insight).unwrap();
 
-        assert_eq!(cached.tier, TierClassification::Tier3);
-        assert_eq!(cached.artifact, ArtifactClassification::Rules);
+        assert_eq!(cached.tier, TierClassification::Tier3Constraint);
+        assert_eq!(cached.artifact, ArtifactClassification::Rule);
     }
 
     #[test]
@@ -713,7 +720,7 @@ mod tests {
         let result = classifier.can_classify_structurally(&insight);
 
         assert!(result.is_some());
-        assert_eq!(result.unwrap().tier, TierClassification::Tier0);
+        assert_eq!(result.unwrap().tier, TierClassification::Tier0Hallucinated);
     }
 
     #[test]
@@ -731,7 +738,7 @@ mod tests {
         let result = classifier.can_classify_structurally(&insight);
 
         assert!(result.is_some());
-        assert_eq!(result.unwrap().tier, TierClassification::Tier3);
+        assert_eq!(result.unwrap().tier, TierClassification::Tier3Constraint);
     }
 
     #[tokio::test]
@@ -752,7 +759,7 @@ mod tests {
 
         // First call
         let result1 = classifier.classify(&insight).await.unwrap();
-        assert_eq!(result1.tier, TierClassification::Tier2);
+        assert_eq!(result1.tier, TierClassification::Tier2Convention);
 
         // Second call should hit cache
         let result2 = classifier.classify(&insight).await.unwrap();
@@ -763,15 +770,15 @@ mod tests {
     fn test_tier_from_number() {
         assert_eq!(
             DefaultLlmClassifier::tier_from_number(0),
-            TierClassification::Tier0
+            TierClassification::Tier0Hallucinated
         );
         assert_eq!(
             DefaultLlmClassifier::tier_from_number(3),
-            TierClassification::Tier3
+            TierClassification::Tier3Constraint
         );
         assert_eq!(
             DefaultLlmClassifier::tier_from_number(99),
-            TierClassification::Tier2
+            TierClassification::Tier2Convention
         ); // fallback
     }
 
@@ -779,11 +786,11 @@ mod tests {
     fn test_artifact_from_string() {
         assert_eq!(
             DefaultLlmClassifier::artifact_from_string("rules"),
-            ArtifactClassification::Rules
+            ArtifactClassification::Rule
         );
         assert_eq!(
             DefaultLlmClassifier::artifact_from_string("SKILLS"),
-            ArtifactClassification::Skills
+            ArtifactClassification::Skill
         );
         assert_eq!(
             DefaultLlmClassifier::artifact_from_string("unknown"),

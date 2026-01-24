@@ -57,6 +57,7 @@ impl<'a> GraphStore<'a> {
             INSERT INTO edges (id, edge_type, source_id, target_id, metadata, evidence, tier, confidence, last_verified)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(edge_type, source_id, target_id) DO UPDATE SET
+                id = excluded.id,
                 metadata = excluded.metadata,
                 evidence = excluded.evidence,
                 tier = excluded.tier,
@@ -156,7 +157,15 @@ impl<'a> GraphStore<'a> {
 
         let last_verified = chrono::DateTime::parse_from_rfc3339(&last_verified_str)
             .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    node_id = %id,
+                    value = %last_verified_str,
+                    error = %e,
+                    "Corrupted last_verified timestamp, using current time"
+                );
+                chrono::Utc::now()
+            });
 
         Ok(Node {
             id,

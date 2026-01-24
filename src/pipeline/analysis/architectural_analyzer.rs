@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::StructuralValidationConfig;
 use crate::pipeline::context::VerifiedFileRegistry;
-use crate::types::{Agent, ProjectMemory, Result, Rule, Skill};
+use crate::types::{Agent, ProjectMemory, Result, Rule, Severity, Skill};
 
 static MODULE_PATH_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@?src/([a-zA-Z_][a-zA-Z0-9_]*)").unwrap());
+    LazyLock::new(|| Regex::new(r"@?src/([a-zA-Z_][a-zA-Z0-9_]*)").expect("module path regex"));
 
 static BACKTICK_MODULE_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"`([a-zA-Z_][a-zA-Z0-9_-]*)`").unwrap());
+    LazyLock::new(|| Regex::new(r"`([a-zA-Z_][a-zA-Z0-9_-]*)`").expect("backtick module regex"));
 
 /// Semantic file reference matching.
 /// Checks if a source reference matches a target file path semantically,
@@ -57,7 +57,11 @@ fn matches_file_reference(source: &str, target_file: &str) -> bool {
         let after_idx = before_idx + target_normalized.len();
 
         let valid_before = before_idx == 0
-            || source_normalized.chars().nth(before_idx - 1).map(|c| c == '/').unwrap_or(true);
+            || source_normalized
+                .chars()
+                .nth(before_idx - 1)
+                .map(|c| c == '/')
+                .unwrap_or(true);
         let valid_after = after_idx >= source_normalized.len()
             || source_normalized
                 .chars()
@@ -112,19 +116,10 @@ pub struct StructuralValidationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructuralIssue {
-    pub severity: StructuralSeverity,
+    pub severity: Severity,
     pub category: StructuralCategory,
     pub description: String,
     pub affected_module: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StructuralSeverity {
-    Critical,
-    High,
-    Medium,
-    Low,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,8 +136,10 @@ pub struct ArchitecturalAnalyzer {
 }
 
 impl ArchitecturalAnalyzer {
-    pub fn new(config: StructuralValidationConfig) -> Self {
-        Self { config }
+    pub fn new(config: &StructuralValidationConfig) -> Self {
+        Self {
+            config: config.clone(),
+        }
     }
 
     pub fn discover_modules(&self, file_registry: &VerifiedFileRegistry) -> Vec<Module> {
@@ -166,14 +163,14 @@ impl ArchitecturalAnalyzer {
             };
 
             let module_name = module_path.replace('_', "-");
-            let entry = module_map.entry(module_name.clone()).or_insert_with(|| {
-                ModuleBuilder {
+            let entry = module_map
+                .entry(module_name.clone())
+                .or_insert_with(|| ModuleBuilder {
                     name: module_name,
                     path: format!("src/{}", module_path),
                     files: Vec::new(),
                     total_lines: 0,
-                }
-            });
+                });
 
             entry.files.push(file.clone());
             if let Some(lines) = file_registry.line_count(file) {
@@ -185,7 +182,10 @@ impl ArchitecturalAnalyzer {
             .into_values()
             .map(|builder| {
                 let is_public_api = builder.name == "core"
-                    || builder.files.iter().any(|f| f.ends_with("lib.rs") || f.ends_with("mod.rs"));
+                    || builder
+                        .files
+                        .iter()
+                        .any(|f| f.ends_with("lib.rs") || f.ends_with("mod.rs"));
 
                 let key_files = self.identify_key_files(&builder.files, file_registry);
 
@@ -229,12 +229,7 @@ impl ArchitecturalAnalyzer {
     pub fn identify_core_modules<'a>(&self, modules: &'a [Module]) -> Vec<&'a Module> {
         let threshold = self.config.core_module_threshold as usize;
 
-        let required: HashSet<String> = self
-            .config
-            .required_modules
-            .iter()
-            .cloned()
-            .collect();
+        let required: HashSet<String> = self.config.required_modules.iter().cloned().collect();
 
         modules
             .iter()
@@ -316,9 +311,9 @@ impl ArchitecturalAnalyzer {
                 .key_files
                 .iter()
                 .filter(|f| {
-                    documented.iter().any(|(_, sources)| {
-                        sources.iter().any(|s| matches_file_reference(s, f))
-                    })
+                    documented
+                        .iter()
+                        .any(|(_, sources)| sources.iter().any(|s| matches_file_reference(s, f)))
                 })
                 .cloned()
                 .collect();
@@ -337,7 +332,8 @@ impl ArchitecturalAnalyzer {
             // to avoid artificially penalizing modules without identified key files
             let (module_mentioned, key_file_coverage) = if !core_module.key_files.is_empty() {
                 let mentioned = if ref_count > 0 { 0.4 } else { 0.0 };
-                let file_cov = (key_file_refs.len() as f32 / core_module.key_files.len() as f32) * 0.6;
+                let file_cov =
+                    (key_file_refs.len() as f32 / core_module.key_files.len() as f32) * 0.6;
                 (mentioned, file_cov)
             } else {
                 // No key files identified - base coverage entirely on module mentions
@@ -399,7 +395,7 @@ impl ArchitecturalAnalyzer {
 
         for missing in &coverage_report.missing_modules {
             issues.push(StructuralIssue {
-                severity: StructuralSeverity::Critical,
+                severity: Severity::Critical,
                 category: StructuralCategory::MissingCoreModule,
                 description: format!(
                     "Core module '{}' ({} files, {} lines) is not documented",
@@ -418,7 +414,7 @@ impl ArchitecturalAnalyzer {
         for partial in &coverage_report.partially_covered {
             if partial.coverage_score < 0.5 {
                 issues.push(StructuralIssue {
-                    severity: StructuralSeverity::High,
+                    severity: Severity::High,
                     category: StructuralCategory::PartialCoverage,
                     description: format!(
                         "Module '{}' has only {:.0}% coverage. Missing key files: {}",
@@ -437,7 +433,7 @@ impl ArchitecturalAnalyzer {
         for (module, refs) in &documented {
             if refs.len() as f32 > avg_refs * 3.0 && !coverage_report.missing_modules.is_empty() {
                 issues.push(StructuralIssue {
-                    severity: StructuralSeverity::Medium,
+                    severity: Severity::Medium,
                     category: StructuralCategory::UnbalancedCoverage,
                     description: format!(
                         "Module '{}' is referenced {} times while other modules are missing",
@@ -530,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_coverage_calculation() {
-        let analyzer = ArchitecturalAnalyzer::new(test_config());
+        let analyzer = ArchitecturalAnalyzer::new(&test_config());
 
         let modules = vec![
             Module {

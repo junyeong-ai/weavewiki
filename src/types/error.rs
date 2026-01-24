@@ -443,7 +443,7 @@ pub enum ClaudegenError {
     Json(#[from] serde_json::Error),
 
     #[error("YAML error: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    Yaml(#[from] serde_yaml_bw::Error),
 
     // -------------------------------------------------------------------------
     // LLM Errors

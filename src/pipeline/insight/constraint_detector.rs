@@ -13,9 +13,10 @@ use tracing::debug;
 
 use crate::config::Config;
 use crate::pipeline::phases::convention_inference::AsyncStyle;
+use crate::types::Severity;
 
-use super::types::{text_contains_any, Constraint, ConstraintType};
 use super::InsightContext;
+use super::types::{Constraint, ConstraintType, text_contains_any};
 
 /// Trait for internal constraint analyzers
 trait ConstraintAnalyzer: Send + Sync {
@@ -74,18 +75,12 @@ impl ConstraintDetector {
         all_constraints
     }
 
-    fn meets_severity_threshold(
-        &self,
-        constraint: &Constraint,
-        min_severity: &crate::config::ConstraintSeverity,
-    ) -> bool {
-        use crate::config::ConstraintSeverity;
-
+    fn meets_severity_threshold(&self, constraint: &Constraint, min_severity: &Severity) -> bool {
         let constraint_severity = match constraint.severity.to_lowercase().as_str() {
-            "critical" => ConstraintSeverity::Critical,
-            "high" => ConstraintSeverity::High,
-            "medium" => ConstraintSeverity::Medium,
-            _ => ConstraintSeverity::Low,
+            "critical" => Severity::Critical,
+            "high" => Severity::High,
+            "medium" => Severity::Medium,
+            _ => Severity::Low,
         };
 
         constraint_severity >= *min_severity
@@ -103,9 +98,8 @@ impl ConstraintAnalyzer for ConcurrencyAnalyzer {
         const CONCURRENCY_KEYWORDS: &[&str] = &[
             "arc", "mutex", "rwlock", "atomic", "shared", "thread", "async",
         ];
-        const GOTCHA_KEYWORDS: &[&str] = &[
-            "race", "concurrent", "thread", "race condition", "deadlock",
-        ];
+        const GOTCHA_KEYWORDS: &[&str] =
+            &["race", "concurrent", "thread", "race condition", "deadlock"];
 
         let mut constraints = Vec::new();
 
@@ -253,12 +247,18 @@ impl ConstraintAnalyzer for SecurityAnalyzer {
 
     fn detect(&self, ctx: &InsightContext<'_>) -> Vec<Constraint> {
         const GOTCHA_KEYWORDS: &[&str] = &[
-            "security", "auth", "permission", "credential",
-            "injection", "xss", "csrf", "encrypt", "validate", "sanitize",
+            "security",
+            "auth",
+            "permission",
+            "credential",
+            "injection",
+            "xss",
+            "csrf",
+            "encrypt",
+            "validate",
+            "sanitize",
         ];
-        const ANTI_PATTERN_KEYWORDS: &[&str] = &[
-            "security", "unsafe", "vulnerability", "insecure",
-        ];
+        const ANTI_PATTERN_KEYWORDS: &[&str] = &["security", "unsafe", "vulnerability", "insecure"];
         const RULE_KEYWORDS: &[&str] = &["validate", "sanitize", "auth", "permission"];
 
         let mut constraints = Vec::new();
@@ -365,11 +365,16 @@ impl ConstraintAnalyzer for PerformanceAnalyzer {
 
     fn detect(&self, ctx: &InsightContext<'_>) -> Vec<Constraint> {
         const GOTCHA_KEYWORDS: &[&str] = &[
-            "performance", "slow", "latency", "cache", "n+1", "bottleneck", "hot path", "sla",
+            "performance",
+            "slow",
+            "latency",
+            "cache",
+            "n+1",
+            "bottleneck",
+            "hot path",
+            "sla",
         ];
-        const ANTI_PATTERN_KEYWORDS: &[&str] = &[
-            "performance", "slow", "inefficient", "expensive",
-        ];
+        const ANTI_PATTERN_KEYWORDS: &[&str] = &["performance", "slow", "inefficient", "expensive"];
 
         let mut constraints = Vec::new();
 
@@ -408,14 +413,14 @@ impl ConstraintAnalyzer for PerformanceAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::context::VerifiedFileRegistry;
     use crate::pipeline::phases::constraint_extraction::{
-        ExtractedConstraints, Gotcha, HiddenDependency, HiddenDepType,
+        ExtractedConstraints, Gotcha, HiddenDepType, HiddenDependency,
     };
     use crate::pipeline::phases::convention_inference::{
         ArchitectureConvention, AsyncPattern, ErrorHandlingPattern, FileOrganization,
         InferredConventions, NamingConventions, TestingConvention,
     };
-    use crate::pipeline::context::VerifiedFileRegistry;
 
     fn create_test_context<'a>(
         conventions: &'a InferredConventions,

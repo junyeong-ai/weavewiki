@@ -7,22 +7,23 @@ Rust CLI that generates Claude Code plugins (CLAUDE.md, skills, agents, rules) b
 ```
 src/
 ├── pipeline/
-│   ├── adaptive.rs       # 9-phase orchestrator: Detection→Analysis→Generation→Refinement→Validation
-│   ├── phases/           # ProjectDetection, ConventionInference, ConstraintExtraction
-│   ├── strategy/         # RefinementStrategy implementations (Semantic, Evidence, Regeneration)
-│   ├── validation/       # TierFilter, SemanticValidator, CrossArtifactValidator
+│   ├── adaptive.rs       # Multi-phase orchestrator
+│   ├── phases/           # Analysis phases (detection, inference, extraction)
+│   ├── strategy/         # Refinement strategies (semantic, evidence, regeneration)
+│   ├── validation/       # Quality result types
 │   ├── quality_loop.rs   # Outer loop with checkpoint recovery
-│   └── learning.rs       # Cross-session pattern learning (failing_patterns, issue_patterns)
+│   └── learning.rs       # Cross-session pattern learning
 ├── ai/
 │   ├── provider/         # LlmProvider trait, ProviderChain with circuit breaker
 │   └── budget.rs         # Atomic token budget (CAS loop)
-├── config/types.rs       # All configuration with presets (Fast/Standard/Thorough/Exhaustive)
+├── config/types.rs       # Configuration with presets
+├── utils/                # Path security, patterns
 └── types/                # Skill, Agent, Rule, Plugin domain types
 ```
 
 ## Key Abstractions
 
-### LlmProvider (ai/provider/mod.rs:227-244)
+### LlmProvider
 ```rust
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -33,33 +34,27 @@ pub trait LlmProvider: Send + Sync {
 ```
 All LLM interactions go through this trait. Providers are shared via `Arc<dyn LlmProvider>`.
 
-### RefinementStrategy (pipeline/strategy/mod.rs:94-130)
+### RefinementStrategy
 ```rust
 #[async_trait]
 pub trait RefinementStrategy: Send + Sync {
     fn name(&self) -> &str;
     fn applicable_to(&self, issue: &IssueKind) -> bool;
-    fn priority(&self) -> u8 { 50 }
-    async fn refine_skill(&self, skill: &mut Skill, ctx: &StrategyContext) -> Result<StrategyResult>;
-    async fn refine_agent(&self, agent: &mut Agent, ctx: &StrategyContext) -> Result<StrategyResult>;
-    async fn refine_rule(&self, rule: &mut Rule, ctx: &StrategyContext) -> Result<StrategyResult>;
+    async fn refine_skill(&self, skill: &mut Skill, ctx: &StrategyContext<'_>) -> Result<StrategyResult>;
+    async fn refine_agent(&self, agent: &mut Agent, ctx: &StrategyContext<'_>) -> Result<StrategyResult>;
+    async fn refine_rule(&self, rule: &mut Rule, ctx: &StrategyContext<'_>) -> Result<StrategyResult>;
 }
 ```
-Implementations: `SemanticStrategy`, `EvidenceStrategy`, `RegenerationStrategy`
+Implementations: `SemanticStrategy`, `EvidenceStrategy`, `RegenerationStrategy` in `pipeline/strategy/`
 
-### IssueKind (pipeline/strategy/mod.rs:28-41)
-```rust
-pub enum IssueKind {
-    LowActionability,    // Lacks clear action items
-    TooGeneric,          // Not project-specific
-    WeakEvidence,        // Missing @file:line refs
-    MissingReferences,   // Expected refs not found
-    Shallow,             // Lacks depth
-    Tier1Content,        // Generic knowledge (rejected)
-    MissingModule,       // Key module not covered
-    // ...
-}
-```
+### IssueKind
+Quality issues detected during refinement:
+- `LowActionability` - Lacks clear action items
+- `TooGeneric` - Not project-specific
+- `WeakEvidence` - Missing @file:line refs
+- `Tier1Content` - Generic knowledge (rejected)
+- `MissingModule` - Key module not covered
+- `Shallow`, `TooShort`, `MissingSections`, `Redundant`, `PlanMismatch`, `PartialModuleCoverage`
 
 ## Critical Constraints
 
@@ -72,7 +67,7 @@ let provider = Arc::clone(&shared_provider);
 let provider = OpenAiProvider::new(config);
 ```
 
-### Budget Atomicity (ai/budget.rs:34-54)
+### Budget Atomicity
 ```rust
 // Uses CAS loop for thread-safe consumption
 pub fn consume(&self, tokens: u64) -> Result<()> {
@@ -81,14 +76,14 @@ pub fn consume(&self, tokens: u64) -> Result<()> {
         if current + tokens > self.total_budget {
             return Err(ClaudegenError::Budget { ... });
         }
-        if self.consumed.compare_exchange_weak(current, current + tokens, ...).is_ok() {
+        if self.consumed.compare_exchange_weak(...).is_ok() {
             return Ok(());
         }
     }
 }
 ```
 
-### OnceCell for File Registry (pipeline/adaptive.rs:68,85-92)
+### OnceCell for File Registry
 ```rust
 // Expensive to build - cache with OnceCell
 file_registry: OnceCell<VerifiedFileRegistry>
@@ -100,20 +95,24 @@ async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
 }
 ```
 
-### HashMap Bounds (pipeline/learning.rs:201-237)
+### HashMap Bounds
 ```rust
 // MUST bound all learning HashMaps to prevent unbounded growth
 if self.failing_patterns.len() >= self.config.max_patterns {
-    self.prune_oldest_failing_patterns();  // Removes bottom 10% by age
+    self.prune_oldest_failing_patterns();
 }
 ```
 
-### Config Validation (config/types.rs:186-271)
-Required invariants:
-- `quality.minimum_quality <= quality.target`
-- `deep_review.max_attempts >= deep_review.required_passes`
-- `retry.backoff_factor >= 1.0`
-- `execution.parallel_workers > 0`
+### Path Security
+```rust
+// Use utils/path.rs for all path resolution
+use crate::utils::safe_join;
+
+// safe_join returns None if traversal detected
+if let Some(path) = safe_join(&root, relative_path) {
+    // Safe to use
+}
+```
 
 ## Content Value Classification
 
@@ -128,7 +127,7 @@ Examples:
 - Tier 2 (keep): "Controllers in `adapter/inbound/web/`"
 - Tier 3 (essential): "Provider must be Arc-shared for rate limit tracking"
 
-## Error Handling (types/error.rs:35-80)
+## Error Handling
 
 | Category | Retry | Fallback | Action |
 |----------|-------|----------|--------|
@@ -138,14 +137,14 @@ Examples:
 | Network | Yes | No | Exponential backoff |
 | Unavailable | No | Yes | Try next provider |
 
-## Configuration Presets (config/types.rs:17-68)
+## Configuration Presets
 
 | Preset | Model | Quality Target | Strategy |
 |--------|-------|----------------|----------|
-| Fast | Haiku | 0.80 | 3 iterations, 1 review pass |
-| Standard | Sonnet | 0.85 | 10 iterations, 2 review passes |
-| Thorough | Sonnet | 0.90 | 20 iterations, 2 review passes |
-| Exhaustive | Opus | 0.95 | Long-running (weeks), 3 review passes |
+| Quick | Haiku | 0.60 | 10 iterations, 1 review pass |
+| Standard | Sonnet | 0.80 | 30 iterations, 2 review passes |
+| Thorough | Sonnet | 0.90 | 50 iterations, 2 review passes |
+| Exhaustive | Opus | 0.95 | 100 iterations, 3 review passes |
 
 Config resolution: defaults → `~/.config/claudegen/config.toml` → `.claudegen/config.toml` → `CLAUDEGEN_*` env vars
 
@@ -155,12 +154,12 @@ Config resolution: defaults → `~/.config/claudegen/config.toml` → `.claudege
 1. Create `src/pipeline/strategy/{name}.rs`
 2. Implement `RefinementStrategy` trait
 3. Add to `RefinementStrategyType` enum in `config/types.rs`
-4. Register in `StrategyRotator::new()` at `pipeline/strategy/mod.rs:141-146`
+4. Register in `StrategyRotator::new()`
 
 **Add new validation:**
 1. Create validator in `src/pipeline/validation/`
-2. Call from `AdaptivePipeline::run()` final validation phase (adaptive.rs:380-410)
+2. Call from `AdaptivePipeline::run()` final validation phase
 
 **Add new analysis phase:**
 1. Create phase in `src/pipeline/phases/`
-2. Integrate into `AdaptivePipeline::run()` (adaptive.rs:122-437)
+2. Integrate into `AdaptivePipeline::run()`

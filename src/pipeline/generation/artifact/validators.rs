@@ -8,17 +8,18 @@
 
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::pipeline::insight::TierClassification;
+use crate::types::validation::ValidationIssue;
 use crate::types::{Agent, Rule, Skill};
 
 /// Validation result
 #[derive(Debug, Clone)]
-pub struct ValidationResult {
+pub struct ArtifactValidation {
     pub is_valid: bool,
     pub score: f32,
     pub issues: Vec<ValidationIssue>,
 }
 
-impl ValidationResult {
+impl ArtifactValidation {
     pub fn pass(score: f32) -> Self {
         Self {
             is_valid: true,
@@ -44,35 +45,6 @@ impl ValidationResult {
     }
 }
 
-/// Specific validation issue
-#[derive(Debug, Clone)]
-pub struct ValidationIssue {
-    pub severity: IssueSeverity,
-    pub message: String,
-}
-
-impl ValidationIssue {
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            severity: IssueSeverity::Error,
-            message: message.into(),
-        }
-    }
-
-    pub fn warning(message: impl Into<String>) -> Self {
-        Self {
-            severity: IssueSeverity::Warning,
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueSeverity {
-    Warning,
-    Error,
-}
-
 /// Validates generated artifacts
 pub struct ArtifactValidator {
     min_tier: TierClassification,
@@ -83,7 +55,7 @@ pub struct ArtifactValidator {
 impl ArtifactValidator {
     pub fn new() -> Self {
         Self {
-            min_tier: TierClassification::Tier2,
+            min_tier: TierClassification::Tier2Convention,
             min_evidence_count: 1,
             min_content_length: 50,
         }
@@ -100,23 +72,33 @@ impl ArtifactValidator {
     }
 
     /// Validate a Rule artifact
-    pub fn validate_rule(&self, rule: &Rule, registry: Option<&VerifiedFileRegistry>) -> ValidationResult {
+    pub fn validate_rule(
+        &self,
+        rule: &Rule,
+        registry: Option<&VerifiedFileRegistry>,
+    ) -> ArtifactValidation {
         let mut issues = Vec::new();
         let mut score = 1.0f32;
 
         // Check content length
         let content_len: usize = rule.content.iter().map(|s| s.len()).sum();
         if content_len < self.min_content_length {
-            issues.push(ValidationIssue::warning(format!(
-                "Rule content too short ({} chars, min {})",
-                content_len, self.min_content_length
-            )));
+            issues.push(ValidationIssue::warning(
+                "RULE_CONTENT_SHORT",
+                format!(
+                    "Rule content too short ({} chars, min {})",
+                    content_len, self.min_content_length
+                ),
+            ));
             score -= 0.2;
         }
 
         // Check for evidence
         if rule.evidence.is_empty() {
-            issues.push(ValidationIssue::warning("Rule lacks evidence references"));
+            issues.push(ValidationIssue::warning(
+                "RULE_NO_EVIDENCE",
+                "Rule lacks evidence references",
+            ));
             score -= 0.2;
         }
 
@@ -124,10 +106,10 @@ impl ArtifactValidator {
         if let Some(reg) = registry {
             for evidence in &rule.evidence {
                 if !reg.contains(&evidence.file) {
-                    issues.push(ValidationIssue::warning(format!(
-                        "Evidence file not found: {}",
-                        evidence.file
-                    )));
+                    issues.push(ValidationIssue::warning(
+                        "RULE_EVIDENCE_NOT_FOUND",
+                        format!("Evidence file not found: {}", evidence.file),
+                    ));
                     score -= 0.1;
                 }
             }
@@ -141,6 +123,7 @@ impl ArtifactValidator {
 
         if !has_actionable {
             issues.push(ValidationIssue::warning(
+                "RULE_NOT_ACTIONABLE",
                 "Rule lacks actionable language (must/should/avoid)",
             ));
             score -= 0.15;
@@ -156,61 +139,71 @@ impl ArtifactValidator {
         ];
         for indicator in tier1_indicators {
             if content_text.contains(indicator) {
-                issues.push(ValidationIssue::error(format!(
-                    "Rule contains generic Tier 1 content: '{}'",
-                    indicator
-                )));
+                issues.push(ValidationIssue::error(
+                    "RULE_TIER1_CONTENT",
+                    format!("Rule contains generic Tier 1 content: '{}'", indicator),
+                ));
                 score -= 0.3;
             }
         }
 
-        let is_valid = score >= 0.5 && !issues.iter().any(|i| i.severity == IssueSeverity::Error);
+        let is_valid = score >= 0.5 && !issues.iter().any(|i| i.is_error());
 
         if is_valid {
             if issues.is_empty() {
-                ValidationResult::pass(score.max(0.0))
+                ArtifactValidation::pass(score.max(0.0))
             } else {
-                ValidationResult::pass_with_warnings(score.max(0.0), issues)
+                ArtifactValidation::pass_with_warnings(score.max(0.0), issues)
             }
         } else {
-            ValidationResult::fail(score.max(0.0), issues)
+            ArtifactValidation::fail(score.max(0.0), issues)
         }
     }
 
     /// Validate a Skill artifact
-    pub fn validate_skill(&self, skill: &Skill, registry: Option<&VerifiedFileRegistry>) -> ValidationResult {
+    pub fn validate_skill(
+        &self,
+        skill: &Skill,
+        registry: Option<&VerifiedFileRegistry>,
+    ) -> ArtifactValidation {
         let mut issues = Vec::new();
         let mut score = 1.0f32;
 
         // Check body length
         if skill.body.len() < self.min_content_length {
-            issues.push(ValidationIssue::warning(format!(
-                "Skill body too short ({} chars, min {})",
-                skill.body.len(),
-                self.min_content_length
-            )));
+            issues.push(ValidationIssue::warning(
+                "SKILL_BODY_SHORT",
+                format!(
+                    "Skill body too short ({} chars, min {})",
+                    skill.body.len(),
+                    self.min_content_length
+                ),
+            ));
             score -= 0.2;
         }
 
         // Check for file references
         let file_ref_count = skill.body.matches("@").count();
         if file_ref_count < self.min_evidence_count {
-            issues.push(ValidationIssue::warning(format!(
-                "Skill lacks file references ({} found, min {})",
-                file_ref_count, self.min_evidence_count
-            )));
+            issues.push(ValidationIssue::warning(
+                "SKILL_NO_REFS",
+                format!(
+                    "Skill lacks file references ({} found, min {})",
+                    file_ref_count, self.min_evidence_count
+                ),
+            ));
             score -= 0.2;
         }
 
         // Validate file references if registry provided
         if let Some(reg) = registry {
-            let refs = extract_file_refs(&skill.body);
+            let refs = crate::utils::patterns::extract_paths(&skill.body);
             for file_ref in refs {
                 if !reg.contains(&file_ref) {
-                    issues.push(ValidationIssue::warning(format!(
-                        "Referenced file not found: {}",
-                        file_ref
-                    )));
+                    issues.push(ValidationIssue::warning(
+                        "SKILL_REF_NOT_FOUND",
+                        format!("Referenced file not found: {}", file_ref),
+                    ));
                     score -= 0.1;
                 }
             }
@@ -218,7 +211,10 @@ impl ArtifactValidator {
 
         // Check description
         if skill.description.is_empty() {
-            issues.push(ValidationIssue::warning("Skill lacks description"));
+            issues.push(ValidationIssue::warning(
+                "SKILL_NO_DESC",
+                "Skill lacks description",
+            ));
             score -= 0.1;
         }
 
@@ -227,53 +223,69 @@ impl ArtifactValidator {
         let tier1_indicators = ["cargo build", "npm install", "pip install"];
         for indicator in tier1_indicators {
             if body_lower.contains(indicator) {
-                issues.push(ValidationIssue::error(format!(
-                    "Skill contains generic command: '{}'",
-                    indicator
-                )));
+                issues.push(ValidationIssue::error(
+                    "SKILL_TIER1_CONTENT",
+                    format!("Skill contains generic command: '{}'", indicator),
+                ));
                 score -= 0.3;
             }
         }
 
-        let is_valid = score >= 0.5 && !issues.iter().any(|i| i.severity == IssueSeverity::Error);
+        let is_valid = score >= 0.5 && !issues.iter().any(|i| i.is_error());
 
         if is_valid {
             if issues.is_empty() {
-                ValidationResult::pass(score.max(0.0))
+                ArtifactValidation::pass(score.max(0.0))
             } else {
-                ValidationResult::pass_with_warnings(score.max(0.0), issues)
+                ArtifactValidation::pass_with_warnings(score.max(0.0), issues)
             }
         } else {
-            ValidationResult::fail(score.max(0.0), issues)
+            ArtifactValidation::fail(score.max(0.0), issues)
         }
     }
 
     /// Validate an Agent artifact
-    pub fn validate_agent(&self, agent: &Agent, _registry: Option<&VerifiedFileRegistry>) -> ValidationResult {
+    pub fn validate_agent(
+        &self,
+        agent: &Agent,
+        _registry: Option<&VerifiedFileRegistry>,
+    ) -> ArtifactValidation {
         let mut issues = Vec::new();
         let mut score = 1.0f32;
 
         // Check instructions length
         if agent.prompt.len() < self.min_content_length {
-            issues.push(ValidationIssue::warning(format!(
-                "Agent instructions too short ({} chars, min {})",
-                agent.prompt.len(),
-                self.min_content_length
-            )));
+            issues.push(ValidationIssue::warning(
+                "AGENT_PROMPT_SHORT",
+                format!(
+                    "Agent instructions too short ({} chars, min {})",
+                    agent.prompt.len(),
+                    self.min_content_length
+                ),
+            ));
             score -= 0.2;
         }
 
         // Check description
         if agent.description.is_empty() {
-            issues.push(ValidationIssue::warning("Agent lacks description"));
+            issues.push(ValidationIssue::warning(
+                "AGENT_NO_DESC",
+                "Agent lacks description",
+            ));
             score -= 0.1;
         }
 
         // Check for domain specificity
         let instructions_lower = agent.prompt.to_lowercase();
         let domain_indicators = [
-            "domain", "business", "rule", "policy", "compliance",
-            "expert", "specialist", "knowledge",
+            "domain",
+            "business",
+            "rule",
+            "policy",
+            "compliance",
+            "expert",
+            "specialist",
+            "knowledge",
         ];
         let has_domain_content = domain_indicators
             .iter()
@@ -281,6 +293,7 @@ impl ArtifactValidator {
 
         if !has_domain_content {
             issues.push(ValidationIssue::warning(
+                "AGENT_NOT_DOMAIN_SPECIFIC",
                 "Agent may lack domain-specific content",
             ));
             score -= 0.15;
@@ -290,12 +303,12 @@ impl ArtifactValidator {
 
         if is_valid {
             if issues.is_empty() {
-                ValidationResult::pass(score.max(0.0))
+                ArtifactValidation::pass(score.max(0.0))
             } else {
-                ValidationResult::pass_with_warnings(score.max(0.0), issues)
+                ArtifactValidation::pass_with_warnings(score.max(0.0), issues)
             }
         } else {
-            ValidationResult::fail(score.max(0.0), issues)
+            ArtifactValidation::fail(score.max(0.0), issues)
         }
     }
 }
@@ -306,10 +319,6 @@ impl Default for ArtifactValidator {
     }
 }
 
-/// Extract file references from text (format: @path/to/file:line)
-fn extract_file_refs(text: &str) -> Vec<String> {
-    crate::pipeline::patterns::extract_file_refs(text)
-}
 
 /// Batch validator for multiple artifacts
 pub struct BatchValidator {
@@ -325,37 +334,52 @@ impl BatchValidator {
         }
     }
 
-    pub fn validate_rules(&self, rules: &[Rule]) -> BatchValidationResult {
+    pub fn validate_rules(&self, rules: &[Rule]) -> BatchArtifactValidation {
         let results: Vec<_> = rules
             .iter()
-            .map(|r| (r.name.clone(), self.validator.validate_rule(r, self.registry.as_ref())))
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    self.validator.validate_rule(r, self.registry.as_ref()),
+                )
+            })
             .collect();
 
-        BatchValidationResult::from_results(results)
+        BatchArtifactValidation::from_results(results)
     }
 
-    pub fn validate_skills(&self, skills: &[Skill]) -> BatchValidationResult {
+    pub fn validate_skills(&self, skills: &[Skill]) -> BatchArtifactValidation {
         let results: Vec<_> = skills
             .iter()
-            .map(|s| (s.name.clone(), self.validator.validate_skill(s, self.registry.as_ref())))
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    self.validator.validate_skill(s, self.registry.as_ref()),
+                )
+            })
             .collect();
 
-        BatchValidationResult::from_results(results)
+        BatchArtifactValidation::from_results(results)
     }
 
-    pub fn validate_agents(&self, agents: &[Agent]) -> BatchValidationResult {
+    pub fn validate_agents(&self, agents: &[Agent]) -> BatchArtifactValidation {
         let results: Vec<_> = agents
             .iter()
-            .map(|a| (a.name.clone(), self.validator.validate_agent(a, self.registry.as_ref())))
+            .map(|a| {
+                (
+                    a.name.clone(),
+                    self.validator.validate_agent(a, self.registry.as_ref()),
+                )
+            })
             .collect();
 
-        BatchValidationResult::from_results(results)
+        BatchArtifactValidation::from_results(results)
     }
 }
 
 /// Result of batch validation
 #[derive(Debug, Clone)]
-pub struct BatchValidationResult {
+pub struct BatchArtifactValidation {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -363,8 +387,8 @@ pub struct BatchValidationResult {
     pub failed_items: Vec<(String, Vec<ValidationIssue>)>,
 }
 
-impl BatchValidationResult {
-    fn from_results(results: Vec<(String, ValidationResult)>) -> Self {
+impl BatchArtifactValidation {
+    fn from_results(results: Vec<(String, ArtifactValidation)>) -> Self {
         let total = results.len();
         let passed = results.iter().filter(|(_, r)| r.is_valid).count();
         let failed = total - passed;
@@ -421,6 +445,7 @@ mod tests {
                 start_column: None,
                 end_column: None,
             }],
+            generation_context: None,
         };
 
         let result = validator.validate_rule(&rule, None);
@@ -440,6 +465,7 @@ mod tests {
                 "Use best practices when coding.".to_string(),
             ],
             evidence: Vec::new(),
+            generation_context: None,
         };
 
         let result = validator.validate_rule(&rule, None);
@@ -474,7 +500,12 @@ mod tests {
 
         let result = validator.validate_skill(&skill, None);
         assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.message.contains("generic command")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("generic command"))
+        );
     }
 
     #[test]
@@ -486,17 +517,12 @@ mod tests {
         let result = validator.validate_skill(&skill, None);
         // Short skill gets warnings but may still pass with reduced score
         assert!(result.score < 0.7);
-        assert!(result.issues.iter().any(|i| i.message.contains("too short")));
-    }
-
-    #[test]
-    fn test_extract_file_refs() {
-        let text = "Check @src/main.rs:10 and @lib/utils.rs for details.";
-        let refs = extract_file_refs(text);
-
-        assert_eq!(refs.len(), 2);
-        assert!(refs.contains(&"src/main.rs".to_string()));
-        assert!(refs.contains(&"lib/utils.rs".to_string()));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("too short"))
+        );
     }
 
     #[test]
@@ -515,12 +541,14 @@ mod tests {
                     start_column: None,
                     end_column: None,
                 }],
+                generation_context: None,
             },
             Rule {
                 name: "invalid-rule".to_string(),
                 paths: None,
                 content: vec!["Use best practices.".to_string()],
                 evidence: Vec::new(),
+                generation_context: None,
             },
         ];
 

@@ -12,10 +12,10 @@ use serde_json::Value;
 
 use crate::ai::LlmProvider;
 use crate::config::AnalysisSpecialty;
-use crate::types::Result;
+use crate::types::{Result, Severity};
 
-use super::deep_analyzer::{CoreModule, DiscoveredConstraint, EntryPoint, PatternInstance};
 use super::DeepAnalysisResult;
+use super::deep_analyzer::{CoreModule, DiscoveredConstraint, EntryPoint, PatternInstance};
 
 #[derive(Debug, Clone, Default)]
 pub struct MultiAgentResult {
@@ -37,14 +37,7 @@ pub struct StructureResult {
 pub struct AnalysisGap {
     pub area: String,
     pub description: String,
-    pub severity: GapSeverity,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum GapSeverity {
-    Low,
-    Medium,
-    High,
+    pub severity: Severity,
 }
 
 #[async_trait]
@@ -150,12 +143,16 @@ impl MultiAgentAnalyzer {
                         gaps: vec![AnalysisGap {
                             area: format!("{:?}", specialty).to_lowercase(),
                             description: format!("Analysis error: {}", e),
-                            severity: GapSeverity::High,
+                            severity: Severity::High,
                         }],
                     });
                 }
                 Ok(Err(_)) => {
-                    tracing::warn!(?specialty, timeout_secs = self.timeout_secs, "Specialist timed out");
+                    tracing::warn!(
+                        ?specialty,
+                        timeout_secs = self.timeout_secs,
+                        "Specialist timed out"
+                    );
                     failed_count += 1;
                     all_results.push(SpecialistResult {
                         specialty: Some(specialty),
@@ -164,7 +161,7 @@ impl MultiAgentAnalyzer {
                         gaps: vec![AnalysisGap {
                             area: format!("{:?}", specialty).to_lowercase(),
                             description: format!("Timed out after {}s", self.timeout_secs),
-                            severity: GapSeverity::Medium,
+                            severity: Severity::Medium,
                         }],
                     });
                 }
@@ -178,7 +175,7 @@ impl MultiAgentAnalyzer {
                         gaps: vec![AnalysisGap {
                             area: format!("{:?}", specialty).to_lowercase(),
                             description: "Internal error (task panic)".to_string(),
-                            severity: GapSeverity::High,
+                            severity: Severity::High,
                         }],
                     });
                 }
@@ -187,13 +184,20 @@ impl MultiAgentAnalyzer {
 
         if failed_count > 0 {
             let total = self.specialists.len();
-            tracing::warn!(failed = failed_count, total = total, "Multi-agent analysis partially failed");
+            tracing::warn!(
+                failed = failed_count,
+                total = total,
+                "Multi-agent analysis partially failed"
+            );
         }
 
         self.synthesize_results(all_results)
     }
 
-    fn create_specialist(provider: Arc<dyn LlmProvider>, specialty: AnalysisSpecialty) -> Box<dyn SpecialistAgent> {
+    fn create_specialist(
+        provider: Arc<dyn LlmProvider>,
+        specialty: AnalysisSpecialty,
+    ) -> Box<dyn SpecialistAgent> {
         match specialty {
             AnalysisSpecialty::Structure => Box::new(StructureSpecialist::new(provider)),
             AnalysisSpecialty::Pattern => Box::new(PatternSpecialist::new(provider.clone())),
@@ -214,7 +218,9 @@ impl MultiAgentAnalyzer {
 
         for result in results {
             if let Some(specialty) = result.specialty {
-                output.specialist_confidences.insert(specialty, result.confidence);
+                output
+                    .specialist_confidences
+                    .insert(specialty, result.confidence);
                 all_findings.push((specialty, result.clone()));
 
                 match specialty {
@@ -232,7 +238,9 @@ impl MultiAgentAnalyzer {
                         }
                     }
                     AnalysisSpecialty::Pattern => {
-                        match serde_json::from_value::<Vec<PatternInstance>>(result.findings.clone()) {
+                        match serde_json::from_value::<Vec<PatternInstance>>(
+                            result.findings.clone(),
+                        ) {
                             Ok(patterns) => output.patterns.extend(patterns),
                             Err(e) if !result.findings.is_null() => {
                                 tracing::debug!(?specialty, error = %e, "Failed to parse pattern findings");
@@ -241,7 +249,9 @@ impl MultiAgentAnalyzer {
                         }
                     }
                     AnalysisSpecialty::Constraint => {
-                        match serde_json::from_value::<Vec<DiscoveredConstraint>>(result.findings.clone()) {
+                        match serde_json::from_value::<Vec<DiscoveredConstraint>>(
+                            result.findings.clone(),
+                        ) {
                             Ok(constraints) => output.constraints.extend(constraints),
                             Err(e) if !result.findings.is_null() => {
                                 tracing::debug!(?specialty, error = %e, "Failed to parse constraint findings");
@@ -272,7 +282,9 @@ impl MultiAgentAnalyzer {
     ) -> Vec<AnalysisGap> {
         let mut gaps = Vec::new();
 
-        let structure_modules: std::collections::HashSet<_> = output.structure.core_modules
+        let structure_modules: std::collections::HashSet<_> = output
+            .structure
+            .core_modules
             .iter()
             .map(|m| m.name.as_str())
             .collect();
@@ -289,7 +301,7 @@ impl MultiAgentAnalyzer {
                             "Pattern '{}' references file '{}' in module '{}' not identified by structure specialist",
                             pattern.name, loc.file, module_from_path
                         ),
-                        severity: GapSeverity::Low,
+                        severity: Severity::Low,
                     });
                 }
             }
@@ -297,7 +309,9 @@ impl MultiAgentAnalyzer {
 
         for constraint in &output.constraints {
             for evidence in &constraint.evidence {
-                let has_structural_backing = output.structure.core_modules
+                let has_structural_backing = output
+                    .structure
+                    .core_modules
                     .iter()
                     .any(|m| evidence.file.contains(&m.name));
 
@@ -308,18 +322,20 @@ impl MultiAgentAnalyzer {
                             "Constraint '{}' has evidence in '{}' which lacks structural backing",
                             constraint.title, evidence.file
                         ),
-                        severity: GapSeverity::Medium,
+                        severity: Severity::Medium,
                     });
                 }
             }
         }
 
-        let structure_conf = findings.iter()
+        let structure_conf = findings
+            .iter()
             .find(|(s, _)| *s == AnalysisSpecialty::Structure)
             .map(|(_, r)| r.confidence)
             .unwrap_or(0.0);
 
-        let pattern_conf = findings.iter()
+        let pattern_conf = findings
+            .iter()
             .find(|(s, _)| *s == AnalysisSpecialty::Pattern)
             .map(|(_, r)| r.confidence)
             .unwrap_or(0.0);
@@ -331,7 +347,7 @@ impl MultiAgentAnalyzer {
                     "Significant confidence gap between Structure ({:.0}%) and Pattern ({:.0}%) specialists",
                     structure_conf * 100.0, pattern_conf * 100.0
                 ),
-                severity: GapSeverity::Medium,
+                severity: Severity::Medium,
             });
         }
 
@@ -346,7 +362,7 @@ impl MultiAgentAnalyzer {
     }
 
     pub fn to_deep_analysis_result(&self, result: MultiAgentResult) -> DeepAnalysisResult {
-        use super::deep_analyzer::{AnalysisQuality, StructureAnalysis};
+        use super::deep_analyzer::{AnalysisQuality, SemanticStructure};
 
         let avg_confidence = if result.specialist_confidences.is_empty() {
             0.0
@@ -356,10 +372,12 @@ impl MultiAgentAnalyzer {
         };
 
         DeepAnalysisResult {
-            structure: StructureAnalysis {
+            structure: SemanticStructure {
                 entry_points: result.structure.entry_points,
                 core_modules: result.structure.core_modules,
-                layer_boundaries: result.structure.layer_boundaries
+                layer_boundaries: result
+                    .structure
+                    .layer_boundaries
                     .into_iter()
                     .map(|b| super::deep_analyzer::LayerBoundary {
                         from_layer: b,
@@ -415,7 +433,9 @@ impl SpecialistAgent for StructureSpecialist {
     }
 
     async fn analyze(&self, context: &AnalysisContext) -> Result<SpecialistResult> {
-        let file_summary = context.file_list.iter()
+        let file_summary = context
+            .file_list
+            .iter()
             .take(50)
             .cloned()
             .collect::<Vec<_>>()
@@ -450,7 +470,7 @@ Only output valid JSON."#,
                     gaps: vec![AnalysisGap {
                         area: "structure".into(),
                         description: e.to_string(),
-                        severity: GapSeverity::High,
+                        severity: Severity::High,
                     }],
                 })
             }
@@ -475,7 +495,8 @@ impl SpecialistAgent for PatternSpecialist {
     }
 
     async fn analyze(&self, context: &AnalysisContext) -> Result<SpecialistResult> {
-        let code_samples: Vec<_> = context.file_contents
+        let code_samples: Vec<_> = context
+            .file_contents
             .iter()
             .take(10)
             .map(|(path, content)| {
@@ -528,7 +549,8 @@ impl SpecialistAgent for ConstraintSpecialist {
     }
 
     async fn analyze(&self, context: &AnalysisContext) -> Result<SpecialistResult> {
-        let code_samples: Vec<_> = context.file_contents
+        let code_samples: Vec<_> = context
+            .file_contents
             .iter()
             .take(15)
             .map(|(path, content)| {

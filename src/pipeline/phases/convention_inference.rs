@@ -238,7 +238,9 @@ impl ConventionInferenceEngine {
         let structure = self.collect_project_structure().await?;
         let samples = self.collect_sample_files(detection).await?;
 
-        let static_conventions = self.infer_from_static_analysis(&structure, &samples).await?;
+        let static_conventions = self
+            .infer_from_static_analysis(&structure, &samples)
+            .await?;
 
         let llm_conventions = self
             .infer_from_llm(detection.primary_type, &structure, &samples)
@@ -419,23 +421,19 @@ impl ConventionInferenceEngine {
                 }
 
                 if path.is_dir() {
-                    Box::pin(self.collect_samples_recursive(
-                        &path,
-                        extensions,
-                        samples,
-                        depth + 1,
-                    ))
-                    .await?;
+                    Box::pin(self.collect_samples_recursive(&path, extensions, samples, depth + 1))
+                        .await?;
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
                     && extensions.contains(&ext)
-                        && let Ok(content) = fs::read_to_string(&path).await
-                            && content.len() < 50_000 {
-                                let relative = path
-                                    .strip_prefix(&self.project_root)
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default();
-                                samples.push((relative, content));
-                            }
+                    && let Ok(content) = fs::read_to_string(&path).await
+                    && content.len() < 50_000
+                {
+                    let relative = path
+                        .strip_prefix(&self.project_root)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    samples.push((relative, content));
+                }
             }
         }
 
@@ -468,7 +466,12 @@ impl ConventionInferenceEngine {
                 NamingCase::SnakeCase
             } else if name.contains('-') {
                 NamingCase::KebabCase
-            } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            } else if name
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            {
                 NamingCase::PascalCase
             } else {
                 NamingCase::CamelCase
@@ -638,7 +641,8 @@ impl ConventionInferenceEngine {
             if content.contains("Result<") || content.contains("-> Result") {
                 result_count += 1;
             }
-            if content.contains("throw ") || content.contains("try {") || content.contains("catch ") {
+            if content.contains("throw ") || content.contains("try {") || content.contains("catch ")
+            {
                 exception_count += 1;
             }
         }
@@ -671,7 +675,10 @@ impl ConventionInferenceEngine {
         let mut runtime = None;
 
         for (_, content) in samples {
-            if content.contains("async fn") || content.contains("async def") || content.contains("async function") {
+            if content.contains("async fn")
+                || content.contains("async def")
+                || content.contains("async function")
+            {
                 async_count += 1;
             }
             if content.contains("fn ") && !content.contains("async fn") {
@@ -798,7 +805,9 @@ impl ConventionInferenceEngine {
 
         let response = self.provider.generate(&prompt, &schema).await?;
 
-        let content_str = response.content.as_str()
+        let content_str = response
+            .content
+            .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| serde_json::to_string(&response.content).unwrap_or_default());
 
@@ -822,12 +831,15 @@ impl ConventionInferenceEngine {
         conventions.architecture.layers.retain(|layer| {
             let path = &layer.path_pattern;
             // Check if path pattern exists in structure or matches sample paths
-            let path_normalized = path.trim_end_matches('/').trim_end_matches('*').trim_end_matches('/');
-            let exists_in_structure = structure.contains(path_normalized) ||
-                structure.contains(&format!("{}/", path_normalized));
-            let matches_sample = sample_paths.iter().any(|sp| {
-                sp.starts_with(path_normalized) || sp.contains(path_normalized)
-            });
+            let path_normalized = path
+                .trim_end_matches('/')
+                .trim_end_matches('*')
+                .trim_end_matches('/');
+            let exists_in_structure = structure.contains(path_normalized)
+                || structure.contains(&format!("{}/", path_normalized));
+            let matches_sample = sample_paths
+                .iter()
+                .any(|sp| sp.starts_with(path_normalized) || sp.contains(path_normalized));
 
             if !exists_in_structure && !matches_sample {
                 tracing::debug!(
@@ -843,11 +855,11 @@ impl ConventionInferenceEngine {
         conventions.file_organization.key_directories.retain(|dir| {
             let path = &dir.path;
             let path_normalized = path.trim_end_matches('/');
-            let exists_in_structure = structure.contains(path_normalized) ||
-                structure.contains(&format!("{}/", path_normalized));
-            let matches_sample = sample_paths.iter().any(|sp| {
-                sp.starts_with(path_normalized) || sp.contains(path_normalized)
-            });
+            let exists_in_structure = structure.contains(path_normalized)
+                || structure.contains(&format!("{}/", path_normalized));
+            let matches_sample = sample_paths
+                .iter()
+                .any(|sp| sp.starts_with(path_normalized) || sp.contains(path_normalized));
 
             if !exists_in_structure && !matches_sample {
                 tracing::debug!(
@@ -985,11 +997,14 @@ impl ConventionInferenceEngine {
                         .to_string();
 
                     if !path.is_empty() {
-                        conventions.file_organization.key_directories.push(DirectoryRole {
-                            path,
-                            role,
-                            file_types: Vec::new(),
-                        });
+                        conventions
+                            .file_organization
+                            .key_directories
+                            .push(DirectoryRole {
+                                path,
+                                role,
+                                file_types: Vec::new(),
+                            });
                     }
                 }
             }
@@ -1021,7 +1036,11 @@ impl ConventionInferenceEngine {
                     let pattern_text = line.trim_start_matches(['-', '*', ' ']);
                     if !pattern_text.is_empty() {
                         conventions.patterns.push(CodePattern {
-                            name: pattern_text.split(':').next().unwrap_or(pattern_text).to_string(),
+                            name: pattern_text
+                                .split(':')
+                                .next()
+                                .unwrap_or(pattern_text)
+                                .to_string(),
                             description: pattern_text.to_string(),
                             category: PatternCategory::Other,
                             usage_frequency: UsageFrequency::Common,
@@ -1044,7 +1063,8 @@ impl ConventionInferenceEngine {
             PatternCategory::Concurrency
         } else if text.contains("state") || text.contains("store") || text.contains("context") {
             PatternCategory::StateManagement
-        } else if text.contains("database") || text.contains("repository") || text.contains("query") {
+        } else if text.contains("database") || text.contains("repository") || text.contains("query")
+        {
             PatternCategory::DataAccess
         } else if text.contains("valid") || text.contains("check") || text.contains("verify") {
             PatternCategory::Validation

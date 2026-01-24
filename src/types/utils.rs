@@ -217,7 +217,6 @@ pub fn is_kebab_case(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

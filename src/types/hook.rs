@@ -2,20 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Trait for hook containers that support tool-use hooks
-pub trait ToolHookContainer {
-    fn pre_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>>;
-    fn post_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>>;
-
-    fn add_pre_tool_use(&mut self, hook: Hook) {
-        self.pre_tool_use_mut().get_or_insert_with(Vec::new).push(hook);
-    }
-
-    fn add_post_tool_use(&mut self, hook: Hook) {
-        self.post_tool_use_mut().get_or_insert_with(Vec::new).push(hook);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
     #[serde(rename = "PreToolUse", skip_serializing_if = "Option::is_none")]
@@ -73,16 +59,6 @@ impl Hook {
     }
 }
 
-impl ToolHookContainer for HooksConfig {
-    fn pre_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>> {
-        &mut self.pre_tool_use
-    }
-
-    fn post_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>> {
-        &mut self.post_tool_use
-    }
-}
-
 /// Simplified hooks for Skills and Agents (PreToolUse/PostToolUse only)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ToolHooks {
@@ -90,14 +66,4 @@ pub struct ToolHooks {
     pub pre_tool_use: Option<Vec<Hook>>,
     #[serde(rename = "PostToolUse", skip_serializing_if = "Option::is_none")]
     pub post_tool_use: Option<Vec<Hook>>,
-}
-
-impl ToolHookContainer for ToolHooks {
-    fn pre_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>> {
-        &mut self.pre_tool_use
-    }
-
-    fn post_tool_use_mut(&mut self) -> &mut Option<Vec<Hook>> {
-        &mut self.post_tool_use
-    }
 }

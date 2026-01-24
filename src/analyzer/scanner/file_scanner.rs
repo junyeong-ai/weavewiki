@@ -10,72 +10,124 @@ const SOURCE_EXTENSIONS: &[&str] = &[
     "swift", "scala", "php", "lua", "sh", "bash", "zsh",
 ];
 
-/// Default directories to skip
-const DEFAULT_SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "target",
-    ".git",
-    "build",
-    "dist",
-    "__pycache__",
-    "vendor",
-    ".venv",
-];
+/// Pre-compiled pattern for efficient matching
+#[derive(Debug, Clone)]
+struct CompiledPattern {
+    /// Compiled glob pattern (None if invalid)
+    glob: Option<glob::Pattern>,
+    /// Directory prefix for "dir/**" patterns
+    dir_prefix: Option<String>,
+}
+
+impl CompiledPattern {
+    fn compile(pattern: &str) -> Self {
+        let glob = match glob::Pattern::new(pattern) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(pattern = %pattern, error = %e, "Invalid glob pattern, will use fallback matching");
+                None
+            }
+        };
+
+        let dir_prefix = pattern.strip_suffix("/**").map(|s| s.to_string());
+
+        Self { glob, dir_prefix }
+    }
+
+    fn matches(&self, relative_path: &str) -> bool {
+        // Try glob match first
+        if let Some(ref glob) = self.glob
+            && glob.matches(relative_path)
+        {
+            return true;
+        }
+
+        // Fallback: directory prefix matching for "dir/**" patterns
+        if let Some(ref prefix) = self.dir_prefix
+            && (relative_path.starts_with(prefix)
+                || relative_path.starts_with(&format!("{}/", prefix)))
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
+/// Compiled pattern set for include/exclude matching
+#[derive(Debug, Clone, Default)]
+struct CompiledPatternSet {
+    patterns: Vec<CompiledPattern>,
+    /// Fast path: all files match (e.g., ["**/*"])
+    match_all: bool,
+}
+
+impl CompiledPatternSet {
+    fn compile(patterns: &[String]) -> Self {
+        // Fast path detection
+        if patterns.len() == 1 && patterns[0] == "**/*" {
+            return Self {
+                patterns: Vec::new(),
+                match_all: true,
+            };
+        }
+
+        let compiled: Vec<CompiledPattern> = patterns
+            .iter()
+            .map(|p| CompiledPattern::compile(p))
+            .collect();
+
+        Self {
+            patterns: compiled,
+            match_all: false,
+        }
+    }
+
+    fn matches(&self, relative_path: &str) -> bool {
+        if self.match_all {
+            return true;
+        }
+
+        self.patterns.iter().any(|p| p.matches(relative_path))
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.match_all && self.patterns.is_empty()
+    }
+}
 
 pub struct FileScanner {
     root: PathBuf,
-    include: Vec<String>,
-    exclude: Vec<String>,
+    /// Pre-compiled include patterns
+    include: CompiledPatternSet,
+    /// Pre-compiled exclude patterns
+    exclude: CompiledPatternSet,
     max_file_size: u64,
+    /// Maximum number of files to sample (0 = unlimited)
+    max_file_samples: usize,
     source_only: bool,
 }
 
 impl FileScanner {
-    pub fn new<P: AsRef<Path>>(root: P) -> Self {
-        let config = AnalysisConfig::default();
-        Self {
-            root: root.as_ref().to_path_buf(),
-            include: vec!["**/*".to_string()],
-            exclude: vec![],
-            max_file_size: config.max_file_size as u64,
-            source_only: false,
-        }
-    }
-
-    /// Create a scanner for source files with default skip patterns
-    pub fn source_files<P: AsRef<Path>>(root: P) -> Self {
-        let config = AnalysisConfig::default();
-        let exclude = DEFAULT_SKIP_DIRS
-            .iter()
-            .map(|d| format!("{d}/**"))
-            .collect();
-        Self {
-            root: root.as_ref().to_path_buf(),
-            include: vec!["**/*".to_string()],
-            exclude,
-            max_file_size: config.max_file_size as u64,
-            source_only: true,
-        }
-    }
-
     /// Create a scanner with configuration
-    pub fn with_config<P: AsRef<Path>>(root: P, config: &AnalysisConfig) -> Self {
+    pub fn new<P: AsRef<Path>>(root: P, config: &AnalysisConfig) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
-            include: config.include.clone(),
-            exclude: config.exclude.clone(),
+            include: CompiledPatternSet::compile(&config.include),
+            exclude: CompiledPatternSet::compile(&config.exclude),
             max_file_size: config.max_file_size as u64,
+            max_file_samples: config.max_file_samples,
             source_only: false,
         }
     }
 
     pub fn with_include(mut self, patterns: Vec<String>) -> Self {
-        self.include = patterns;
+        self.include = CompiledPatternSet::compile(&patterns);
         self
     }
 
     pub fn with_exclude(mut self, patterns: Vec<String>) -> Self {
-        self.exclude = patterns;
+        self.exclude = CompiledPatternSet::compile(&patterns);
         self
     }
 
@@ -90,26 +142,37 @@ impl FileScanner {
         self
     }
 
-    /// Count files without collecting them (more efficient for scale detection)
-    pub fn count(&self) -> usize {
-        let walker = WalkBuilder::new(&self.root)
+    fn build_walker(&self) -> ignore::Walk {
+        WalkBuilder::new(&self.root)
             .hidden(false)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
             .follow_links(false) // Security: prevent symlink traversal attacks
-            .build();
+            .build()
+    }
 
-        walker
-            .filter_map(|e| e.ok())
-            .filter(|entry| {
-                let path = entry.path();
-                path.is_file()
-                    && !self.should_exclude(path)
-                    && self.check_size(path)
-                    && self.check_source_extension(path)
-            })
-            .count()
+    fn should_process(&self, path: &Path) -> bool {
+        path.is_file()
+            && self.should_include(path)
+            && !self.should_exclude(path)
+            && self.check_source_extension(path)
+    }
+
+    /// Count files without collecting them (more efficient for scale detection)
+    ///
+    /// Respects `max_file_samples` limit for consistency with `scan()`.
+    pub fn count(&self) -> usize {
+        let iter = self.build_walker().filter_map(|e| e.ok()).filter(|entry| {
+            let path = entry.path();
+            self.should_process(path) && self.check_size(path)
+        });
+
+        if self.max_file_samples > 0 {
+            iter.take(self.max_file_samples).count()
+        } else {
+            iter.count()
+        }
     }
 
     /// Get relative paths as strings
@@ -129,41 +192,31 @@ impl FileScanner {
     pub fn scan(&self) -> Result<Vec<ScannedFile>> {
         let mut files = Vec::new();
 
-        let walker = WalkBuilder::new(&self.root)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .follow_links(false) // Security: prevent symlink traversal attacks
-            .build();
+        for entry in self.build_walker().filter_map(|e| e.ok()) {
+            // Check sample limit (0 = unlimited)
+            if self.max_file_samples > 0 && files.len() >= self.max_file_samples {
+                tracing::info!(
+                    limit = self.max_file_samples,
+                    "Reached max_file_samples limit, stopping scan"
+                );
+                break;
+            }
 
-        for entry in walker.filter_map(|e| e.ok()) {
             let path = entry.path();
 
-            if !path.is_file() {
-                continue;
-            }
-
-            if self.should_exclude(path) {
-                continue;
-            }
-
-            if !self.check_source_extension(path) {
+            if !self.should_process(path) {
                 continue;
             }
 
             match path.metadata() {
-                Ok(metadata) => {
-                    if metadata.len() > self.max_file_size {
-                        continue;
-                    }
-
+                Ok(metadata) if metadata.len() <= self.max_file_size => {
                     files.push(ScannedFile {
                         path: path.to_path_buf(),
                         size: metadata.len(),
                         extension: path.extension().and_then(|e| e.to_str()).map(String::from),
                     });
                 }
+                Ok(_) => {} // File too large, skip silently
                 Err(e) => {
                     tracing::debug!(path = %path.display(), error = %e, "Failed to read file metadata");
                 }
@@ -173,31 +226,24 @@ impl FileScanner {
         Ok(files)
     }
 
-    fn should_exclude(&self, path: &Path) -> bool {
-        // Convert to relative path for pattern matching
-        let relative_path = path
-            .strip_prefix(&self.root)
+    fn get_relative_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
             .unwrap_or(path)
-            .to_string_lossy();
+            .to_string_lossy()
+            .to_string()
+    }
 
-        for pattern in &self.exclude {
-            // Try glob pattern matching
-            if let Ok(glob_pattern) = glob::Pattern::new(pattern)
-                && glob_pattern.matches(&relative_path) {
-                    return true;
-                }
+    fn should_include(&self, path: &Path) -> bool {
+        let relative = self.get_relative_path(path);
+        self.include.matches(&relative)
+    }
 
-            // Also check if path contains the directory prefix (for patterns like ".git/**")
-            // This handles cases where the glob pattern might not match correctly
-            if let Some(dir_pattern) = pattern.strip_suffix("/**")
-                && (relative_path.starts_with(dir_pattern)
-                    || relative_path.starts_with(&format!("{}/", dir_pattern)))
-                {
-                    return true;
-                }
+    fn should_exclude(&self, path: &Path) -> bool {
+        if self.exclude.is_empty() {
+            return false;
         }
-
-        false
+        let relative = self.get_relative_path(path);
+        self.exclude.matches(&relative)
     }
 
     fn check_size(&self, path: &Path) -> bool {
@@ -222,4 +268,49 @@ pub struct ScannedFile {
     pub path: PathBuf,
     pub size: u64,
     pub extension: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compiled_pattern_glob() {
+        let pattern = CompiledPattern::compile("*.rs");
+        assert!(pattern.glob.is_some());
+        assert!(pattern.matches("main.rs"));
+        assert!(!pattern.matches("main.ts"));
+    }
+
+    #[test]
+    fn test_compiled_pattern_directory() {
+        let pattern = CompiledPattern::compile("node_modules/**");
+        assert!(pattern.dir_prefix.is_some());
+        assert!(pattern.matches("node_modules/package/index.js"));
+        assert!(!pattern.matches("src/index.js"));
+    }
+
+    #[test]
+    fn test_compiled_pattern_invalid() {
+        // Invalid glob pattern should not panic, just log warning
+        let pattern = CompiledPattern::compile("[invalid");
+        assert!(pattern.glob.is_none());
+        // Should not match anything via glob
+        assert!(!pattern.matches("test.rs"));
+    }
+
+    #[test]
+    fn test_pattern_set_match_all() {
+        let set = CompiledPatternSet::compile(&["**/*".to_string()]);
+        assert!(set.match_all);
+        assert!(set.matches("any/path/file.rs"));
+    }
+
+    #[test]
+    fn test_pattern_set_specific() {
+        let set = CompiledPatternSet::compile(&["src/**/*.rs".to_string()]);
+        assert!(!set.match_all);
+        assert!(set.matches("src/lib.rs"));
+        assert!(set.matches("src/utils/helpers.rs"));
+    }
 }

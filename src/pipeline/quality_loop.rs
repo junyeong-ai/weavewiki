@@ -18,16 +18,16 @@ use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
-use crate::ai::{with_timeout, LlmProvider};
+use crate::ai::{LlmProvider, with_timeout};
 use crate::config::{AnalysisDepth, Config};
 use crate::types::Result;
 
-use super::context::ClaudegenContext;
 use super::adaptive::{AdaptivePipeline, AdaptivePipelineOutput};
 use super::checkpoint::{
     CheckpointManager, CrashRecovery, ExecutionCheckpoint, GeneratedArtifacts, PipelinePhase,
     QualitySnapshot, RecoveryResult,
 };
+use super::context::ClaudegenContext;
 use super::context::VerifiedFileRegistry;
 use super::deep_review::{DeepReviewEngine, ReviewArtifacts, TwoPassResult};
 // Simplified: ValidationPipeline replaced with LLM Judge in quality module
@@ -87,30 +87,36 @@ pub struct DiscoveredGap {
 
 pub struct QualityLoop {
     project_root: PathBuf,
+    output_dir: Option<PathBuf>,
     provider: Arc<dyn LlmProvider>,
     config: Config,
     file_registry: OnceCell<VerifiedFileRegistry>,
 }
 
 impl QualityLoop {
-    pub fn new(
-        project_root: PathBuf,
-        provider: Arc<dyn LlmProvider>,
-        config: Config,
-    ) -> Self {
+    pub fn new(project_root: PathBuf, provider: Arc<dyn LlmProvider>, config: Config) -> Self {
         Self {
             project_root,
+            output_dir: None,
             provider,
             config,
             file_registry: OnceCell::new(),
         }
     }
 
+    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
+        self.output_dir = Some(output_dir);
+        self
+    }
+
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.config.performance.resume_on_crash = resume;
+        self
+    }
+
     async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
         self.file_registry
-            .get_or_try_init(|| async {
-                VerifiedFileRegistry::build(&self.project_root).await
-            })
+            .get_or_try_init(|| async { VerifiedFileRegistry::build(&self.project_root).await })
             .await
             .cloned()
     }
@@ -118,9 +124,10 @@ impl QualityLoop {
     pub async fn run(&self) -> Result<QualityLoopResult> {
         // Check for crash recovery if durable execution is enabled
         if self.config.performance.resume_on_crash
-            && let Some(result) = self.try_recover().await? {
-                return Ok(result);
-            }
+            && let Some(result) = self.try_recover().await?
+        {
+            return Ok(result);
+        }
 
         // Initialize checkpoint manager for durable execution
         let mut checkpoint_manager = if self.config.performance.checkpoint_interval_minutes > 0 {
@@ -162,9 +169,7 @@ impl QualityLoop {
                 tracing::info!("No checkpoint found, starting fresh");
                 Ok(None)
             }
-            RecoveryResult::Recovered(checkpoint) => {
-                self.resume_from_checkpoint(*checkpoint).await
-            }
+            RecoveryResult::Recovered(checkpoint) => self.resume_from_checkpoint(*checkpoint).await,
         }
     }
 
@@ -184,46 +189,61 @@ impl QualityLoop {
         if let Some(ref claude_md) = checkpoint.generated_artifacts.claude_md
             && (checkpoint.current_phase == PipelinePhase::DeepReview
                 || checkpoint.current_phase == PipelinePhase::Finalization)
-            {
-                tracing::info!(
-                    phase = ?checkpoint.current_phase,
-                    "Checkpoint has generated content, resuming deep review"
-                );
+        {
+            tracing::info!(
+                phase = ?checkpoint.current_phase,
+                "Checkpoint has generated content, resuming deep review"
+            );
 
-                // Reconstruct artifacts for deep review
-                let artifacts = ReviewArtifacts {
-                    claude_md: Some(claude_md.clone()),
-                    skills: checkpoint.generated_artifacts.skills.clone().into_iter().collect(),
-                    agents: checkpoint.generated_artifacts.agents.clone().into_iter().collect(),
-                    rules: checkpoint.generated_artifacts.rules.clone().into_iter().collect(),
-                };
+            // Reconstruct artifacts for deep review
+            let artifacts = ReviewArtifacts {
+                claude_md: Some(claude_md.clone()),
+                skills: checkpoint
+                    .generated_artifacts
+                    .skills
+                    .clone()
+                    .into_iter()
+                    .collect(),
+                agents: checkpoint
+                    .generated_artifacts
+                    .agents
+                    .clone()
+                    .into_iter()
+                    .collect(),
+                rules: checkpoint
+                    .generated_artifacts
+                    .rules
+                    .clone()
+                    .into_iter()
+                    .collect(),
+            };
 
-                // Run deep review on the recovered artifacts
-                let file_registry = self.get_file_registry().await?;
-                let engine = DeepReviewEngine::new(
-                    Arc::clone(&self.provider),
-                    self.config.deep_review(),
-                    file_registry,
-                );
+            // Run deep review on the recovered artifacts
+            let file_registry = self.get_file_registry().await?;
+            let engine = DeepReviewEngine::new(
+                Arc::clone(&self.provider),
+                self.config.deep_review(),
+                file_registry,
+            );
 
-                match engine.execute_two_pass_review(&artifacts).await? {
-                    TwoPassResult::Passed {
-                        total_attempts,
-                        final_quality,
-                    } => {
-                        tracing::info!(
-                            attempts = total_attempts,
-                            quality = format!("{:.1}%", final_quality * 100.0),
-                            "Resumed deep review PASSED"
-                        );
-                        // Cannot fully reconstruct AdaptivePipelineOutput from checkpoint
-                        // Fall through to re-run pipeline with checkpointed context
-                    }
-                    TwoPassResult::Failed { .. } => {
-                        tracing::warn!("Resumed deep review FAILED, re-running pipeline");
-                    }
+            match engine.execute_two_pass_review(&artifacts).await? {
+                TwoPassResult::Passed {
+                    total_attempts,
+                    final_quality,
+                } => {
+                    tracing::info!(
+                        attempts = total_attempts,
+                        quality = format!("{:.1}%", final_quality * 100.0),
+                        "Resumed deep review PASSED"
+                    );
+                    // Cannot fully reconstruct AdaptivePipelineOutput from checkpoint
+                    // Fall through to re-run pipeline with checkpointed context
+                }
+                TwoPassResult::Failed { .. } => {
+                    tracing::warn!("Resumed deep review FAILED, re-running pipeline");
                 }
             }
+        }
 
         // For phases before deep review or if artifacts are incomplete,
         // we need to re-run the pipeline. Log what we recovered.
@@ -302,7 +322,9 @@ impl QualityLoop {
                     .skills
                     .iter()
                     .filter_map(|s| {
-                        serde_json::to_string(s).ok().map(|json| (s.name.clone(), json))
+                        serde_json::to_string(s)
+                            .ok()
+                            .map(|json| (s.name.clone(), json))
                     })
                     .collect(),
                 agents: result
@@ -310,22 +332,29 @@ impl QualityLoop {
                     .agents
                     .iter()
                     .filter_map(|a| {
-                        serde_json::to_string(a).ok().map(|json| (a.name.clone(), json))
+                        serde_json::to_string(a)
+                            .ok()
+                            .map(|json| (a.name.clone(), json))
                     })
                     .collect(),
                 rules: result
                     .rules
                     .iter()
                     .filter_map(|r| {
-                        serde_json::to_string(r).ok().map(|json| (r.name.clone(), json))
+                        serde_json::to_string(r)
+                            .ok()
+                            .map(|json| (r.name.clone(), json))
                     })
                     .collect(),
             };
             checkpoint.quality_history.push(QualitySnapshot {
                 timestamp: chrono::Utc::now(),
                 iteration: outer_iter,
-                semantic_score: result.semantic_quality.as_ref().map(|q| q.overall_score).unwrap_or(0.0),
-                evidence_score: result.cross_validation_result.evidence_traceability.coverage_score,
+                semantic_score: result.quality_score,
+                evidence_score: result
+                    .cross_validation_result
+                    .evidence_traceability
+                    .coverage_score,
                 overall_score: result.quality_score,
             });
             checkpoint.refinement_iteration = result.refinement_iterations;
@@ -413,7 +442,10 @@ impl QualityLoop {
                         deep_review_passed: false,
                         deep_review_attempts: 0,
                         validation_results: None,
-                        clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                        clean_pass_status: CleanPassStatus::InProgress {
+                            streak: 0,
+                            required: 1,
+                        },
                     });
                 } else {
                     analysis_rerun_count += 1;
@@ -457,7 +489,10 @@ impl QualityLoop {
                         deep_review_passed: false,
                         deep_review_attempts: 0,
                         validation_results: None,
-                        clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                        clean_pass_status: CleanPassStatus::InProgress {
+                            streak: 0,
+                            required: 1,
+                        },
                     });
                 } else {
                     analysis_rerun_count += 1;
@@ -485,7 +520,9 @@ impl QualityLoop {
                 }
 
                 if evidence_check.gaps.len() >= 5 {
-                    if let Some(escalated) = self.try_escalate_analysis_depth(current_config.clone()) {
+                    if let Some(escalated) =
+                        self.try_escalate_analysis_depth(current_config.clone())
+                    {
                         current_config = escalated;
                         analysis_rerun_count += 1;
                         continue;
@@ -504,7 +541,10 @@ impl QualityLoop {
                             deep_review_passed: false,
                             deep_review_attempts: 0,
                             validation_results: None,
-                            clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                            clean_pass_status: CleanPassStatus::InProgress {
+                                streak: 0,
+                                required: 1,
+                            },
                         });
                     } else {
                         analysis_rerun_count += 1;
@@ -515,25 +555,20 @@ impl QualityLoop {
 
             if result.quality_score >= self.config.quality().min_score {
                 // Run deep review if enabled
-                let (deep_review_passed, deep_review_attempts) = if self
-                    .config
-                    .deep_review()
-                    .required_passes
-                    > 0
-                {
-                    checkpoint.current_phase = PipelinePhase::DeepReview;
-                    self.run_deep_review(&result).await?
-                } else {
-                    (true, 0)
-                };
+                let (deep_review_passed, deep_review_attempts) =
+                    if self.config.deep_review().required_passes > 0 {
+                        checkpoint.current_phase = PipelinePhase::DeepReview;
+                        self.run_deep_review(&result).await?
+                    } else {
+                        (true, 0)
+                    };
 
                 // Run 5-layer validation pipeline
-                let validation_result = self
-                    .run_validation_pipeline(&result)
-                    .await?;
+                let validation_result = self.run_validation_pipeline(&result).await?;
 
                 let clean_pass_status = validation_result.1;
-                let validation_passed = matches!(clean_pass_status, CleanPassStatus::Converged { .. });
+                let validation_passed =
+                    matches!(clean_pass_status, CleanPassStatus::Converged { .. });
 
                 if deep_review_passed && validation_passed {
                     tracing::info!(
@@ -602,7 +637,10 @@ impl QualityLoop {
                 deep_review_passed: false,
                 deep_review_attempts: 0,
                 validation_results: None,
-                clean_pass_status: CleanPassStatus::InProgress { streak: 0, required: 1 },
+                clean_pass_status: CleanPassStatus::InProgress {
+                    streak: 0,
+                    required: 1,
+                },
             });
         }
 
@@ -613,7 +651,8 @@ impl QualityLoop {
             current_config,
         );
         let timeout = Duration::from_secs(self.config.timeout().quality_loop_timeout_secs);
-        let final_result = with_timeout(timeout, fallback_pipeline.run(), "quality_loop_final").await?;
+        let final_result =
+            with_timeout(timeout, fallback_pipeline.run(), "quality_loop_final").await?;
 
         let final_confidence = final_result
             .synthesis
@@ -630,9 +669,8 @@ impl QualityLoop {
             };
 
         // Run final validation pipeline
-        let (validation_results, clean_pass_status) = self
-            .run_validation_pipeline(&final_result)
-            .await?;
+        let (validation_results, clean_pass_status) =
+            self.run_validation_pipeline(&final_result).await?;
 
         Ok(QualityLoopResult {
             output: final_result,
@@ -683,9 +721,7 @@ impl QualityLoop {
             };
 
         // Run validation pipeline
-        let (validation_results, clean_pass_status) = self
-            .run_validation_pipeline(&result)
-            .await?;
+        let (validation_results, clean_pass_status) = self.run_validation_pipeline(&result).await?;
 
         Ok(QualityLoopResult {
             output: result,
@@ -700,10 +736,7 @@ impl QualityLoop {
         })
     }
 
-    async fn run_deep_review(
-        &self,
-        result: &AdaptivePipelineOutput,
-    ) -> Result<(bool, u32)> {
+    async fn run_deep_review(&self, result: &AdaptivePipelineOutput) -> Result<(bool, u32)> {
         let file_registry = self.get_file_registry().await?;
         let engine = DeepReviewEngine::new(
             Arc::clone(&self.provider),
@@ -780,26 +813,82 @@ impl QualityLoop {
     ) -> Result<(ValidationResults, CleanPassStatus)> {
         if !self.config.validation.enabled {
             tracing::debug!("Validation pipeline disabled, skipping");
-            return Ok((ValidationResults::new(), CleanPassStatus::Converged { passes: 0 }));
+            return Ok((
+                ValidationResults::new(),
+                CleanPassStatus::Converged { passes: 0 },
+            ));
         }
 
-        // Simplified validation: use quality score from result
         let quality_score = result.quality_score;
         let required_quality = self.config.quality().minimum_quality;
 
+        // Collect issues from all validation layers
+        let mut error_count = 0;
+        let mut warning_count = 0;
+
+        // Layer 1: Tier Filter (Tier1 content = error)
+        if !result.tier_filter_result.passed {
+            error_count += result.tier_filter_result.tier1_count;
+            tracing::debug!(
+                tier1 = result.tier_filter_result.tier1_count,
+                tier3_ratio = format!("{:.1}%", result.tier_filter_result.tier3_ratio * 100.0),
+                "Tier filter: FAILED"
+            );
+        }
+
+        // Layer 2: Consistency (duplicates, broken refs = error)
+        if !result.consistency_result.passed {
+            error_count += result.consistency_result.issues.len();
+            for issue in &result.consistency_result.issues {
+                tracing::debug!(issue, "Consistency issue");
+            }
+        }
+
+        // Layer 3: Cross-artifact validation
+        let cross = &result.cross_validation_result;
+        if !cross.passed {
+            // Evidence traceability (invalid refs = error)
+            if cross.evidence_traceability.invalid_references > 0 {
+                error_count += cross.evidence_traceability.invalid_references;
+                tracing::debug!(
+                    invalid = cross.evidence_traceability.invalid_references,
+                    valid = cross.evidence_traceability.valid_references,
+                    "Evidence traceability: FAILED"
+                );
+            }
+
+            // Plan consistency (missing coverage = warning)
+            if !cross.plan_consistency.passed {
+                warning_count += cross.plan_consistency.missing_coverage.len();
+            }
+        }
+
+        let total_issues = error_count + warning_count;
+
         tracing::info!(
-            quality_score,
-            required_quality,
-            "Running simplified validation"
+            quality_score = format!("{:.1}%", quality_score * 100.0),
+            required = format!("{:.1}%", required_quality * 100.0),
+            errors = error_count,
+            warnings = warning_count,
+            tier_filter = result.tier_filter_result.passed,
+            consistency = result.consistency_result.passed,
+            cross_validation = cross.passed,
+            "Validation pipeline complete"
         );
 
         let validation_results = ValidationResults {
-            total_issues: result.tier_filter_result.tier1_count,
-            error_count: if result.tier_filter_result.passed { 0 } else { result.tier_filter_result.tier1_count },
-            warning_count: 0,
+            total_issues,
+            error_count,
+            warning_count,
         };
 
-        let status = if quality_score >= required_quality && result.tier_filter_result.passed {
+        // Convergence requires: quality met + no errors + all validations pass
+        let all_validations_pass = result.tier_filter_result.passed
+            && result.consistency_result.passed
+            && cross.passed;
+
+        let status = if quality_score >= required_quality && error_count == 0 && all_validations_pass
+        {
             CleanPassStatus::Converged { passes: 1 }
         } else if quality_score < required_quality {
             CleanPassStatus::Failed {
@@ -809,15 +898,11 @@ impl QualityLoop {
                 },
             }
         } else {
-            CleanPassStatus::InProgress { streak: 0, required: 1 }
+            CleanPassStatus::InProgress {
+                streak: 0,
+                required: 1,
+            }
         };
-
-        tracing::info!(
-            total_issues = validation_results.total_issues,
-            errors = validation_results.error_count,
-            status = ?status,
-            "Validation completed"
-        );
 
         Ok((validation_results, status))
     }
@@ -845,7 +930,7 @@ impl QualityLoop {
         config.analysis.depth = new_depth;
         config.analysis.max_file_samples =
             (config.analysis.max_file_samples as f32 * factor) as usize;
-        config.analysis.deep_analysis.max_iterations += 1;
+        config.deep_analysis.max_iterations += 1;
 
         tracing::debug!(
             depth = ?config.analysis.depth,
@@ -854,11 +939,6 @@ impl QualityLoop {
         );
 
         Some(config)
-    }
-
-    #[allow(dead_code)]
-    fn escalate_analysis_depth(&self, config: Config) -> Config {
-        self.try_escalate_analysis_depth(config.clone()).unwrap_or(config)
     }
 
     async fn validate_evidence(&self, result: &AdaptivePipelineOutput) -> EvidenceCheckResult {
@@ -874,26 +954,63 @@ impl QualityLoop {
         let mut invalid_refs = 0;
         let mut gaps = Vec::new();
 
+        // Validate skills
         for skill in &result.plugin.skills {
-            let refs = extract_file_refs(&skill.body);
-            total_refs += refs.len();
-            for r in refs {
-                if !file_registry.contains(&r) {
-                    invalid_refs += 1;
-                    gaps.push(format!("skill:{}", skill.name));
-                }
-            }
+            Self::validate_content_refs(
+                &skill.body,
+                &format!("skill:{}", skill.name),
+                &file_registry,
+                &mut total_refs,
+                &mut invalid_refs,
+                &mut gaps,
+            );
         }
 
+        // Validate agents
         for agent in &result.plugin.agents {
-            let refs = extract_file_refs(&agent.prompt);
-            total_refs += refs.len();
-            for r in refs {
-                if !file_registry.contains(&r) {
-                    invalid_refs += 1;
-                    gaps.push(format!("agent:{}", agent.name));
-                }
-            }
+            Self::validate_content_refs(
+                &agent.prompt,
+                &format!("agent:{}", agent.name),
+                &file_registry,
+                &mut total_refs,
+                &mut invalid_refs,
+                &mut gaps,
+            );
+        }
+
+        // Validate rules
+        for rule in &result.rules {
+            let content = rule.content.join("\n");
+            Self::validate_content_refs(
+                &content,
+                &format!("rule:{}", rule.name),
+                &file_registry,
+                &mut total_refs,
+                &mut invalid_refs,
+                &mut gaps,
+            );
+        }
+
+        // Validate CLAUDE.md sections
+        if let Some(ref arch) = result.claude_md.architecture {
+            Self::validate_content_refs(
+                arch,
+                "claude_md:architecture",
+                &file_registry,
+                &mut total_refs,
+                &mut invalid_refs,
+                &mut gaps,
+            );
+        }
+        for (i, standard) in result.claude_md.standards.iter().enumerate() {
+            Self::validate_content_refs(
+                standard,
+                &format!("claude_md:standard[{}]", i),
+                &file_registry,
+                &mut total_refs,
+                &mut invalid_refs,
+                &mut gaps,
+            );
         }
 
         let invalid_ratio = if total_refs > 0 {
@@ -912,17 +1029,70 @@ impl QualityLoop {
         }
     }
 
+    fn validate_content_refs(
+        content: &str,
+        source: &str,
+        registry: &VerifiedFileRegistry,
+        total: &mut usize,
+        invalid: &mut usize,
+        gaps: &mut Vec<String>,
+    ) {
+        let refs = super::patterns::extract_paths(content);
+        *total += refs.len();
+        for r in refs {
+            if !registry.contains(&r) {
+                *invalid += 1;
+                gaps.push(source.to_string());
+            }
+        }
+    }
+
     pub async fn write_output(&self, result: &QualityLoopResult) -> Result<()> {
         self.write_result_output(&result.output).await
     }
 
     async fn write_result_output(&self, output: &AdaptivePipelineOutput) -> Result<()> {
+        // CLAUDE.md and .claude/rules always go to project root
+        // Plugin artifacts go to output_dir (if set) or project root
         let pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
             Arc::clone(&self.provider),
             self.config.clone(),
         );
-        pipeline.write_output(output).await
+
+        // Write CLAUDE.md and rules to project root
+        pipeline.write_output(output).await?;
+
+        // If output_dir is different from project_root, write plugin there
+        if let Some(ref output_dir) = self.output_dir
+            && output_dir != &self.project_root
+        {
+            let plugin_pipeline = AdaptivePipeline::new(
+                output_dir.clone(),
+                Arc::clone(&self.provider),
+                self.config.clone(),
+            );
+            plugin_pipeline.write_plugin_only(output).await?;
+        }
+
+        // Save output directory to state for status command to find
+        let base_dir = self
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| self.project_root.clone());
+        if let Err(e) = self.save_output_state(&base_dir) {
+            tracing::warn!(error = %e, "Failed to save output state");
+        }
+
+        Ok(())
+    }
+
+    fn save_output_state(&self, output_dir: &std::path::Path) -> Result<()> {
+        use crate::cli::util::ProjectState;
+
+        let mut state = ProjectState::load().unwrap_or_default();
+        state.set_output_dir(output_dir.to_path_buf());
+        state.save()
     }
 }
 
@@ -934,6 +1104,3 @@ struct EvidenceCheckResult {
     gaps: Vec<String>,
 }
 
-fn extract_file_refs(content: &str) -> Vec<String> {
-    super::patterns::extract_file_refs(content)
-}

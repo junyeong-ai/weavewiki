@@ -230,9 +230,10 @@ impl ProjectDetector {
                 if path.is_dir() {
                     Box::pin(self.count_files_by_extension(&path, extensions, counts)).await?;
                 } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
-                    && let Some(lang) = extensions.get(ext) {
-                        counts.entry((*lang).to_string()).or_insert((0, None)).0 += 1;
-                    }
+                    && let Some(lang) = extensions.get(ext)
+                {
+                    counts.entry((*lang).to_string()).or_insert((0, None)).0 += 1;
+                }
             }
         }
         Ok(())
@@ -244,15 +245,17 @@ impl ProjectDetector {
         // CLI signals
         if self.project_root.join("Cargo.toml").exists() {
             if let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml")).await
-                && (content.contains("clap") || content.contains("structopt") || content.contains("argh"))
-                {
-                    signals.push(DetectionSignal {
-                        signal_type: SignalType::Dependency,
-                        source: "Cargo.toml".to_string(),
-                        suggests: ProjectType::Cli,
-                        weight: 0.8,
-                    });
-                }
+                && (content.contains("clap")
+                    || content.contains("structopt")
+                    || content.contains("argh"))
+            {
+                signals.push(DetectionSignal {
+                    signal_type: SignalType::Dependency,
+                    source: "Cargo.toml".to_string(),
+                    suggests: ProjectType::Cli,
+                    weight: 0.8,
+                });
+            }
             if self.project_root.join("src/main.rs").exists() {
                 signals.push(DetectionSignal {
                     signal_type: SignalType::EntryPoint,
@@ -418,19 +421,20 @@ impl ProjectDetector {
 
         // Frontend signals (React, Vue, etc.)
         if self.project_root.join("package.json").exists()
-            && let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await {
-                let frontend_deps = ["react", "vue", "angular", "svelte", "next", "nuxt"];
-                for dep in frontend_deps {
-                    if content.contains(&format!("\"{dep}\"")) {
-                        signals.push(DetectionSignal {
-                            signal_type: SignalType::FrameworkMarker,
-                            source: format!("{dep} dependency"),
-                            suggests: ProjectType::Frontend,
-                            weight: 0.9,
-                        });
-                    }
+            && let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await
+        {
+            let frontend_deps = ["react", "vue", "angular", "svelte", "next", "nuxt"];
+            for dep in frontend_deps {
+                if content.contains(&format!("\"{dep}\"")) {
+                    signals.push(DetectionSignal {
+                        signal_type: SignalType::FrameworkMarker,
+                        source: format!("{dep} dependency"),
+                        suggests: ProjectType::Frontend,
+                        weight: 0.9,
+                    });
                 }
             }
+        }
 
         let frontend_dirs = ["src/components", "src/pages", "src/views", "app/components"];
         for dir in frontend_dirs {
@@ -469,29 +473,29 @@ impl ProjectDetector {
     async fn detect_workspace(&self) -> Result<Option<WorkspaceConfig>> {
         // Cargo workspace
         if let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml")).await
-            && content.contains("[workspace]") {
-                return Ok(Some(self.parse_cargo_workspace(&content).await?));
-            }
+            && content.contains("[workspace]")
+        {
+            return Ok(Some(self.parse_cargo_workspace(&content).await?));
+        }
 
         // pnpm workspace
         if self.project_root.join("pnpm-workspace.yaml").exists() {
-            return Ok(Some(
-                self.parse_pnpm_workspace()
-                    .await
-                    .unwrap_or_else(|_| self.empty_workspace(WorkspaceType::PnpmWorkspace)),
-            ));
+            return Ok(Some(self.parse_pnpm_workspace().await.unwrap_or_else(
+                |_| self.empty_workspace(WorkspaceType::PnpmWorkspace),
+            )));
         }
 
         // npm/yarn workspace (package.json with workspaces)
         if let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await
-            && content.contains("\"workspaces\"") {
-                let ws_type = if self.project_root.join("yarn.lock").exists() {
-                    WorkspaceType::YarnWorkspace
-                } else {
-                    WorkspaceType::NpmWorkspace
-                };
-                return Ok(Some(self.empty_workspace(ws_type)));
-            }
+            && content.contains("\"workspaces\"")
+        {
+            let ws_type = if self.project_root.join("yarn.lock").exists() {
+                WorkspaceType::YarnWorkspace
+            } else {
+                WorkspaceType::NpmWorkspace
+            };
+            return Ok(Some(self.empty_workspace(ws_type)));
+        }
 
         // Turbo repo
         if self.project_root.join("turbo.json").exists() {
@@ -519,9 +523,10 @@ impl ProjectDetector {
 
         // Maven multi-module
         if let Ok(content) = fs::read_to_string(self.project_root.join("pom.xml")).await
-            && content.contains("<modules>") {
-                return Ok(Some(self.empty_workspace(WorkspaceType::MavenMultiModule)));
-            }
+            && content.contains("<modules>")
+        {
+            return Ok(Some(self.empty_workspace(WorkspaceType::MavenMultiModule)));
+        }
 
         // Go workspace
         if self.project_root.join("go.work").exists() {
@@ -574,8 +579,7 @@ impl ProjectDetector {
     }
 
     async fn parse_pnpm_workspace(&self) -> Result<WorkspaceConfig> {
-        let content =
-            fs::read_to_string(self.project_root.join("pnpm-workspace.yaml")).await?;
+        let content = fs::read_to_string(self.project_root.join("pnpm-workspace.yaml")).await?;
         let mut members = Vec::new();
         let mut in_packages = false;
 
@@ -586,7 +590,10 @@ impl ProjectDetector {
                 continue;
             }
             if in_packages && line.starts_with('-') {
-                let package = line.trim_start_matches('-').trim().trim_matches(|c| c == '"' || c == '\'');
+                let package = line
+                    .trim_start_matches('-')
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'');
                 if !package.is_empty() {
                     let (member_type, lang) = self.infer_js_member_type(package).await;
                     members.push(WorkspaceMember {
@@ -735,10 +742,7 @@ mod tests {
 
     #[test]
     fn test_workspace_types() {
-        assert_eq!(
-            WorkspaceType::CargoWorkspace,
-            WorkspaceType::CargoWorkspace
-        );
+        assert_eq!(WorkspaceType::CargoWorkspace, WorkspaceType::CargoWorkspace);
         assert_ne!(WorkspaceType::CargoWorkspace, WorkspaceType::PnpmWorkspace);
     }
 }

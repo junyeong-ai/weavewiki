@@ -10,15 +10,16 @@ use tokio::fs;
 use crate::config::ProjectType;
 use crate::types::Result;
 
+/// A code reference pointing to an entry point, key function, or important location
 #[derive(Debug, Clone)]
-pub struct FileReference {
+pub struct CodeReference {
     pub path: String,
     pub line: Option<usize>,
     pub name: String,
     pub reference_type: ReferenceType,
 }
 
-impl FileReference {
+impl CodeReference {
     pub fn to_string_ref(&self) -> String {
         if let Some(line) = self.line {
             format!("@{}:{}", self.path, line)
@@ -44,7 +45,7 @@ impl ReferenceExtractor {
     pub async fn extract_key_references(
         project_root: &Path,
         project_type: ProjectType,
-    ) -> Result<Vec<FileReference>> {
+    ) -> Result<Vec<CodeReference>> {
         let mut references = Vec::new();
 
         references.extend(Self::extract_entry_points(project_root, project_type).await?);
@@ -56,13 +57,13 @@ impl ReferenceExtractor {
     async fn extract_entry_points(
         project_root: &Path,
         project_type: ProjectType,
-    ) -> Result<Vec<FileReference>> {
+    ) -> Result<Vec<CodeReference>> {
         let mut refs = Vec::new();
 
         match project_type {
             ProjectType::Cli => {
                 if let Ok(line) = Self::find_main_function(project_root, "src/main.rs").await {
-                    refs.push(FileReference {
+                    refs.push(CodeReference {
                         path: "src/main.rs".to_string(),
                         line: Some(line),
                         name: "main".to_string(),
@@ -72,7 +73,7 @@ impl ReferenceExtractor {
 
                 if let Ok(lines) = Self::find_command_handlers(project_root).await {
                     for (path, line, name) in lines {
-                        refs.push(FileReference {
+                        refs.push(CodeReference {
                             path,
                             line: Some(line),
                             name,
@@ -84,7 +85,7 @@ impl ReferenceExtractor {
             ProjectType::Backend => {
                 if let Ok(lines) = Self::find_api_routes(project_root).await {
                     for (path, line, name) in lines {
-                        refs.push(FileReference {
+                        refs.push(CodeReference {
                             path,
                             line: Some(line),
                             name,
@@ -95,7 +96,7 @@ impl ReferenceExtractor {
             }
             ProjectType::Library => {
                 if let Ok(line) = Self::find_lib_entry(project_root).await {
-                    refs.push(FileReference {
+                    refs.push(CodeReference {
                         path: "src/lib.rs".to_string(),
                         line: Some(line),
                         name: "public API".to_string(),
@@ -116,7 +117,7 @@ impl ReferenceExtractor {
     async fn extract_key_files(
         project_root: &Path,
         project_type: ProjectType,
-    ) -> Result<Vec<FileReference>> {
+    ) -> Result<Vec<CodeReference>> {
         let mut refs = Vec::new();
 
         let key_patterns: Vec<(&str, ReferenceType)> = match project_type {
@@ -144,7 +145,7 @@ impl ReferenceExtractor {
 
         for (path, ref_type) in key_patterns {
             if project_root.join(path).exists() {
-                refs.push(FileReference {
+                refs.push(CodeReference {
                     path: path.to_string(),
                     line: None,
                     name: path.to_string(),
@@ -188,36 +189,38 @@ impl ReferenceExtractor {
 
         let commands_dir = project_root.join("src/cli/commands");
         if commands_dir.exists()
-            && let Ok(mut entries) = fs::read_dir(&commands_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "rs") {
-                        let rel_path = path.strip_prefix(project_root).unwrap_or(&path);
-                        let file_name = path.file_stem().unwrap_or_default().to_string_lossy();
+            && let Ok(mut entries) = fs::read_dir(&commands_dir).await
+        {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "rs") {
+                    let rel_path = path.strip_prefix(project_root).unwrap_or(&path);
+                    let file_name = path.file_stem().unwrap_or_default().to_string_lossy();
 
-                        if file_name != "mod"
-                            && let Ok(content) = fs::read_to_string(&path).await {
-                                for (i, line) in content.lines().enumerate() {
-                                    let trimmed = line.trim();
-                                    // Skip comments
-                                    if trimmed.starts_with("//") || trimmed.starts_with("/*") {
-                                        continue;
-                                    }
-                                    if trimmed.contains("pub fn run(")
-                                        || trimmed.contains("pub async fn run(")
-                                    {
-                                        handlers.push((
-                                            rel_path.to_string_lossy().to_string(),
-                                            i + 1,
-                                            format!("{} command", file_name),
-                                        ));
-                                        break;
-                                    }
-                                }
+                    if file_name != "mod"
+                        && let Ok(content) = fs::read_to_string(&path).await
+                    {
+                        for (i, line) in content.lines().enumerate() {
+                            let trimmed = line.trim();
+                            // Skip comments
+                            if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+                                continue;
                             }
+                            if trimmed.contains("pub fn run(")
+                                || trimmed.contains("pub async fn run(")
+                            {
+                                handlers.push((
+                                    rel_path.to_string_lossy().to_string(),
+                                    i + 1,
+                                    format!("{} command", file_name),
+                                ));
+                                break;
+                            }
+                        }
                     }
                 }
             }
+        }
 
         Ok(handlers)
     }
@@ -230,24 +233,25 @@ impl ReferenceExtractor {
         for candidate in candidates {
             let path = project_root.join(candidate);
             if path.exists()
-                && let Ok(content) = fs::read_to_string(&path).await {
-                    for (i, line) in content.lines().enumerate() {
-                        let trimmed = line.trim();
-                        // Skip comments
-                        if trimmed.starts_with("//") || trimmed.starts_with("/*") {
-                            continue;
-                        }
-                        if trimmed.contains("#[get(")
-                            || trimmed.contains("#[post(")
-                            || trimmed.contains("#[put(")
-                            || trimmed.contains("#[delete(")
-                            || trimmed.contains(".route(")
-                        {
-                            let name = Self::extract_route_name(trimmed);
-                            routes.push((candidate.to_string(), i + 1, name));
-                        }
+                && let Ok(content) = fs::read_to_string(&path).await
+            {
+                for (i, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    // Skip comments
+                    if trimmed.starts_with("//") || trimmed.starts_with("/*") {
+                        continue;
+                    }
+                    if trimmed.contains("#[get(")
+                        || trimmed.contains("#[post(")
+                        || trimmed.contains("#[put(")
+                        || trimmed.contains("#[delete(")
+                        || trimmed.contains(".route(")
+                    {
+                        let name = Self::extract_route_name(trimmed);
+                        routes.push((candidate.to_string(), i + 1, name));
                     }
                 }
+            }
         }
 
         Ok(routes)
@@ -293,7 +297,7 @@ impl ReferenceExtractor {
         Ok(1)
     }
 
-    async fn find_generic_entries(project_root: &Path) -> Result<Vec<FileReference>> {
+    async fn find_generic_entries(project_root: &Path) -> Result<Vec<CodeReference>> {
         let mut refs = Vec::new();
 
         let candidates = [
@@ -306,7 +310,7 @@ impl ReferenceExtractor {
 
         for (path, name) in candidates {
             if project_root.join(path).exists() {
-                refs.push(FileReference {
+                refs.push(CodeReference {
                     path: path.to_string(),
                     line: Some(1),
                     name: name.to_string(),
@@ -324,8 +328,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_file_reference_format() {
-        let with_line = FileReference {
+    fn test_code_reference_format() {
+        let with_line = CodeReference {
             path: "src/main.rs".to_string(),
             line: Some(42),
             name: "main".to_string(),
@@ -333,7 +337,7 @@ mod tests {
         };
         assert_eq!(with_line.to_string_ref(), "@src/main.rs:42");
 
-        let without_line = FileReference {
+        let without_line = CodeReference {
             path: "src/lib.rs".to_string(),
             line: None,
             name: "lib".to_string(),

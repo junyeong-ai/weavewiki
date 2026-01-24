@@ -1,15 +1,45 @@
 //! Regeneration Strategy
+//!
+//! Complete regeneration of artifacts using full GenerationContext.
+//! Uses source insights and project context for context-aware regeneration.
+//! Falls back to regeneration when other strategies fail repeatedly.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 
 use crate::ai::LlmProvider;
-use crate::config::RefinementConfig;
-use crate::pipeline::validation::content::thresholds;
 use crate::types::{Agent, Result, Skill};
 
-use super::{IssueKind, RefinementStrategy, StrategyContext, StrategyResult, calculate_validated_quality};
+use super::{
+    IssueKind, RefinementStrategy, StrategyContext, StrategyResult, calculate_validated_quality,
+};
+
+/// Minimum content thresholds
+const SKILL_MIN_CHARS: usize = 200;
+const AGENT_MIN_CHARS: usize = 300;
+
+/// JSON schema for skill body response
+static SKILL_BODY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "skill_body": {"type": "string"}
+        },
+        "required": ["skill_body"]
+    })
+});
+
+/// JSON schema for agent prompt response
+static AGENT_PROMPT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "agent_prompt": {"type": "string"}
+        },
+        "required": ["agent_prompt"]
+    })
+});
 
 pub struct RegenerationStrategy {
     provider: Arc<dyn LlmProvider>,
@@ -27,49 +57,63 @@ impl RegenerationStrategy {
         context: &StrategyContext<'_>,
     ) -> String {
         let file_context = context.file_registry.to_prompt_context(100);
+        let source_insights = context.format_source_insights();
+        let project_context = context.format_project_context();
+        let issues = context.format_issues();
 
-        format!(
-            r###"Generate a high-quality skill document from scratch.
+        let default_suggestions = "- Focus on project-specific implementation details\n- Add concrete @file:line references";
 
+        let mut prompt = format!(
+            r##"Regenerate this skill from scratch based on the source insights.
+
+## PREVIOUS ISSUES
+{issues}
+
+{feedback_section}
+"##,
+            issues = issues,
+            feedback_section = context.feedback_section(),
+        );
+
+        // Add source insights if available
+        if !source_insights.is_empty() {
+            prompt.push_str(&source_insights);
+            prompt.push('\n');
+        }
+
+        // Add project context if available
+        if !project_context.is_empty() {
+            prompt.push_str(&project_context);
+            prompt.push('\n');
+        }
+
+        prompt.push_str(&format!(
+            r##"## AVAILABLE FILES
 {file_context}
 
-SKILL NAME: {name}
-SKILL DESCRIPTION: {description}
+## SKILL METADATA
+Name: {name}
+Description: {description}
 
-PREVIOUS ISSUES: {issues}
-
-REQUIREMENTS:
-1. Minimum 400 characters of substantive content
+## REQUIREMENTS
+1. Preserve ALL insights from SOURCE INSIGHTS section
 2. Use directive language: "must", "should", "avoid", "use", "prefer", "ensure", "never"
-3. Include at least 3 @file:line references from the available files list
-4. Include step-by-step instructions with numbered steps
-5. Add a "## Common Mistakes" or "## Gotchas" section
-6. Add at least one code example with ```
+3. Include @file:line references from AVAILABLE FILES
+4. Be project-specific, NOT generic advice
+5. Let structure emerge naturally from the content
+6. Minimum 400 characters of substantive content
 
-TEMPLATE:
-## Overview
-[Brief description of the skill]
+## SUGGESTIONS
+{suggestions}
 
-## Steps
-1. First step with @file:line reference
-2. Second step
-3. Third step
-
-## Example
-```language
-// Example code
-```
-
-## Gotchas
-- Common mistake 1
-- Common mistake 2
-
-Return ONLY the skill body content."###,
+Return JSON with skill_body containing the regenerated content."##,
             file_context = file_context,
             name = name,
             description = description,
-            issues = context.issue_description,
-        )
+            suggestions = context.suggestions_section(default_suggestions),
+        ));
+
+        prompt
     }
 
     fn build_agent_regeneration_prompt(
@@ -79,46 +123,64 @@ Return ONLY the skill body content."###,
         context: &StrategyContext<'_>,
     ) -> String {
         let file_context = context.file_registry.to_prompt_context(100);
+        let source_insights = context.format_source_insights();
+        let project_context = context.format_project_context();
+        let issues = context.format_issues();
 
-        format!(
-            r###"Generate a high-quality agent prompt from scratch.
+        let default_suggestions =
+            "- Define clear domain expertise\n- Include project-specific knowledge";
 
+        let mut prompt = format!(
+            r##"Regenerate this agent from scratch based on the source insights.
+
+## PREVIOUS ISSUES
+{issues}
+
+{feedback_section}
+"##,
+            issues = issues,
+            feedback_section = context.feedback_section(),
+        );
+
+        // Add source insights if available
+        if !source_insights.is_empty() {
+            prompt.push_str(&source_insights);
+            prompt.push('\n');
+        }
+
+        // Add project context if available
+        if !project_context.is_empty() {
+            prompt.push_str(&project_context);
+            prompt.push('\n');
+        }
+
+        prompt.push_str(&format!(
+            r##"## AVAILABLE FILES
 {file_context}
 
-AGENT NAME: {name}
-AGENT DESCRIPTION: {description}
+## AGENT METADATA
+Name: {name}
+Description: {description}
 
-PREVIOUS ISSUES: {issues}
-
-REQUIREMENTS:
-1. Clear statement of the agent's purpose and responsibilities
-2. At least 3 ## section headers
-3. Include @file:line references to relevant code locations
+## REQUIREMENTS
+1. Preserve ALL insights from SOURCE INSIGHTS section
+2. Define clear domain expertise and specialized role
+3. Include @file:line references from AVAILABLE FILES
 4. Specify what the agent should and should not do
-5. Include example scenarios
+5. Be project-specific, NOT generic advice
+6. Let structure emerge naturally from the content
 
-TEMPLATE:
-## Purpose
-[What this agent does and when to use it]
+## SUGGESTIONS
+{suggestions}
 
-## Responsibilities
-- Must: [specific actions]
-- Should: [recommended actions]
-- Avoid: [things to not do]
-
-## Key Files
-- @file:line - description
-- @file:line - description
-
-## Decision Criteria
-[When to take which action]
-
-Return ONLY the agent prompt content."###,
+Return JSON with agent_prompt containing the regenerated content."##,
             file_context = file_context,
             name = name,
             description = description,
-            issues = context.issue_description,
-        )
+            suggestions = context.suggestions_section(default_suggestions),
+        ));
+
+        prompt
     }
 }
 
@@ -129,10 +191,12 @@ impl RefinementStrategy for RegenerationStrategy {
     }
 
     fn applicable_to(&self, _issue: &IssueKind) -> bool {
+        // Regeneration is applicable to all issues as a last resort
         true
     }
 
     fn priority(&self) -> u8 {
+        // Lowest priority - use other strategies first
         10
     }
 
@@ -144,27 +208,16 @@ impl RefinementStrategy for RegenerationStrategy {
         let old_score = calculate_validated_quality(&skill.body, context.file_registry);
         let prompt = self.build_skill_regeneration_prompt(&skill.name, &skill.description, context);
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "skill_body": {"type": "string"}
-            },
-            "required": ["skill_body"]
-        });
+        let schema = &*SKILL_BODY_SCHEMA;
 
-        match self.provider.generate(&prompt, &schema).await {
+        match self.provider.generate(&prompt, schema).await {
             Ok(response) => {
-                if let Some(body) = response
-                    .content
-                    .get("skill_body")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(body) = response.content.get("skill_body").and_then(|v| v.as_str()) {
                     let new_score = calculate_validated_quality(body, context.file_registry);
-                    let t = thresholds::get();
-                    let acceptance_delta = RefinementConfig::default().quality_acceptance_delta;
+                    let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if new content is better
-                    if body.len() >= t.skill_min_chars && new_score > old_score + acceptance_delta {
+                    // Only accept if new content is better and meets minimum requirements
+                    if body.len() >= SKILL_MIN_CHARS && new_score > old_score + acceptance_delta {
                         skill.body = body.to_string();
                         return Ok(StrategyResult {
                             success: true,
@@ -195,15 +248,9 @@ impl RefinementStrategy for RegenerationStrategy {
         let old_score = calculate_validated_quality(&agent.prompt, context.file_registry);
         let prompt = self.build_agent_regeneration_prompt(&agent.name, &agent.description, context);
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "agent_prompt": {"type": "string"}
-            },
-            "required": ["agent_prompt"]
-        });
+        let schema = &*AGENT_PROMPT_SCHEMA;
 
-        match self.provider.generate(&prompt, &schema).await {
+        match self.provider.generate(&prompt, schema).await {
             Ok(response) => {
                 if let Some(body) = response
                     .content
@@ -211,11 +258,10 @@ impl RefinementStrategy for RegenerationStrategy {
                     .and_then(|v| v.as_str())
                 {
                     let new_score = calculate_validated_quality(body, context.file_registry);
-                    let t = thresholds::get();
-                    let acceptance_delta = RefinementConfig::default().quality_acceptance_delta;
+                    let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if new content is better
-                    if body.len() >= t.agent_min_chars && new_score > old_score + acceptance_delta {
+                    // Only accept if new content is better and meets minimum requirements
+                    if body.len() >= AGENT_MIN_CHARS && new_score > old_score + acceptance_delta {
                         agent.prompt = body.to_string();
                         return Ok(StrategyResult {
                             success: true,

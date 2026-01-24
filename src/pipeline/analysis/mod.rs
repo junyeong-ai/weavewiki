@@ -1,31 +1,29 @@
-//! Deep Analysis Module
+//! Analysis Module
 //!
-//! Multi-agent system for thorough codebase analysis:
-//! - Multi-agent: Parallel specialist agents for comprehensive analysis
-//! - Structure analysis: Directory layout, key files, module dependencies
-//! - Pattern extraction: Actual code patterns from file contents
-//! - Constraint discovery: Hidden dependencies, anti-patterns from code
-//! - Synthesis: Merge findings into coherent project knowledge
-//! - Architectural analysis: Module coverage and structural completeness
-//! - Top-down validation: Convention consistency with project structure
-//! - AST enrichment: Ground-truth facts from tree-sitter parsing
+//! Multi-layer analysis system:
+//! - AST Analysis: Ground-truth extraction via tree-sitter
+//! - Deep Analysis: LLM-powered semantic understanding
+//! - Distributed Analysis: Parallel chunk-based analysis for large codebases
+//! - Synthesis: Hierarchical summarization
+//! - Architectural: Module coverage and structural completeness
 
 pub mod architectural_analyzer;
+pub mod ast;
 pub mod ast_enrichment;
 pub mod deep_analyzer;
+pub mod distributed;
 pub mod multi_agent;
-pub mod reconciliation;
 pub mod synthesis;
-pub mod top_down;
 
 pub use architectural_analyzer::{
     ArchitecturalAnalyzer, CoverageReport, Module, ModuleCoverage, StructuralCategory,
-    StructuralIssue, StructuralSeverity, StructuralValidationResult,
+    StructuralIssue, StructuralValidationResult,
 };
 
 pub use deep_analyzer::{
-    AnalysisQuality, DeepAnalysisResult, DeepAnalyzer, FileInsight, ModuleDependency,
-    PatternInstance,
+    AnalysisQuality, CodePattern, ConstraintEnforcement, DeepAnalysisResult, DeepAnalyzer,
+    FileConstraint, FileDeepAnalysis, FileInsight, Gotcha, ModuleDependency, PatternInstance,
+    Relationship,
 };
 
 pub use synthesis::{
@@ -33,19 +31,18 @@ pub use synthesis::{
     ReanalysisTargets, ReferenceValidationResult, SynthesizedAnalysis,
 };
 
-pub use top_down::{
-    ConventionCategory, ConventionIssue, ConventionValidationResult, ConventionValidator,
-    ValidationSeverity,
-};
-
-pub use reconciliation::{
-    AnalysisClaim, BidirectionalReconciler, ClaimSource, ConflictCategory, FileRef,
-    MergeQualityResult, ReconciledAnalysis, ReconciliationConfig, ReconciliationConflict,
-    ResolutionDecision,
-};
-
 pub use ast_enrichment::{
-    AstEnricher, AstFacts, AstStats, AstValidator, FunctionFact, ImportFact, ParseFailure,
-    ReferenceCheck, TraitFact, TypeFact, TypeKind, ValidationResult,
-    Visibility as AstVisibility,
+    AstEnricher, AstFacts, AstStats, AstValidation, AstValidator, FunctionFact, ImportFact,
+    ParseFailure, ReferenceCheck, TraitFact, TypeFact, TypeKind, Visibility as AstVisibility,
+};
+
+pub use ast::{
+    AstAnalysisResult, AstAnalyzerAgent, AstProjectStructure, ComplexityMetrics, DependencyGraph,
+    FileAstAnalysis, PublicApiSurface,
+};
+
+pub use distributed::{
+    AnalysisChunk, AnalysisMerger, ChunkAnalysisResult, ChunkAnalyzer, ChunkConstraint,
+    ChunkInsight, ChunkPattern, ConstraintSeverity, LlmChunkAnalyzer, MergedAnalysis,
+    ModulePartitioner, ParallelAnalyzer,
 };

@@ -12,7 +12,6 @@
 mod chain;
 mod circuit_breaker;
 mod openai;
-mod prompt_utils;
 
 #[cfg(feature = "claude-agent")]
 mod claude_agent;
@@ -297,4 +296,3 @@ pub async fn create_provider_for_model(
     config.model = Some(model.to_string());
     create_provider(&config).await
 }
-

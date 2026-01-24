@@ -6,6 +6,7 @@
 use crate::config::ProjectType;
 use crate::pipeline::analysis::SynthesizedAnalysis;
 use crate::pipeline::context::VerifiedFileRegistry;
+use crate::pipeline::enrichment::EnrichedPlan;
 use crate::types::{Result, Rule};
 
 use crate::pipeline::phases::constraint_extraction::{AntiPattern, ExtractedConstraints, Gotcha};
@@ -27,14 +28,7 @@ impl PathRulesGenerator {
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
     ) -> Result<Vec<Rule>> {
-        Self::generate_with_value_filter(
-            plan,
-            monorepo,
-            conventions,
-            constraints,
-            None,
-            None,
-        )
+        Self::generate_with_value_filter(plan, monorepo, conventions, constraints, None, None)
     }
 
     /// Generate rules with full value score enforcement
@@ -54,13 +48,8 @@ impl PathRulesGenerator {
 
         for group in &plan.rules_plan.rule_groups {
             // Assess value before generating
-            let value_score = Self::assess_rule_value(
-                group,
-                conventions,
-                constraints,
-                synthesis,
-                file_registry,
-            );
+            let value_score =
+                Self::assess_rule_value(group, conventions, constraints, synthesis, file_registry);
 
             if value_score < MIN_RULE_VALUE_SCORE {
                 tracing::debug!(
@@ -110,10 +99,14 @@ impl PathRulesGenerator {
         }
 
         // Check for anti-patterns relevant to this group's paths
-        let relevant_anti_patterns = constraints.anti_patterns.iter()
+        let relevant_anti_patterns = constraints
+            .anti_patterns
+            .iter()
             .filter(|ap| {
                 group.paths.iter().any(|path| {
-                    ap.evidence.iter().any(|e| e.file.contains(path.trim_end_matches("**")))
+                    ap.evidence
+                        .iter()
+                        .any(|e| e.file.contains(path.trim_end_matches("**")))
                 })
             })
             .count();
@@ -123,7 +116,9 @@ impl PathRulesGenerator {
         }
 
         // Check for hidden dependencies involving these paths
-        let relevant_deps = constraints.hidden_dependencies.iter()
+        let relevant_deps = constraints
+            .hidden_dependencies
+            .iter()
             .filter(|dep| {
                 group.paths.iter().any(|path| {
                     let base = path.trim_end_matches("**").trim_end_matches('/');
@@ -137,7 +132,9 @@ impl PathRulesGenerator {
         }
 
         // Check for gotchas
-        let relevant_gotchas = constraints.gotchas.iter()
+        let relevant_gotchas = constraints
+            .gotchas
+            .iter()
             .filter(|g| {
                 group.paths.iter().any(|path| {
                     let base = path.trim_end_matches("**").trim_end_matches('/');
@@ -152,7 +149,9 @@ impl PathRulesGenerator {
 
         // Check synthesis for module-specific insights
         if let Some(synth) = synthesis {
-            let relevant_modules = synth.modules.iter()
+            let relevant_modules = synth
+                .modules
+                .iter()
                 .filter(|m| {
                     group.paths.iter().any(|path| {
                         let base = path.trim_end_matches("**").trim_end_matches('/');
@@ -267,31 +266,33 @@ impl PathRulesGenerator {
             },
             content: content_vec,
             evidence: Vec::new(),
+            generation_context: None,
         })
     }
 
     fn generate_title(group: &PlannedRuleGroup, monorepo: Option<&MonorepoAnalysis>) -> String {
         if let Some(mono) = monorepo
-            && let Some(matching_group) = mono
-                .rules_grouping
+            && let Some(matching_group) = mono.rules_grouping.iter().find(|g| g.name == group.name)
+        {
+            let types: Vec<_> = matching_group
+                .project_types
                 .iter()
-                .find(|g| g.name == group.name)
-            {
-                let types: Vec<_> = matching_group
-                    .project_types
-                    .iter()
-                    .map(|t| t.as_str())
-                    .collect();
-                let langs: Vec<_> = matching_group.languages.iter().map(|s| s.as_str()).collect();
+                .map(|t| t.as_str())
+                .collect();
+            let langs: Vec<_> = matching_group
+                .languages
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
 
-                if !types.is_empty() && !langs.is_empty() {
-                    return format!(
-                        "{} {} Rules",
-                        capitalize(&types.join("/")),
-                        capitalize(&langs.join("/"))
-                    );
-                }
+            if !types.is_empty() && !langs.is_empty() {
+                return format!(
+                    "{} {} Rules",
+                    capitalize(&types.join("/")),
+                    capitalize(&langs.join("/"))
+                );
             }
+        }
 
         capitalize(&group.name.replace('-', " "))
     }
@@ -370,24 +371,28 @@ impl PathRulesGenerator {
 
         // Language-specific anti-pattern markers
         let typescript_markers = [
-            "as any", "as unknown", "type assertion", "typescript", "tsx", "jsx",
+            "as any",
+            "as unknown",
+            "type assertion",
+            "typescript",
+            "tsx",
+            "jsx",
         ];
         let rust_markers = [
-            "unwrap", "expect", "panic", "pub(crate)", "Result<", "Option<",
-            "cargo", ".rs", "rust",
+            "unwrap",
+            "expect",
+            "panic",
+            "pub(crate)",
+            "Result<",
+            "Option<",
+            "cargo",
+            ".rs",
+            "rust",
         ];
-        let kotlin_markers = [
-            "kotlin", "suspend", "coroutine", "gradle", ".kt",
-        ];
-        let java_markers = [
-            "java", "jvm", "spring", "hibernate", ".java",
-        ];
-        let python_markers = [
-            "python", "pytest", "pydantic", ".py", "async def",
-        ];
-        let go_markers = [
-            "go", "goroutine", "channel", "defer", ".go",
-        ];
+        let kotlin_markers = ["kotlin", "suspend", "coroutine", "gradle", ".kt"];
+        let java_markers = ["java", "jvm", "spring", "hibernate", ".java"];
+        let python_markers = ["python", "pytest", "pydantic", ".py", "async def"];
+        let go_markers = ["go", "goroutine", "channel", "defer", ".go"];
 
         anti_patterns
             .iter()
@@ -421,9 +426,13 @@ impl PathRulesGenerator {
                 }
 
                 // Check if the target languages match
-                let target_langs: Vec<_> = target_languages.iter().map(|s| s.to_lowercase()).collect();
+                let target_langs: Vec<_> =
+                    target_languages.iter().map(|s| s.to_lowercase()).collect();
 
-                (is_typescript_specific && (target_langs.iter().any(|l| l.contains("typescript") || l.contains("javascript"))))
+                (is_typescript_specific
+                    && (target_langs
+                        .iter()
+                        .any(|l| l.contains("typescript") || l.contains("javascript"))))
                     || (is_rust_specific && target_langs.iter().any(|l| l.contains("rust")))
                     || (is_kotlin_specific && target_langs.iter().any(|l| l.contains("kotlin")))
                     || (is_java_specific && target_langs.iter().any(|l| l.contains("java")))
@@ -496,16 +505,25 @@ impl ClaudeMdGenerator {
         constraints: &ExtractedConstraints,
         project_name: &str,
     ) -> Result<crate::types::ProjectMemory> {
-        Self::generate_with_synthesis(plan, detection, conventions, constraints, project_name, None)
+        Self::generate_with_enrichment(
+            plan,
+            detection,
+            conventions,
+            constraints,
+            project_name,
+            None,
+            None,
+        )
     }
 
-    /// Generate with optional synthesis results for enhanced architecture description
-    pub fn generate_with_synthesis(
+    /// Generate with enriched plan for complete data flow (no information loss)
+    pub fn generate_with_enrichment(
         plan: &OutputPlan,
         detection: &crate::pipeline::phases::project_detection::ProjectDetection,
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
         project_name: &str,
+        enriched_plan: Option<&EnrichedPlan>,
         synthesis: Option<&SynthesizedAnalysis>,
     ) -> Result<crate::types::ProjectMemory> {
         use crate::types::ProjectMemory;
@@ -513,12 +531,17 @@ impl ClaudeMdGenerator {
         let overview = Self::generate_overview(detection, project_name);
 
         let architecture = if plan.claude_md_plan.include_architecture {
-            Self::generate_architecture_with_synthesis(conventions, detection, synthesis)
+            Self::generate_architecture_with_enrichment(
+                conventions,
+                detection,
+                enriched_plan,
+                synthesis,
+            )
         } else {
             None
         };
 
-        // Do NOT include Development Commands - they are Tier 1 (Claude already knows them)
+        // Commands are Tier 1 content (generic knowledge) - not included
         let commands = Vec::new();
 
         let standards = if plan.claude_md_plan.include_conventions {
@@ -548,11 +571,7 @@ impl ClaudeMdGenerator {
             .take(3)
             .collect();
 
-        let mut overview = format!(
-            "{} is a {} project",
-            project_name,
-            project_type
-        );
+        let mut overview = format!("{} is a {} project", project_name, project_type);
 
         if !languages.is_empty() {
             overview.push_str(&format!(" written in {}", languages.join(", ")));
@@ -561,20 +580,22 @@ impl ClaudeMdGenerator {
         overview.push('.');
 
         if detection.is_monorepo
-            && let Some(ws) = &detection.workspace_config {
-                overview.push_str(&format!(
-                    "\n\nThis is a {:?} monorepo with {} members.",
-                    ws.workspace_type,
-                    ws.members.len()
-                ));
-            }
+            && let Some(ws) = &detection.workspace_config
+        {
+            overview.push_str(&format!(
+                "\n\nThis is a {:?} monorepo with {} members.",
+                ws.workspace_type,
+                ws.members.len()
+            ));
+        }
 
         overview
     }
 
-    fn generate_architecture_with_synthesis(
+    fn generate_architecture_with_enrichment(
         conventions: &InferredConventions,
         _detection: &crate::pipeline::phases::project_detection::ProjectDetection,
+        enriched_plan: Option<&EnrichedPlan>,
         synthesis: Option<&SynthesizedAnalysis>,
     ) -> Option<String> {
         let mut arch = String::new();
@@ -593,17 +614,17 @@ impl ClaudeMdGenerator {
 
         // Use synthesis modules if available for richer architecture description with file refs
         if let Some(synth) = synthesis
-            && !synth.modules.is_empty() {
-                for module in &synth.modules {
-                    if !module.responsibility.is_empty() {
-                        // Include @file reference for evidence
-                        arch.push_str(&format!(
-                            "- `{}` - {}\n",
-                            module.path, module.responsibility
-                        ));
-                    }
+            && !synth.modules.is_empty()
+        {
+            for module in &synth.modules {
+                if !module.responsibility.is_empty() {
+                    arch.push_str(&format!(
+                        "- `{}` - {}\n",
+                        module.path, module.responsibility
+                    ));
                 }
             }
+        }
 
         // Fall back to convention layers if no synthesis
         if synthesis.is_none_or(|s| s.modules.is_empty()) {
@@ -626,6 +647,48 @@ impl ClaudeMdGenerator {
             if !key_dirs.is_empty() {
                 for dir in key_dirs {
                     arch.push_str(&format!("- `{}` - {}\n", dir.path, dir.role));
+                }
+            }
+        }
+
+        // Key Abstractions from EnrichedPlan (properly consumed from enrichment layer)
+        if let Some(plan) = enriched_plan
+            && !plan.key_abstractions.is_empty()
+        {
+            arch.push_str("\n\n## Key Abstractions\n\n");
+            for abst in plan.key_abstractions.iter().take(10) {
+                arch.push_str(&format!(
+                    "### {} ({}) {}\n",
+                    abst.name, abst.kind, abst.file_ref
+                ));
+                arch.push_str(&format!("{}\n", abst.description));
+                for note in &abst.usage_notes {
+                    arch.push_str(&format!("- {}\n", note));
+                }
+                arch.push('\n');
+            }
+        }
+
+        // File insights with gotchas from EnrichedPlan
+        if let Some(plan) = enriched_plan
+            && !plan.file_insights.is_empty()
+        {
+            let insights_with_gotchas: Vec<_> = plan
+                .file_insights
+                .iter()
+                .filter(|i| !i.gotchas.is_empty())
+                .take(5)
+                .collect();
+
+            if !insights_with_gotchas.is_empty() {
+                arch.push_str("\n\n## Critical File Gotchas\n\n");
+                for insight in insights_with_gotchas {
+                    arch.push_str(&format!("### @{}\n", insight.file));
+                    arch.push_str(&format!("{}\n", insight.purpose));
+                    for gotcha in &insight.gotchas {
+                        arch.push_str(&format!("- ⚠️ {}\n", gotcha));
+                    }
+                    arch.push('\n');
                 }
             }
         }
@@ -665,7 +728,10 @@ impl ClaudeMdGenerator {
             if let Some(evidence) = ap.evidence.first() {
                 standards.push(format!(
                     "✗ {}: {} (see @{}:{})",
-                    ap.name, ap.correct_approach, evidence.file, evidence.line.unwrap_or(1)
+                    ap.name,
+                    ap.correct_approach,
+                    evidence.file,
+                    evidence.line.unwrap_or(1)
                 ));
             } else {
                 standards.push(format!("✗ {}: {}", ap.name, ap.correct_approach));
@@ -682,10 +748,10 @@ impl ClaudeMdGenerator {
 
         // Gotchas with solutions
         for gotcha in constraints.gotchas.iter().take(5) {
-            if !gotcha.related_files.is_empty() {
+            if let Some(first_file) = gotcha.related_files.first() {
                 standards.push(format!(
                     "⚠️ {}: {} (affects {})",
-                    gotcha.title, gotcha.solution, gotcha.related_files.first().unwrap()
+                    gotcha.title, gotcha.solution, first_file
                 ));
             } else {
                 standards.push(format!("⚠️ {}: {}", gotcha.title, gotcha.solution));
@@ -695,16 +761,19 @@ impl ClaudeMdGenerator {
         // Add patterns from synthesis if valuable
         if let Some(synth) = synthesis {
             for pattern in synth.deep.patterns.iter().take(3) {
-                // Only include if it has specific file evidence
                 if !pattern.locations.is_empty() {
                     let loc = &pattern.locations[0];
                     standards.push(format!(
                         "- {}: {} (see @{}:{})",
-                        pattern.name,
-                        pattern.description,
-                        loc.file,
-                        loc.line
+                        pattern.name, pattern.description, loc.file, loc.line
                     ));
+                }
+            }
+
+            // File insights with gotchas (previously lost in pipeline)
+            for insight in synth.deep.insights.iter().filter(|i| !i.gotchas.is_empty()) {
+                for gotcha in insight.gotchas.iter().take(2) {
+                    standards.push(format!("⚠️ {} ({})", gotcha, insight.file));
                 }
             }
         }
@@ -765,13 +834,8 @@ mod tests {
             content_sources: vec![],
         };
 
-        let score = PathRulesGenerator::assess_rule_value(
-            &group,
-            &conventions,
-            &constraints,
-            None,
-            None,
-        );
+        let score =
+            PathRulesGenerator::assess_rule_value(&group, &conventions, &constraints, None, None);
 
         // Empty context should have low value
         assert!(score < MIN_RULE_VALUE_SCORE);
@@ -802,13 +866,8 @@ mod tests {
             content_sources: vec![RuleContentSource::HiddenDependencies],
         };
 
-        let score = PathRulesGenerator::assess_rule_value(
-            &group,
-            &conventions,
-            &constraints,
-            None,
-            None,
-        );
+        let score =
+            PathRulesGenerator::assess_rule_value(&group, &conventions, &constraints, None, None);
 
         // With hidden dependency, score should be higher
         assert!(score >= 0.2); // At least 0.2 from the dependency
@@ -834,6 +893,9 @@ mod tests {
             None,
         );
 
-        assert!(score < MIN_RULE_VALUE_SCORE, "Empty group should be below threshold");
+        assert!(
+            score < MIN_RULE_VALUE_SCORE,
+            "Empty group should be below threshold"
+        );
     }
 }

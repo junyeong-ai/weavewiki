@@ -11,8 +11,9 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(long, short, default_value = ".claudegen/config.yaml")]
-    config: PathBuf,
+    /// Custom config file path (overrides .claudegen/config.toml)
+    #[arg(long, short, global = true)]
+    config: Option<PathBuf>,
 
     #[arg(long)]
     verbose: bool,
@@ -72,6 +73,57 @@ enum Commands {
         all: bool,
         #[arg(long, help = "Only clear checkpoints")]
         checkpoints: bool,
+    },
+
+    /// Manage claudegen configuration
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
+    /// Query the knowledge graph
+    Query {
+        #[arg(help = "Node ID or path to query")]
+        query: String,
+        #[arg(long, short, default_value = "10", help = "Depth of traversal")]
+        depth: u32,
+        #[arg(
+            long,
+            short,
+            default_value = "text",
+            help = "Output format: text, json"
+        )]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current configuration
+    Show {
+        #[arg(long, short, help = "Show global config only")]
+        global: bool,
+        #[arg(
+            long,
+            short,
+            default_value = "text",
+            help = "Output format: text, json"
+        )]
+        format: String,
+    },
+    /// Show configuration file paths
+    Path,
+    /// Edit configuration file
+    Edit {
+        #[arg(long, short, help = "Edit global config")]
+        global: bool,
+    },
+    /// Initialize configuration
+    Init {
+        #[arg(long, short, help = "Initialize global config")]
+        global: bool,
+        #[arg(long, help = "Force overwrite existing")]
+        force: bool,
     },
 }
 
@@ -142,7 +194,7 @@ fn run_cli() -> claudegen::types::Result<()> {
             claudegen::cli::commands::init::run(force)?;
         }
         Commands::Analyze { full, path } => {
-            claudegen::cli::commands::analyze::run(full, path, false)?;
+            claudegen::cli::commands::analyze::run(full, path, false, cli.config.as_deref())?;
         }
         Commands::Generate {
             output,
@@ -154,17 +206,19 @@ fn run_cli() -> claudegen::types::Result<()> {
                 output,
                 resume,
                 dry_run,
+                config_path: cli.config.clone(),
             })?;
         }
         Commands::Validate { path, strict } => {
-            claudegen::cli::commands::validate::run(
+            let rt = Runtime::new()?;
+            rt.block_on(claudegen::cli::commands::validate::run(
                 path,
-                &PathBuf::from("validation-report.json"),
                 if strict { "error" } else { "warning" },
-            )?;
+                cli.config.as_deref(),
+            ))?;
         }
         Commands::Status { format } => {
-            claudegen::cli::commands::status::run(&format, false)?;
+            claudegen::cli::commands::status::run(&format, false, cli.config.as_deref())?;
         }
         Commands::Clean { all, checkpoints } => {
             let rt = Runtime::new()?;
@@ -174,6 +228,31 @@ fn run_cli() -> claudegen::types::Result<()> {
                 checkpoints,
                 false,
             ))?;
+        }
+        Commands::Config { action } => match action {
+            ConfigAction::Show { global, format } => {
+                claudegen::cli::commands::config::show(global, &format)?;
+            }
+            ConfigAction::Path => {
+                claudegen::cli::commands::config::path()?;
+            }
+            ConfigAction::Edit { global } => {
+                claudegen::cli::commands::config::edit(global)?;
+            }
+            ConfigAction::Init { global, force } => {
+                if global {
+                    claudegen::cli::commands::config::init_global(force)?;
+                } else {
+                    claudegen::cli::commands::config::init_project()?;
+                }
+            }
+        },
+        Commands::Query {
+            query,
+            depth,
+            format,
+        } => {
+            claudegen::cli::commands::query::run(&query, depth, &format)?;
         }
     }
 
