@@ -80,6 +80,8 @@ pub enum TypeKind {
     Enum,
     Class,
     Interface,
+    TypeAlias, // TypeScript type alias (e.g., type Foo = ...)
+    Module,    // Namespace/module
 }
 
 impl AstFacts {
@@ -366,7 +368,7 @@ impl AstEnricher {
                             name: node.name.clone(),
                             file: file_path.to_string(),
                             line: node.evidence.start_line,
-                            kind: TypeKind::Struct,
+                            kind: TypeKind::Class,
                             visibility: vis,
                             field_count: 0,
                         },
@@ -401,6 +403,48 @@ impl AstEnricher {
                             file: file_path.to_string(),
                             line: node.evidence.start_line,
                             method_count: 0,
+                        },
+                    );
+                }
+                NodeType::Type => {
+                    // TypeScript type alias
+                    let vis = match node.metadata.visibility {
+                        Some(crate::types::Visibility::Public) => Visibility::Public,
+                        Some(crate::types::Visibility::Internal) => Visibility::Internal,
+                        _ => Visibility::Private,
+                    };
+
+                    let key = format!("{}:{}", file_path, node.name);
+                    facts.types.insert(
+                        key,
+                        TypeFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            kind: TypeKind::TypeAlias,
+                            visibility: vis,
+                            field_count: 0,
+                        },
+                    );
+                }
+                NodeType::Module => {
+                    // Namespace/module
+                    let vis = match node.metadata.visibility {
+                        Some(crate::types::Visibility::Public) => Visibility::Public,
+                        Some(crate::types::Visibility::Internal) => Visibility::Internal,
+                        _ => Visibility::Private,
+                    };
+
+                    let key = format!("{}:{}", file_path, node.name);
+                    facts.types.insert(
+                        key,
+                        TypeFact {
+                            name: node.name.clone(),
+                            file: file_path.to_string(),
+                            line: node.evidence.start_line,
+                            kind: TypeKind::Module,
+                            visibility: vis,
+                            field_count: 0,
                         },
                     );
                 }

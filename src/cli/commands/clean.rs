@@ -1,16 +1,17 @@
-//! Clean Command - Clears generated data, caches, and checkpoints
+//! Clean Command
 
-use crate::cli::util::{CLAUDEGEN_DIR, GRAPH_DB_PATH};
-use crate::types::Result;
 use std::path::Path;
 
-pub async fn run(all: bool, cache: bool, checkpoints: bool, sessions: bool) -> Result<()> {
+use crate::cli::util::CLAUDEGEN_DIR;
+use crate::types::Result;
+
+pub async fn run(all: bool, cache: bool, checkpoints: bool) -> Result<()> {
     let claudegen_dir = Path::new(CLAUDEGEN_DIR);
 
     if all {
         if claudegen_dir.exists() {
             tokio::fs::remove_dir_all(claudegen_dir).await?;
-            println!("✓ Removed .claudegen/");
+            println!("Removed .claudegen/");
         }
         return Ok(());
     }
@@ -20,7 +21,7 @@ pub async fn run(all: bool, cache: bool, checkpoints: bool, sessions: bool) -> R
         if cache_dir.exists() {
             tokio::fs::remove_dir_all(&cache_dir).await?;
             tokio::fs::create_dir_all(&cache_dir).await?;
-            println!("✓ Cleared cache");
+            println!("Cleared cache");
         }
     }
 
@@ -29,19 +30,7 @@ pub async fn run(all: bool, cache: bool, checkpoints: bool, sessions: bool) -> R
         if checkpoints_dir.exists() {
             tokio::fs::remove_dir_all(&checkpoints_dir).await?;
             tokio::fs::create_dir_all(&checkpoints_dir).await?;
-            println!("✓ Cleared checkpoints");
-        }
-    }
-
-    if sessions {
-        let db_path = claudegen_dir.join(GRAPH_DB_PATH);
-        if db_path.exists() {
-            let db = crate::storage::Database::open(&db_path)?;
-            db.execute(
-                "DELETE FROM sessions WHERE status IN ('active', 'paused', 'failed')",
-                &[],
-            )?;
-            println!("✓ Cleared incomplete sessions");
+            println!("Cleared checkpoints");
         }
     }
 

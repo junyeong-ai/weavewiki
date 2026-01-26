@@ -12,6 +12,7 @@ use tokio::fs;
 
 use crate::ai::LlmProvider;
 use crate::config::ProjectType;
+use crate::pipeline::analysis::NamingCase;
 use crate::types::Result;
 
 use super::few_shot::build_inference_prompt;
@@ -58,16 +59,6 @@ pub struct FileNaming {
     pub case: NamingCase,
     pub suffix_patterns: Vec<SuffixPattern>,
     pub examples: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum NamingCase {
-    #[default]
-    SnakeCase,
-    CamelCase,
-    PascalCase,
-    KebabCase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,31 +351,65 @@ impl ConventionInferenceEngine {
             b_priority.cmp(&a_priority)
         });
 
+        // SAMPLING LIMIT: Only top 15 files by heuristic priority are analyzed.
+        //
+        // IMPLICATIONS:
+        // - Large projects may have unrepresentative samples
+        // - Files ranked lower by file_priority() are never seen
+        // - Patterns in files beyond the top 15 are not discovered
+        //
+        // This is acceptable for convention INFERENCE (not authoritative analysis).
+        // LLM should explore additional files during deep analysis phases.
         Ok(samples.into_iter().take(15).collect())
     }
 
+    /// Heuristic file priority for sample selection.
+    ///
+    /// LIMITATIONS:
+    /// - Assumes certain file names are universally more important
+    /// - "service" in Java ≠ "service" in Go (different meanings)
+    /// - Project-specific core modules may not match these patterns
+    /// - May rank less important files higher based on naming coincidence
+    ///
+    /// This is used ONLY for sample selection ordering, not for final analysis.
+    /// LLM determines actual file importance from code analysis and dependencies.
     fn file_priority(&self, path: &str) -> u32 {
+        // Priority scores are rough heuristics for sample selection
+        // Higher priority = more likely to be architecturally significant
         if path.contains("main") || path.contains("lib.rs") || path.contains("mod.rs") {
-            return 100;
+            return 100; // Entry points are usually important
         }
         if path.contains("index") {
-            return 90;
+            return 90; // Module entry points
         }
         if path.contains("service") || path.contains("controller") || path.contains("handler") {
-            return 80;
+            return 80; // Business logic (may be false positive)
         }
         if path.contains("model") || path.contains("entity") || path.contains("domain") {
-            return 70;
+            return 70; // Domain layer
         }
         if path.contains("util") || path.contains("helper") {
-            return 30;
+            return 30; // Usually less architecturally significant
         }
         if path.contains("test") {
-            return 20;
+            return 20; // Tests are important but for different reasons
         }
-        50
+        50 // Default: unknown importance
     }
 
+    /// Recursively collect code samples for convention analysis.
+    ///
+    /// # Sampling Limits (Advisory)
+    ///
+    /// - **Depth limit: 5** (depth > 4 stops recursion)
+    ///   Monorepo subpackages at `packages/org/dept/team/project/` may be missed.
+    ///
+    /// - **Sample limit: 30** (stops early when reached)
+    ///   Large monorepos with 100+ packages are analyzed incompletely.
+    ///
+    /// These limits exist to bound analysis time and memory, not because
+    /// deeper files are less important. LLM should be aware that convention
+    /// inference may be based on incomplete project sampling.
     async fn collect_samples_recursive(
         &self,
         dir: &Path,
@@ -455,6 +480,15 @@ impl ConventionInferenceEngine {
         })
     }
 
+    /// Analyze naming patterns from file samples.
+    ///
+    /// NOTE: This is a HEURISTIC-based detection with limitations:
+    /// - Simple character-based case detection (contains '_' → snake_case)
+    /// - Doesn't distinguish legitimate underscores from naming conventions
+    /// - Suffix patterns are biased toward Java/Spring (Service, Controller, Repository)
+    /// - May not detect language-specific patterns (Python __dunder__, React useHook)
+    ///
+    /// LLM should refine these findings based on actual code analysis and context.
     fn analyze_naming_patterns(&self, samples: &[(String, String)]) -> NamingConventions {
         let mut file_cases: HashMap<NamingCase, usize> = HashMap::new();
 
@@ -462,6 +496,8 @@ impl ConventionInferenceEngine {
             let filename = path.split('/').next_back().unwrap_or(path);
             let name = filename.split('.').next().unwrap_or(filename);
 
+            // Simple heuristic: presence of separator character indicates case style
+            // This is a best-guess, not authoritative - LLM should validate
             let case = if name.contains('_') {
                 NamingCase::SnakeCase
             } else if name.contains('-') {
@@ -487,12 +523,15 @@ impl ConventionInferenceEngine {
             .unwrap_or_default();
 
         let mut suffix_patterns = Vec::new();
+        // NOTE: These suffix patterns are biased toward Java/Spring ecosystem.
+        // Go, Python, Rust use different conventions. LLM should discover
+        // actual suffix patterns from codebase analysis.
         let suffix_map: HashMap<&str, &str> = [
             ("_test", "Test files"),
             ("_spec", "Spec files"),
-            ("Service", "Service classes"),
-            ("Controller", "Controller classes"),
-            ("Repository", "Repository classes"),
+            ("Service", "Service classes"), // Java/Spring pattern
+            ("Controller", "Controller classes"), // Java/Spring pattern
+            ("Repository", "Repository classes"), // Java/C# pattern
             ("Handler", "Handler functions"),
         ]
         .into_iter()
@@ -539,6 +578,10 @@ impl ConventionInferenceEngine {
     fn analyze_file_organization(&self, structure: &str) -> FileOrganization {
         let mut key_dirs = Vec::new();
 
+        // NOTE: These are HINTS for common patterns, not authoritative classifications.
+        // LLM should determine actual directory roles from code analysis and context.
+        // This provides starting points but may not match all project structures.
+        // Projects may use alternative naming (internal/, pkg/, lib/ instead of src/).
         let dir_roles: Vec<(&str, &str)> = vec![
             // Common roots
             ("src/", "Source code root"),
@@ -616,6 +659,27 @@ impl ConventionInferenceEngine {
             }
         }
 
+        // STRUCTURE TYPE DETECTION - FRAGILE PATTERN MATCHING
+        //
+        // This detection has significant limitations:
+        //
+        // 1. FRAGILE MATCHING:
+        //    - `domain_models/` won't match DomainDriven (expects exact `domain/`)
+        //    - Monorepo with one package using `services/` gets LayeredByType globally
+        //
+        // 2. MISSING PATTERNS:
+        //    - Plugin architecture
+        //    - Modular monolith
+        //    - Vertical slicing
+        //    - CQRS (Command/Query separation)
+        //    - Microservices patterns
+        //
+        // 3. FIRST-MATCH WINS:
+        //    - Project with `services/`, `components/`, AND `domain/` returns first match
+        //    - Multi-pattern projects are forced into single classification
+        //
+        // LLM should validate architectural patterns from actual code structure
+        // and dependencies, not rely on this directory-based detection.
         let structure_type = if structure.contains("domain/") && structure.contains("adapter/") {
             StructureType::DomainDriven
         } else if structure.contains("services/") || structure.contains("controllers/") {
@@ -633,10 +697,22 @@ impl ConventionInferenceEngine {
         }
     }
 
+    /// Detect error handling patterns from code samples.
+    ///
+    /// LIMITATIONS (purely syntactic):
+    /// - Can't distinguish Result in comments vs actual usage
+    /// - Misses language-specific patterns (Go's multiple returns, Rust's ?-operator)
+    /// - Doesn't capture error handling philosophy or strategy
+    /// - Simple keyword counting may be misleading
+    ///
+    /// LLM should analyze error handling code with semantic context for:
+    /// - Recovery patterns, propagation, logging strategies
+    /// - Anti-patterns (ignoring errors, too broad catches)
     fn analyze_error_handling(&self, samples: &[(String, String)]) -> ErrorHandlingPattern {
         let mut result_count = 0;
         let mut exception_count = 0;
 
+        // NOTE: These are simple keyword matches, not semantic analysis
         for (_, content) in samples {
             if content.contains("Result<") || content.contains("-> Result") {
                 result_count += 1;
@@ -669,11 +745,23 @@ impl ConventionInferenceEngine {
         }
     }
 
+    /// Detect async/concurrency patterns from code samples.
+    ///
+    /// LIMITATIONS:
+    /// - Simple counting misses nuance (1 async fn in test ≠ async project)
+    /// - Doesn't detect callback-based or reactive patterns
+    /// - Can't understand async strategy or architectural decisions
+    /// - Only detects Tokio; misses async-std, promises, etc.
+    ///
+    /// LLM should analyze how async/concurrency is actually used for:
+    /// - Strategy (async-first, sync-with-async, mixed)
+    /// - Runtime and library choices
     fn analyze_async_patterns(&self, samples: &[(String, String)]) -> AsyncPattern {
         let mut async_count = 0;
         let mut sync_count = 0;
         let mut runtime = None;
 
+        // NOTE: Simple keyword detection - may not reflect actual async strategy
         for (_, content) in samples {
             if content.contains("async fn")
                 || content.contains("async def")
@@ -821,57 +909,86 @@ impl ConventionInferenceEngine {
     }
 
     /// Verify that all LLM-inferred paths actually exist in the project structure.
-    /// This is critical for ensuring 100% fact-based output.
+    /// Uses flexible matching to handle monorepos, deep directories, and glob patterns.
     fn verify_paths_exist(
         mut conventions: InferredConventions,
         structure: &str,
         sample_paths: &[&str],
     ) -> InferredConventions {
-        // Filter architecture layers to only include paths that exist
+        // Filter architecture layers to only include paths that likely exist
         conventions.architecture.layers.retain(|layer| {
             let path = &layer.path_pattern;
-            // Check if path pattern exists in structure or matches sample paths
-            let path_normalized = path
-                .trim_end_matches('/')
-                .trim_end_matches('*')
-                .trim_end_matches('/');
-            let exists_in_structure = structure.contains(path_normalized)
-                || structure.contains(&format!("{}/", path_normalized));
-            let matches_sample = sample_paths
-                .iter()
-                .any(|sp| sp.starts_with(path_normalized) || sp.contains(path_normalized));
-
-            if !exists_in_structure && !matches_sample {
-                tracing::debug!(
-                    path = path,
-                    "Filtering out LLM-inferred layer path that doesn't exist in project"
-                );
-            }
-
-            exists_in_structure || matches_sample
+            Self::path_likely_exists(path, structure, sample_paths)
         });
 
-        // Filter key directories to only include paths that exist
+        // Filter key directories to only include paths that likely exist
         conventions.file_organization.key_directories.retain(|dir| {
             let path = &dir.path;
-            let path_normalized = path.trim_end_matches('/');
-            let exists_in_structure = structure.contains(path_normalized)
-                || structure.contains(&format!("{}/", path_normalized));
-            let matches_sample = sample_paths
-                .iter()
-                .any(|sp| sp.starts_with(path_normalized) || sp.contains(path_normalized));
-
-            if !exists_in_structure && !matches_sample {
-                tracing::debug!(
-                    path = path,
-                    "Filtering out LLM-inferred directory that doesn't exist in project"
-                );
-            }
-
-            exists_in_structure || matches_sample
+            Self::path_likely_exists(path, structure, sample_paths)
         });
 
         conventions
+    }
+
+    /// Flexible path matching for LLM-inferred paths
+    /// Returns true if the path likely exists in the project
+    fn path_likely_exists(path: &str, structure: &str, sample_paths: &[&str]) -> bool {
+        let path_normalized = path
+            .trim_end_matches('/')
+            .trim_end_matches("**")
+            .trim_end_matches('*')
+            .trim_end_matches('/');
+
+        // Empty or root path is always valid
+        if path_normalized.is_empty() || path_normalized == "." {
+            return true;
+        }
+
+        // Check exact match in structure
+        if structure.contains(path_normalized)
+            || structure.contains(&format!("{}/", path_normalized))
+            || structure.contains(&format!("/{}", path_normalized))
+        {
+            return true;
+        }
+
+        // Check if any sample path contains this path segment
+        if sample_paths.iter().any(|sp| {
+            sp.starts_with(path_normalized)
+                || sp.contains(&format!("/{}/", path_normalized))
+                || sp.contains(&format!("/{}", path_normalized))
+                || sp.ends_with(&format!("/{}", path_normalized))
+        }) {
+            return true;
+        }
+
+        // Check path segments (for monorepos like "packages/*/src")
+        let segments: Vec<&str> = path_normalized
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != "*")
+            .collect();
+        if !segments.is_empty() {
+            // If the key segment (last non-wildcard) exists, consider it valid
+            let key_segment = segments.last().unwrap_or(&"");
+            if !key_segment.is_empty() {
+                let segment_pattern = format!("/{}/", key_segment);
+                let segment_end = format!("/{}", key_segment);
+                if structure.contains(&segment_pattern)
+                    || structure.contains(&segment_end)
+                    || sample_paths
+                        .iter()
+                        .any(|sp| sp.contains(&segment_pattern) || sp.ends_with(&segment_end))
+                {
+                    return true;
+                }
+            }
+        }
+
+        tracing::debug!(
+            path = path,
+            "Filtering out LLM-inferred path that doesn't exist in project"
+        );
+        false
     }
 
     fn parse_llm_response(&self, content: &str) -> Result<InferredConventions> {

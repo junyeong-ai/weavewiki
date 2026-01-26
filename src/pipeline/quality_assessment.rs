@@ -78,7 +78,6 @@ pub enum AssessmentPath {
     NoIssuesRemaining,
     MaxIterations,
     OscillationSettled,
-    ValuePlateau,
     /// Early exit triggered (highest quality, bypasses dimensions)
     EarlyExit,
     /// Quality floor met with minimum viable dimensions
@@ -94,7 +93,6 @@ impl AssessmentPath {
             Self::NoIssuesRemaining => "no_issues_remaining",
             Self::MaxIterations => "max_iterations",
             Self::OscillationSettled => "oscillation_settled",
-            Self::ValuePlateau => "value_plateau",
             Self::EarlyExit => "early_exit",
             Self::QualityFloorMet => "quality_floor_met",
         }

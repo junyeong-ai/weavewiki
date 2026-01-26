@@ -57,11 +57,11 @@ impl Parser for GoParser {
 }
 
 fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (import_spec
             path: (interpreted_string_literal) @path
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_go::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -88,14 +88,14 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_structs(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (type_declaration
             (type_spec
                 name: (type_identifier) @name
                 type: (struct_type)
             )
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_go::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -127,14 +127,14 @@ fn extract_interfaces(
     path: &str,
     result: &mut ParseResult,
 ) {
-    let query_str = r#"
+    let query_str = r"
         (type_declaration
             (type_spec
                 name: (type_identifier) @name
                 type: (interface_type)
             )
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_go::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -159,12 +159,12 @@ fn extract_interfaces(
 }
 
 fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (function_declaration
             name: (identifier) @name
             parameters: (parameter_list) @params
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_go::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -215,7 +215,7 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
 }
 
 fn extract_methods(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (method_declaration
             receiver: (parameter_list
                 (parameter_declaration
@@ -227,7 +227,7 @@ fn extract_methods(root: tree_sitter::Node, content: &str, path: &str, result: &
             )
             name: (field_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_go::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();

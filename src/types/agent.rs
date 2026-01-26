@@ -1,39 +1,16 @@
 //! Claude Code Agent types - Official spec compliant
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
 use super::hook::ToolHooks;
-use super::insight::TierClassification;
+use super::insight::ContentTier;
 use super::node::EvidenceLocation;
 use super::skill::QualityMetrics;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
-use crate::pipeline::generation::GenerationContext;
 use crate::utils::{is_valid_tool, patterns};
 
-const TIER1_AGENT_NAMES: &[&str] = &[
-    "code-reviewer",
-    "test-writer",
-    "documentation-writer",
-    "bug-fixer",
-    "feature-developer",
-    "code-assistant",
-    "general-assistant",
-    "helper",
-];
-
-const TIER3_AGENT_INDICATORS: &[&str] = &[
-    "internal knowledge",
-    "hidden",
-    "constraint",
-    "dependency",
-    "workflow",
-    "gotcha",
-    "order matters",
-    "sequence",
-];
+// Tier classification is handled by LLM, not by static name patterns
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
@@ -58,8 +35,6 @@ pub struct Agent {
     pub examples: Vec<AgentExample>,
     #[serde(skip)]
     pub evidence: Vec<EvidenceLocation>,
-    #[serde(skip)]
-    pub generation_context: Option<Arc<GenerationContext>>,
     #[serde(skip)]
     pub quality: QualityMetrics,
 }
@@ -241,11 +216,10 @@ impl Agent {
         description: impl Into<String>,
         prompt: impl Into<String>,
     ) -> Self {
-        let name_str = name.into();
         let prompt_str = prompt.into();
-        let quality = Self::calculate_quality(&name_str, &prompt_str);
+        let quality = Self::calculate_quality(&prompt_str);
         Self {
-            name: name_str,
+            name: name.into(),
             description: description.into(),
             color: None,
             tools: None,
@@ -257,49 +231,31 @@ impl Agent {
             prompt: prompt_str,
             examples: Vec::new(),
             evidence: Vec::new(),
-            generation_context: None,
             quality,
         }
     }
 
-    /// Calculate quality metrics for agent
-    pub fn calculate_quality(name: &str, prompt: &str) -> QualityMetrics {
+    /// Calculate quality metrics from prompt content
+    /// Note: Tier classification is set by LLM during generation, not calculated here
+    pub fn calculate_quality(prompt: &str) -> QualityMetrics {
         let file_refs = patterns::count_file_line_refs(prompt);
-        let name_lower = name.to_lowercase();
-        let prompt_lower = prompt.to_lowercase();
 
-        // Check if it's a tier 1 (generic) agent
-        let is_tier1_name = TIER1_AGENT_NAMES.iter().any(|n| name_lower.contains(n));
-
-        // Count tier 3 indicators (internal knowledge, etc.)
-        let tier3_count = TIER3_AGENT_INDICATORS
-            .iter()
-            .filter(|i| prompt_lower.contains(*i))
-            .count();
-
-        let tier = if is_tier1_name {
-            TierClassification::Tier1Generic
-        } else if tier3_count > 0 {
-            TierClassification::Tier3Constraint
-        } else if file_refs >= MIN_AGENT_FILE_REFS {
-            TierClassification::Tier2Convention
-        } else {
-            TierClassification::Tier1Generic
-        };
-
+        // Score based on deterministic metrics only
+        // Logarithmic scaling for refs (no arbitrary cap)
+        // log2(refs + 1) * 0.15 gives diminishing returns without hard cutoff
         let mut score = 0.3f32;
-        score += 0.15 * (file_refs.min(5) as f32);
-        score += 0.1 * (tier3_count.min(3) as f32);
-        if is_tier1_name {
-            score -= 0.4;
+        if file_refs > 0 {
+            score += ((file_refs as f32 + 1.0).log2() * 0.15).min(0.7);
         }
         score = score.clamp(0.0, 1.0);
 
-        let meets_requirements = file_refs >= MIN_AGENT_FILE_REFS && tier.should_keep();
+        // Tier is set by LLM, default to Tier1 until classification
+        let tier = ContentTier::default();
+
+        let meets_requirements = file_refs >= MIN_AGENT_FILE_REFS;
 
         QualityMetrics {
             file_refs,
-            actionable_count: 0, // Not tracked for agents
             tier,
             score,
             meets_requirements,
@@ -308,7 +264,7 @@ impl Agent {
 
     /// Recalculate quality metrics (call after modifying prompt)
     pub fn update_quality(&mut self) {
-        self.quality = Self::calculate_quality(&self.name, &self.prompt);
+        self.quality = Self::calculate_quality(&self.prompt);
     }
 
     pub fn with_color(mut self, color: AgentColor) -> Self {
@@ -353,11 +309,6 @@ impl Agent {
 
     pub fn with_hooks(mut self, hooks: ToolHooks) -> Self {
         self.hooks = Some(hooks);
-        self
-    }
-
-    pub fn with_generation_context(mut self, ctx: Arc<GenerationContext>) -> Self {
-        self.generation_context = Some(ctx);
         self
     }
 

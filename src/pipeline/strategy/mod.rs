@@ -1,8 +1,8 @@
 //! Refinement Strategy Module
 //!
 //! Provides pluggable strategies for iterative quality improvement.
-//! Strategies operate on artifacts with full GenerationContext for
-//! context-aware refinement based on source insights.
+//! Strategies operate on artifacts with VerifiedFileRegistry for
+//! context-aware refinement with validated file references.
 
 mod evidence;
 mod regeneration;
@@ -38,6 +38,8 @@ pub enum IssueKind {
     PlanMismatch,
     MissingModule,
     PartialModuleCoverage,
+    /// Custom issue detected by LLM - allows extensibility
+    Other(String),
 }
 
 impl From<&super::refinement::DetectedIssue> for IssueKind {
@@ -56,6 +58,7 @@ impl From<&super::refinement::DetectedIssue> for IssueKind {
             DI::PlanMismatch => Self::PlanMismatch,
             DI::MissingModule { .. } => Self::MissingModule,
             DI::PartialModuleCoverage { .. } => Self::PartialModuleCoverage,
+            DI::Other { kind, .. } => Self::Other(kind.clone()),
         }
     }
 }
@@ -146,11 +149,6 @@ impl<'a> StrategyContext<'a> {
         self
     }
 
-    /// Format source insights for inclusion in prompts (reserved for future use)
-    pub fn format_source_insights(&self) -> String {
-        String::new()
-    }
-
     /// Format current issues for prompt inclusion
     pub fn format_issues(&self) -> String {
         if self.issues.is_empty() {
@@ -161,18 +159,16 @@ impl<'a> StrategyContext<'a> {
             .iter()
             .map(|i| {
                 if let Some(ref suggestion) = i.suggestion {
-                    format!("[{}] {}\n  Suggestion: {}", i.severity, i.message, suggestion)
+                    format!(
+                        "[{}] {}\n  Suggestion: {}",
+                        i.severity, i.message, suggestion
+                    )
                 } else {
                     format!("[{}] {}", i.severity, i.message)
                 }
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// Format project context for prompts (reserved for future use)
-    pub fn format_project_context(&self) -> String {
-        String::new()
     }
 
     /// Generate suggestions section for prompts
@@ -475,96 +471,41 @@ impl StrategyRotator {
         }
     }
 
-    pub fn get_all_strategies(&self) -> &[Arc<dyn RefinementStrategy>] {
-        &self.strategies
-    }
-
     pub fn get_strategy_by_name(&self, name: &str) -> Option<Arc<dyn RefinementStrategy>> {
         self.strategies.iter().find(|s| s.name() == name).cloned()
     }
-
-    pub fn clear_history(&mut self) {
-        self.history.clear();
-    }
 }
 
+/// Lightweight quality heuristic for quick filtering.
+/// This is NOT a quality judgment - LLM makes the final quality assessment.
+/// This only checks basic structural requirements (has content, has evidence).
 pub fn calculate_quick_quality(content: &str) -> f32 {
     use super::file_reference;
-    use super::patterns::{
-        ACTIONABLE_PATTERN, GENERIC_PATTERN, count_generic_patterns, count_value_indicators,
-    };
 
-    if content.trim().is_empty() {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
         return 0.0;
     }
 
-    let total_lines: Vec<&str> = content
-        .lines()
-        .filter(|l| {
-            let trimmed = l.trim();
-            trimmed.len() >= 10 && !trimmed.starts_with('#') && !trimmed.starts_with("```")
-        })
-        .collect();
-
-    let actionable_lines = total_lines
-        .iter()
-        .filter(|l| ACTIONABLE_PATTERN.is_match(l))
-        .count();
-
-    let actionability = if !total_lines.is_empty() {
-        (actionable_lines as f32 / total_lines.len() as f32).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    let generic_count = content
-        .lines()
-        .filter(|l| GENERIC_PATTERN.is_match(l))
-        .count();
-    let specific_segments = count_value_indicators(content);
-    let generic_pattern_count = count_generic_patterns(content);
-
-    let specificity = if !total_lines.is_empty() {
-        let generic_ratio = generic_count as f32 / total_lines.len() as f32;
-        let specific_ratio = (specific_segments as f32 / 10.0).min(1.0);
-        let generic_penalty = (generic_pattern_count as f32 * 0.1).min(0.5);
-        ((1.0 - generic_ratio) * 0.5 + specific_ratio * 0.5 - generic_penalty).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
+    // Evidence: Has file references? (verifiable anchors to codebase)
     let file_refs = file_reference::count_references(content);
-    let file_line_refs = file_reference::count_references_with_lines(content);
-    let evidence = if file_refs > 0 {
-        let line_ratio = file_line_refs as f32 / file_refs as f32;
-        (file_refs.min(5) as f32 / 5.0 * 0.5 + line_ratio * 0.5).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let has_evidence = file_refs > 0;
 
-    let section_count = content.matches("##").count();
-    let example_count = content.matches("```").count() / 2;
-    let depth = ((section_count.min(5) as f32 / 5.0) * 0.5
-        + (example_count.min(3) as f32 / 3.0) * 0.5)
-        .clamp(0.0, 1.0);
+    // Substance: Has meaningful content? (not just a single line)
+    // Count non-empty lines (format-agnostic, no Markdown assumptions)
+    let content_lines = trimmed.lines().filter(|l| l.trim().len() >= 5).count();
+    let has_substance = content_lines >= 3;
 
-    let unique_words: std::collections::HashSet<&str> =
-        content.split_whitespace().filter(|w| w.len() > 3).collect();
-    let total_words = content.split_whitespace().filter(|w| w.len() > 3).count();
-    let redundancy = if total_words > 0 {
-        1.0 - (unique_words.len() as f32 / total_words as f32)
-    } else {
-        0.0
-    };
+    // Simple scoring: base 0.5, +0.25 for evidence, +0.25 for substance
+    let mut score = 0.5;
+    if has_evidence {
+        score += 0.25;
+    }
+    if has_substance {
+        score += 0.25;
+    }
 
-    let w = crate::config::SemanticDimensionWeights::default();
-    let combined = actionability * w.actionability
-        + specificity * w.specificity
-        + evidence * w.evidence
-        + (1.0 - redundancy) * w.redundancy
-        + depth * w.depth;
-
-    combined.clamp(0.0, 1.0)
+    score
 }
 
 pub fn calculate_validated_quality(content: &str, registry: &VerifiedFileRegistry) -> f32 {

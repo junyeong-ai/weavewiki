@@ -57,11 +57,11 @@ impl Parser for BashParser {
 }
 
 fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (function_definition
             name: (word) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_bash::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();

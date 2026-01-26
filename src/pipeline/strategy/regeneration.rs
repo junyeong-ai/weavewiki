@@ -57,63 +57,41 @@ impl RegenerationStrategy {
         context: &StrategyContext<'_>,
     ) -> String {
         let file_context = context.file_registry.to_prompt_context(100);
-        let source_insights = context.format_source_insights();
-        let project_context = context.format_project_context();
         let issues = context.format_issues();
-
         let default_suggestions = "- Focus on project-specific implementation details\n- Add concrete @file:line references";
 
-        let mut prompt = format!(
-            r##"Regenerate this skill from scratch based on the source insights.
+        format!(
+            r##"Regenerate this skill from scratch.
 
 ## PREVIOUS ISSUES
 {issues}
 
 {feedback_section}
-"##,
-            issues = issues,
-            feedback_section = context.feedback_section(),
-        );
 
-        // Add source insights if available
-        if !source_insights.is_empty() {
-            prompt.push_str(&source_insights);
-            prompt.push('\n');
-        }
-
-        // Add project context if available
-        if !project_context.is_empty() {
-            prompt.push_str(&project_context);
-            prompt.push('\n');
-        }
-
-        prompt.push_str(&format!(
-            r##"## AVAILABLE FILES
+## AVAILABLE FILES
 {file_context}
 
 ## SKILL METADATA
 Name: {name}
 Description: {description}
 
-## REQUIREMENTS
-1. Preserve ALL insights from SOURCE INSIGHTS section
-2. Use directive language: "must", "should", "avoid", "use", "prefer", "ensure", "never"
-3. Include @file:line references from AVAILABLE FILES
-4. Be project-specific, NOT generic advice
-5. Let structure emerge naturally from the content
-6. Minimum 400 characters of substantive content
+## GUIDELINES
+1. Use clear, actionable language appropriate for the project
+2. Include @file:line references from AVAILABLE FILES when relevant
+3. Focus on project-specific information rather than generic advice
+4. Let structure emerge naturally from the content
 
 ## SUGGESTIONS
 {suggestions}
 
 Return JSON with skill_body containing the regenerated content."##,
+            issues = issues,
+            feedback_section = context.feedback_section(),
             file_context = file_context,
             name = name,
             description = description,
             suggestions = context.suggestions_section(default_suggestions),
-        ));
-
-        prompt
+        )
     }
 
     fn build_agent_regeneration_prompt(
@@ -123,64 +101,42 @@ Return JSON with skill_body containing the regenerated content."##,
         context: &StrategyContext<'_>,
     ) -> String {
         let file_context = context.file_registry.to_prompt_context(100);
-        let source_insights = context.format_source_insights();
-        let project_context = context.format_project_context();
         let issues = context.format_issues();
-
         let default_suggestions =
             "- Define clear domain expertise\n- Include project-specific knowledge";
 
-        let mut prompt = format!(
-            r##"Regenerate this agent from scratch based on the source insights.
+        format!(
+            r##"Regenerate this agent from scratch.
 
 ## PREVIOUS ISSUES
 {issues}
 
 {feedback_section}
-"##,
-            issues = issues,
-            feedback_section = context.feedback_section(),
-        );
 
-        // Add source insights if available
-        if !source_insights.is_empty() {
-            prompt.push_str(&source_insights);
-            prompt.push('\n');
-        }
-
-        // Add project context if available
-        if !project_context.is_empty() {
-            prompt.push_str(&project_context);
-            prompt.push('\n');
-        }
-
-        prompt.push_str(&format!(
-            r##"## AVAILABLE FILES
+## AVAILABLE FILES
 {file_context}
 
 ## AGENT METADATA
 Name: {name}
 Description: {description}
 
-## REQUIREMENTS
-1. Preserve ALL insights from SOURCE INSIGHTS section
-2. Define clear domain expertise and specialized role
-3. Include @file:line references from AVAILABLE FILES
-4. Specify what the agent should and should not do
-5. Be project-specific, NOT generic advice
-6. Let structure emerge naturally from the content
+## GUIDELINES
+1. Define clear domain expertise and specialized role
+2. Include @file:line references from AVAILABLE FILES when relevant
+3. Focus on project-specific information rather than generic advice
+4. Let structure emerge naturally from the content
 
 ## SUGGESTIONS
 {suggestions}
 
 Return JSON with agent_prompt containing the regenerated content."##,
+            issues = issues,
+            feedback_section = context.feedback_section(),
             file_context = file_context,
             name = name,
             description = description,
             suggestions = context.suggestions_section(default_suggestions),
-        ));
-
-        prompt
+        )
     }
 }
 

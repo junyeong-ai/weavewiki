@@ -67,11 +67,11 @@ fn extract_use_statements(
     path: &str,
     result: &mut ParseResult,
 ) {
-    let query_str = r#"
+    let query_str = r"
         (use_declaration
             argument: (scoped_identifier) @path
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -116,11 +116,11 @@ fn extract_mod_declarations(
     path: &str,
     result: &mut ParseResult,
 ) {
-    let query_str = r#"
+    let query_str = r"
         (mod_item
             name: (identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -156,11 +156,11 @@ fn extract_mod_declarations(
 }
 
 fn extract_structs(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (struct_item
             name: (type_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -201,11 +201,11 @@ fn extract_structs(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_enums(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (enum_item
             name: (type_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -246,11 +246,11 @@ fn extract_enums(root: tree_sitter::Node, content: &str, path: &str, result: &mu
 }
 
 fn extract_traits(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (trait_item
             name: (type_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -286,12 +286,12 @@ fn extract_traits(root: tree_sitter::Node, content: &str, path: &str, result: &m
 }
 
 fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (function_item
             name: (identifier) @name
             parameters: (parameters) @params
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -373,12 +373,12 @@ fn extract_impl_blocks(
     path: &str,
     result: &mut ParseResult,
 ) {
-    let query_str = r#"
+    let query_str = r"
         (impl_item
             type: (type_identifier) @type
             trait: (type_identifier)? @trait
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_rust::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();

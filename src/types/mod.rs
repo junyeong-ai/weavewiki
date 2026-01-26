@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod claim;
+pub mod domain;
 pub mod edge;
 pub mod error;
 pub mod generation;
@@ -16,6 +17,7 @@ pub mod validation;
 
 pub use agent::{Agent, AgentModel, MIN_AGENT_FILE_REFS, PermissionMode};
 // Tool validation moved to crate::utils::tools
+pub use crate::pipeline::insight::ValueScore;
 pub use crate::utils::{VALID_TOOLS, is_valid_tool};
 pub use claim::{
     Claim, ClaimEvidence, ClaimType, VerificationIssue, VerificationReport, VerificationStatus,
@@ -30,11 +32,10 @@ pub use generation::{
     InferredConventions, Language, LanguageInfo, ModuleAnalysis, ProjectDetection, ProjectType,
     RelationshipType,
 };
-// Pipeline-specific types re-exported for convenience
-pub use crate::pipeline::generation::{GenerationContext, PlannedArtifact, SynthesisSlice};
-pub use crate::pipeline::insight::ValueScore;
 pub use hook::{Hook, HookCommand, HooksConfig, ToolHooks};
-pub use insight::{ArtifactClassification, DomainContext, ModuleContext, TierClassification};
+pub use insight::{
+    ArtifactClassification, ContentTier, DomainContext, ModuleContext, TierClassification,
+};
 pub use memory::{DevelopmentCommand, ProjectMemory};
 pub use node::{
     ApiMetadata, AuthRequirement, ComponentMetadata, EntityMetadata, EvidenceLocation,
@@ -47,9 +48,7 @@ pub use plugin::{
 };
 pub use rule::Rule;
 pub use severity::Severity;
-pub use skill::{
-    ContentTier, ContextMode, MIN_ACTIONABLE_COUNT, MIN_FILE_REFS, QualityMetrics, Skill,
-};
+pub use skill::{ContextMode, MIN_FILE_REFS, QualityMetrics, Skill};
 pub use utils::{
     ParseWithDefault, enum_to_str, json_bool, json_f64, json_i64, json_string, json_string_array,
     json_string_or, log_filter_error, log_filter_warn,

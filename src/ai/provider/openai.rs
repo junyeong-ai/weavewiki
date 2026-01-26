@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use super::{
     LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, TokenUsage,
 };
-use crate::ai::validation::extract_json_from_response;
+use crate::ai::validation::parse_structured_output;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4o";
 use crate::types::{ClaudegenError, Result};
@@ -74,13 +74,58 @@ impl OpenAiProvider {
         })
     }
 
-    fn build_request(&self, prompt: &str, _schema: &Value) -> ChatCompletionRequest {
+    fn build_request(&self, prompt: &str, schema: &Value) -> ChatCompletionRequest {
+        // OpenAI structured output requires root level to be an object.
+        // If schema is an array type, wrap it in an object with "items" field.
+        let (response_format, wrapped_array) =
+            if schema.is_object() && !schema.as_object().unwrap().is_empty() {
+                let schema_type = schema.get("type").and_then(|v| v.as_str());
+
+                let final_schema = if schema_type == Some("array") {
+                    // Wrap array schema: { "type": "array", ... } -> { "type": "object", "properties": { "items": { "type": "array", ... } } }
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "items": schema.clone()
+                        },
+                        "required": ["items"],
+                        "additionalProperties": false
+                    })
+                } else {
+                    schema.clone()
+                };
+
+                (
+                    Some(ResponseFormat {
+                        format_type: "json_schema".to_string(),
+                        json_schema: Some(JsonSchemaFormat {
+                            name: "response".to_string(),
+                            strict: Some(true),
+                            schema: final_schema,
+                        }),
+                    }),
+                    schema_type == Some("array"),
+                )
+            } else {
+                // Fallback to basic JSON mode for empty schemas
+                (
+                    Some(ResponseFormat {
+                        format_type: "json_object".to_string(),
+                        json_schema: None,
+                    }),
+                    false,
+                )
+            };
+
+        // Store wrapped_array flag for response unwrapping (handled in generate())
+        let _ = wrapped_array; // Will be used in generate() via response processing
+
         ChatCompletionRequest {
             model: self.model.clone(),
             messages: vec![
                 ChatMessage {
                     role: "system".to_string(),
-                    content: "You are a code documentation expert. Respond with valid JSON only."
+                    content: "You are a code documentation expert. Respond with valid JSON matching the provided schema."
                         .to_string(),
                 },
                 ChatMessage {
@@ -90,9 +135,7 @@ impl OpenAiProvider {
             ],
             temperature: self.temperature,
             max_tokens: Some(self.max_tokens),
-            response_format: Some(ResponseFormat {
-                format_type: "json_object".to_string(),
-            }),
+            response_format,
         }
     }
 }
@@ -104,6 +147,13 @@ impl LlmProvider for OpenAiProvider {
             "Generating with OpenAI (model: {}, temperature: {})",
             self.model, self.temperature
         );
+
+        // Check if original schema was an array type (wrapped for OpenAI)
+        let was_array_schema = schema
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| t == "array")
+            .unwrap_or(false);
 
         let start_time = Instant::now();
         let request = self.build_request(prompt, schema);
@@ -152,7 +202,13 @@ impl LlmProvider for OpenAiProvider {
             .ok_or_else(|| ClaudegenError::LlmApi("No content in OpenAI response".to_string()))?;
 
         debug!("Received response from OpenAI, parsing JSON");
-        let content = extract_json_from_response(content_str)?;
+        let mut content = parse_structured_output(content_str)?;
+
+        // Unwrap array response if original schema was array type
+        // We wrapped it as { "items": [...] } for OpenAI, now unwrap
+        if was_array_schema && let Some(items) = content.get("items").cloned() {
+            content = items;
+        }
 
         // OpenAI API doesn't return cost in response, use 0.0
         // Cost tracking should be done via OpenAI dashboard or external billing
@@ -229,6 +285,16 @@ struct ChatMessage {
 struct ResponseFormat {
     #[serde(rename = "type")]
     format_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<JsonSchemaFormat>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonSchemaFormat {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+    schema: Value,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,8 +1,6 @@
 //! Domain types for artifact generation
 //!
 //! Pure domain types without pipeline dependencies.
-//! Pipeline-specific types (GenerationContext, SynthesisSlice, PlannedArtifact)
-//! are in pipeline/generation/types.rs
 
 use serde::{Deserialize, Serialize};
 

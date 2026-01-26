@@ -1,484 +1,455 @@
-//! Distributed Analysis
+//! Distributed Analysis Module
 //!
-//! Handles large-scale codebase analysis through:
-//! - Module-based partitioning
-//! - Parallel chunk analysis with semaphore control
-//! - Result merging with deduplication
+//! Implements parallel chunked analysis for 100% file coverage.
+//! Uses a Map-Reduce pattern to analyze large codebases efficiently.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
 
 use crate::ai::LlmProvider;
-use crate::types::Result;
+use crate::ai::validation::deserialize_llm_response;
+use crate::config::DistributedAnalysisConfig;
+use crate::types::{ClaudegenError, Result};
 
-/// Chunk of files to analyze together
-#[derive(Debug, Clone)]
+const MAX_RETRIES: usize = 3;
+const INITIAL_BACKOFF_MS: u64 = 1000;
+
+use super::super::context::{FileMetadata, VerifiedFileRegistry};
+use super::deep_analyzer::{DiscoveredConstraint, Gotcha, ModuleDependency, PatternInstance};
+
+// =============================================================================
+// CHUNK TYPES
+// =============================================================================
+
+/// A chunk of files for parallel analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisChunk {
-    pub id: String,
-    pub module_path: PathBuf,
-    pub files: Vec<PathBuf>,
-    pub priority: u8,
+    pub chunk_id: String,
+    pub module_path: String,
+    pub files: Vec<String>,
+    pub total_lines: usize,
+    pub estimated_tokens: usize,
 }
 
 impl AnalysisChunk {
-    pub fn new(module_path: PathBuf, files: Vec<PathBuf>) -> Self {
-        let id = format!("chunk_{}", Self::path_hash(&module_path));
-        let priority = Self::calculate_priority(&files);
+    pub fn new(chunk_id: String, module_path: String, files: Vec<String>) -> Self {
         Self {
-            id,
+            chunk_id,
             module_path,
             files,
-            priority,
+            total_lines: 0,
+            estimated_tokens: 0,
         }
     }
 
-    fn path_hash(path: &Path) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        path.hash(&mut hasher);
-        format!("{:x}", hasher.finish())[..8].to_string()
-    }
-
-    fn calculate_priority(files: &[PathBuf]) -> u8 {
-        // Higher priority for more files
-        let count_priority = (files.len().min(10) * 5) as u8;
-
-        // Higher priority for core paths
-        let has_core = files.iter().any(|f| {
-            let s = f.to_string_lossy();
-            s.contains("/core/") || s.contains("/main") || s.contains("/lib")
-        });
-
-        count_priority + if has_core { 20 } else { 0 }
+    pub fn with_metrics(mut self, total_lines: usize, estimated_tokens: usize) -> Self {
+        self.total_lines = total_lines;
+        self.estimated_tokens = estimated_tokens;
+        self
     }
 }
 
-/// Result of analyzing a single chunk
-#[derive(Debug, Clone)]
+/// Result from analyzing a single chunk
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChunkAnalysisResult {
     pub chunk_id: String,
-    pub module_path: PathBuf,
-    pub insights: Vec<ChunkInsight>,
-    pub patterns: Vec<ChunkPattern>,
-    pub constraints: Vec<ChunkConstraint>,
+    pub module_path: String,
+    pub patterns: Vec<PatternInstance>,
+    pub conventions: ChunkConventions,
+    pub constraints: Vec<DiscoveredConstraint>,
+    pub gotchas: Vec<Gotcha>,
+    pub dependencies: Vec<ModuleDependency>,
+    pub file_count: usize,
+    pub lines_analyzed: usize,
     pub confidence: f32,
 }
 
-/// Insight extracted from a chunk
-#[derive(Debug, Clone)]
-pub struct ChunkInsight {
-    pub title: String,
-    pub description: String,
-    pub evidence: Vec<String>,
-    pub tier: u8, // 1-3
+/// Conventions discovered in a chunk
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChunkConventions {
+    pub naming_patterns: HashMap<NamingCase, usize>,
+    pub error_handling: HashMap<ErrorStyle, usize>,
+    pub async_patterns: HashMap<AsyncStyle, usize>,
+    pub import_patterns: Vec<String>,
 }
 
-/// Pattern detected in a chunk
-#[derive(Debug, Clone)]
-pub struct ChunkPattern {
-    pub name: String,
-    pub description: String,
-    pub locations: Vec<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NamingCase {
+    #[default]
+    SnakeCase,
+    CamelCase,
+    PascalCase,
+    KebabCase,
+    ScreamingSnakeCase,
 }
 
-/// Constraint found in a chunk
-#[derive(Debug, Clone)]
-pub struct ChunkConstraint {
-    pub name: String,
-    pub description: String,
-    pub evidence: Vec<String>,
-    pub severity: ConstraintSeverity,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorStyle {
+    ResultType,
+    ExceptionBased,
+    NullCheck,
+    EarlyReturn,
+    MonadicChain,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ConstraintSeverity {
-    Critical,
-    Important,
-    Minor,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncStyle {
+    AsyncAwait,
+    Callbacks,
+    Promises,
+    Channels,
+    Actors,
 }
 
-/// Partitions a codebase into analysis chunks
-pub struct ModulePartitioner {
-    max_files_per_chunk: usize,
-    module_depth: usize,
-}
+// =============================================================================
+// CHUNKING STRATEGY
+// =============================================================================
 
-impl ModulePartitioner {
-    pub fn new() -> Self {
-        Self {
-            max_files_per_chunk: 50,
-            module_depth: 2,
-        }
-    }
+pub struct ChunkingStrategy;
 
-    pub fn with_max_files(mut self, max: usize) -> Self {
-        self.max_files_per_chunk = max;
-        self
-    }
-
-    pub fn with_module_depth(mut self, depth: usize) -> Self {
-        self.module_depth = depth;
-        self
-    }
-
-    /// Partition files into chunks based on module structure
-    pub fn partition(&self, files: &[PathBuf]) -> Vec<AnalysisChunk> {
-        let mut module_files: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-
-        // Group files by module path
-        for file in files {
-            let module_path = self.extract_module_path(file);
-            module_files
-                .entry(module_path)
-                .or_default()
-                .push(file.clone());
-        }
-
-        // Create chunks, splitting large modules
+impl ChunkingStrategy {
+    /// Create chunks from file registry respecting token limits
+    pub fn create_chunks(
+        registry: &VerifiedFileRegistry,
+        config: &DistributedAnalysisConfig,
+    ) -> Vec<AnalysisChunk> {
+        let files_by_module = registry.files_by_module();
         let mut chunks = Vec::new();
-        for (module_path, files) in module_files {
-            if files.len() <= self.max_files_per_chunk {
-                chunks.push(AnalysisChunk::new(module_path, files));
-            } else {
-                // Split large module into sub-chunks
-                for (i, sub_files) in files.chunks(self.max_files_per_chunk).enumerate() {
-                    let sub_path = module_path.join(format!("_part{}", i + 1));
-                    chunks.push(AnalysisChunk::new(sub_path, sub_files.to_vec()));
-                }
-            }
+        let mut chunk_counter = 0;
+
+        for (module, files) in files_by_module {
+            let module_chunks = Self::chunk_module(
+                &module,
+                files,
+                config.max_tokens_per_chunk,
+                &mut chunk_counter,
+            );
+            chunks.extend(module_chunks);
         }
-
-        // Sort by priority (descending)
-        chunks.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-        info!(
-            chunks = chunks.len(),
-            total_files = files.len(),
-            "Partitioned codebase into chunks"
-        );
 
         chunks
     }
 
-    fn extract_module_path(&self, file: &Path) -> PathBuf {
-        let components: Vec<_> = file.components().take(self.module_depth + 1).collect();
+    fn chunk_module(
+        module: &str,
+        files: Vec<&FileMetadata>,
+        max_tokens: usize,
+        counter: &mut usize,
+    ) -> Vec<AnalysisChunk> {
+        let mut chunks = Vec::new();
+        let mut current_files = Vec::new();
+        let mut current_tokens = 0usize;
+        let mut current_lines = 0usize;
 
-        if components.is_empty() {
-            PathBuf::from("root")
-        } else {
-            components.iter().collect()
-        }
-    }
-}
-
-impl Default for ModulePartitioner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Merged analysis result from all chunks
-#[derive(Debug, Clone, Default)]
-pub struct MergedAnalysis {
-    pub insights: Vec<ChunkInsight>,
-    pub patterns: Vec<ChunkPattern>,
-    pub constraints: Vec<ChunkConstraint>,
-    pub module_dependencies: Vec<ModuleDependency>,
-    pub overall_confidence: f32,
-    pub chunks_analyzed: usize,
-    pub chunks_failed: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct ModuleDependency {
-    pub from_module: PathBuf,
-    pub to_module: PathBuf,
-    pub dependency_type: DependencyType,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum DependencyType {
-    Import,
-    Api,
-    Data,
-}
-
-/// Merges results from parallel chunk analysis
-pub struct AnalysisMerger;
-
-impl AnalysisMerger {
-    /// Merge chunk results into a unified analysis
-    pub fn merge(results: Vec<ChunkAnalysisResult>) -> MergedAnalysis {
-        let mut all_insights = Vec::new();
-        let mut all_patterns = Vec::new();
-        let mut all_constraints = Vec::new();
-        let mut total_confidence = 0.0;
-        let chunks_analyzed = results.len();
-
-        for result in &results {
-            all_insights.extend(result.insights.clone());
-            all_patterns.extend(result.patterns.clone());
-            all_constraints.extend(result.constraints.clone());
-            total_confidence += result.confidence;
-        }
-
-        // Deduplicate insights by title
-        let insights = Self::deduplicate_insights(all_insights);
-
-        // Deduplicate patterns by name
-        let patterns = Self::deduplicate_patterns(all_patterns);
-
-        // Deduplicate and prioritize constraints
-        let constraints = Self::deduplicate_constraints(all_constraints);
-
-        // Analyze cross-module dependencies
-        let module_dependencies = Self::analyze_dependencies(&results);
-
-        let overall_confidence = if chunks_analyzed > 0 {
-            total_confidence / chunks_analyzed as f32
-        } else {
-            0.0
-        };
-
-        info!(
-            insights = insights.len(),
-            patterns = patterns.len(),
-            constraints = constraints.len(),
-            dependencies = module_dependencies.len(),
-            "Merged chunk analysis results"
-        );
-
-        MergedAnalysis {
-            insights,
-            patterns,
-            constraints,
-            module_dependencies,
-            overall_confidence,
-            chunks_analyzed,
-            chunks_failed: 0,
-        }
-    }
-
-    fn deduplicate_insights(insights: Vec<ChunkInsight>) -> Vec<ChunkInsight> {
-        let mut seen = HashMap::new();
-
-        for insight in insights {
-            seen.entry(insight.title.clone()).or_insert(insight);
-        }
-
-        seen.into_values().collect()
-    }
-
-    fn deduplicate_patterns(patterns: Vec<ChunkPattern>) -> Vec<ChunkPattern> {
-        let mut seen: HashMap<String, ChunkPattern> = HashMap::new();
-
-        for pattern in patterns {
-            seen.entry(pattern.name.clone())
-                .and_modify(|p| p.locations.extend(pattern.locations.clone()))
-                .or_insert(pattern);
-        }
-
-        seen.into_values().collect()
-    }
-
-    fn deduplicate_constraints(constraints: Vec<ChunkConstraint>) -> Vec<ChunkConstraint> {
-        let mut seen = HashMap::new();
-
-        for constraint in constraints {
-            seen.entry(constraint.name.clone())
-                .and_modify(|c: &mut ChunkConstraint| {
-                    c.evidence.extend(constraint.evidence.clone());
-                })
-                .or_insert(constraint);
-        }
-
-        // Sort by severity (critical first)
-        let mut result: Vec<_> = seen.into_values().collect();
-        result.sort_by_key(|c| match c.severity {
-            ConstraintSeverity::Critical => 0,
-            ConstraintSeverity::Important => 1,
-            ConstraintSeverity::Minor => 2,
-        });
-
-        result
-    }
-
-    fn analyze_dependencies(results: &[ChunkAnalysisResult]) -> Vec<ModuleDependency> {
-        // Basic dependency analysis based on evidence paths
-        let mut dependencies = Vec::new();
-        let modules: Vec<_> = results.iter().map(|r| &r.module_path).collect();
-
-        for result in results {
-            for insight in &result.insights {
-                for evidence in &insight.evidence {
-                    for other_module in &modules {
-                        if *other_module != &result.module_path {
-                            let other_str = other_module.to_string_lossy();
-                            if evidence.contains(other_str.as_ref()) {
-                                dependencies.push(ModuleDependency {
-                                    from_module: result.module_path.clone(),
-                                    to_module: (*other_module).clone(),
-                                    dependency_type: DependencyType::Import,
-                                });
-                            }
-                        }
-                    }
-                }
+        for file in files {
+            if current_tokens + file.estimated_tokens > max_tokens && !current_files.is_empty() {
+                *counter += 1;
+                chunks.push(
+                    AnalysisChunk::new(
+                        format!("chunk-{}", counter),
+                        module.to_string(),
+                        current_files.clone(),
+                    )
+                    .with_metrics(current_lines, current_tokens),
+                );
+                current_files.clear();
+                current_tokens = 0;
+                current_lines = 0;
             }
+
+            current_files.push(file.path.clone());
+            current_tokens += file.estimated_tokens;
+            current_lines += file.line_count;
         }
 
-        dependencies
+        if !current_files.is_empty() {
+            *counter += 1;
+            chunks.push(
+                AnalysisChunk::new(
+                    format!("chunk-{}", counter),
+                    module.to_string(),
+                    current_files,
+                )
+                .with_metrics(current_lines, current_tokens),
+            );
+        }
+
+        chunks
     }
 }
 
-/// Parallel analyzer with concurrency control
-pub struct ParallelAnalyzer<A: ChunkAnalyzer> {
-    analyzer: Arc<A>,
-    max_concurrent: usize,
+// =============================================================================
+// DISTRIBUTED ANALYZER
+// =============================================================================
+
+pub struct DistributedAnalyzer {
+    provider: Arc<dyn LlmProvider>,
+    config: DistributedAnalysisConfig,
 }
 
-impl<A: ChunkAnalyzer + Send + Sync + 'static> ParallelAnalyzer<A> {
-    pub fn new(analyzer: A, max_concurrent: usize) -> Self {
-        Self {
-            analyzer: Arc::new(analyzer),
-            max_concurrent,
-        }
+impl DistributedAnalyzer {
+    pub fn new(provider: Arc<dyn LlmProvider>, config: DistributedAnalysisConfig) -> Self {
+        Self { provider, config }
     }
 
-    /// Analyze all chunks in parallel with semaphore control
-    pub async fn analyze_all(&self, chunks: Vec<AnalysisChunk>) -> Result<MergedAnalysis> {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
-        let mut join_set = JoinSet::new();
+    /// Analyze all chunks in parallel with bounded concurrency
+    pub async fn analyze_all_chunks(
+        &self,
+        chunks: Vec<AnalysisChunk>,
+        project_root: &Path,
+    ) -> Result<Vec<ChunkAnalysisResult>> {
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_agents));
         let total_chunks = chunks.len();
+        let project_root = project_root.to_path_buf();
 
-        info!(
-            chunks = total_chunks,
-            max_concurrent = self.max_concurrent,
-            "Starting parallel chunk analysis"
+        tracing::info!(
+            chunk_count = total_chunks,
+            max_parallel = self.config.max_parallel_agents,
+            "Starting distributed analysis"
         );
+
+        let mut join_set: JoinSet<std::result::Result<ChunkAnalysisResult, (String, String)>> =
+            JoinSet::new();
 
         for chunk in chunks {
-            let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-                crate::types::ClaudegenError::Storage(format!("Semaphore closed: {}", e))
-            })?;
-            let analyzer = Arc::clone(&self.analyzer);
+            let semaphore = Arc::clone(&semaphore);
+            let provider = Arc::clone(&self.provider);
+            let root = project_root.clone();
+            let config = self.config.clone();
 
             join_set.spawn(async move {
-                let result = analyzer.analyze(&chunk).await;
-                drop(permit); // Release semaphore
-                (chunk.id, result)
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .map_err(|e| (chunk.chunk_id.clone(), format!("Semaphore error: {}", e)))?;
+                Self::analyze_chunk(&chunk, &root, &provider, &config)
+                    .await
+                    .map_err(|e| (chunk.chunk_id.clone(), e.to_string()))
             });
         }
 
-        let mut results = Vec::new();
-        let mut failed = 0;
+        let mut results = Vec::with_capacity(total_chunks);
+        let mut failed = 0usize;
 
-        while let Some(task_result) = join_set.join_next().await {
-            match task_result {
-                Ok((chunk_id, Ok(analysis))) => {
-                    debug!(chunk_id = %chunk_id, "Chunk analysis completed");
-                    results.push(analysis);
-                }
-                Ok((chunk_id, Err(e))) => {
-                    warn!(chunk_id = %chunk_id, error = %e, "Chunk analysis failed");
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(Ok(r)) => results.push(r),
+                Ok(Err((chunk_id, error))) => {
+                    tracing::warn!(chunk_id = %chunk_id, error = %error, "Chunk analysis failed");
                     failed += 1;
                 }
-                Err(e) => {
-                    warn!(error = %e, "Chunk task panicked");
+                Err(join_err) => {
+                    tracing::error!(error = %join_err, "Task join failed");
                     failed += 1;
                 }
             }
         }
 
-        let mut merged = AnalysisMerger::merge(results);
-        merged.chunks_failed = failed;
-
-        info!(
-            analyzed = merged.chunks_analyzed,
-            failed = merged.chunks_failed,
-            insights = merged.insights.len(),
-            "Parallel analysis completed"
+        tracing::info!(
+            successful = results.len(),
+            failed = failed,
+            "Distributed analysis complete"
         );
 
-        Ok(merged)
+        Ok(results)
     }
-}
 
-/// Trait for chunk analyzers
-#[async_trait::async_trait]
-pub trait ChunkAnalyzer: Send + Sync {
-    async fn analyze(&self, chunk: &AnalysisChunk) -> Result<ChunkAnalysisResult>;
-}
+    async fn analyze_chunk(
+        chunk: &AnalysisChunk,
+        project_root: &Path,
+        provider: &Arc<dyn LlmProvider>,
+        config: &DistributedAnalysisConfig,
+    ) -> Result<ChunkAnalysisResult> {
+        let mut file_contents = Vec::new();
+        let mut total_lines = 0usize;
 
-/// Simple LLM-based chunk analyzer
-pub struct LlmChunkAnalyzer {
-    provider: Arc<dyn LlmProvider>,
-}
+        let timeout = Duration::from_secs(config.file_read_timeout_secs);
 
-impl LlmChunkAnalyzer {
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+        for file_path in &chunk.files {
+            let full_path = project_root.join(file_path);
+            match tokio::time::timeout(timeout, tokio::fs::read_to_string(&full_path)).await {
+                Ok(Ok(content)) => {
+                    total_lines += content.lines().count();
+                    file_contents.push((file_path.clone(), content));
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(file = %file_path, error = %e, "Failed to read file");
+                }
+                Err(_) => {
+                    tracing::warn!(file = %file_path, timeout_secs = config.file_read_timeout_secs, "File read timed out");
+                }
+            }
+        }
+
+        if file_contents.is_empty() {
+            return Ok(ChunkAnalysisResult {
+                chunk_id: chunk.chunk_id.clone(),
+                module_path: chunk.module_path.clone(),
+                file_count: 0,
+                ..Default::default()
+            });
+        }
+
+        let analysis = Self::llm_analyze_chunk(
+            &file_contents,
+            &chunk.module_path,
+            provider,
+            config.max_file_content_chars,
+        )
+        .await?;
+
+        Ok(ChunkAnalysisResult {
+            chunk_id: chunk.chunk_id.clone(),
+            module_path: chunk.module_path.clone(),
+            patterns: analysis.patterns,
+            conventions: analysis.conventions,
+            constraints: analysis.constraints,
+            gotchas: analysis.gotchas,
+            dependencies: analysis.dependencies,
+            file_count: file_contents.len(),
+            lines_analyzed: total_lines,
+            confidence: analysis.confidence,
+        })
     }
-}
 
-#[async_trait::async_trait]
-impl ChunkAnalyzer for LlmChunkAnalyzer {
-    async fn analyze(&self, chunk: &AnalysisChunk) -> Result<ChunkAnalysisResult> {
-        // Build file list for prompt
-        let file_list = chunk
-            .files
-            .iter()
-            .map(|f| format!("- {}", f.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
+    fn build_content_prompt(
+        file_contents: &[(String, String)],
+        max_chars_per_file: usize,
+    ) -> String {
+        let mut content_prompt = String::with_capacity(file_contents.len() * 1000);
+
+        for (path, content) in file_contents {
+            content_prompt.push_str(&format!("\n=== {} ===\n", path));
+            let truncated = if content.len() > max_chars_per_file {
+                &content[..max_chars_per_file]
+            } else {
+                content
+            };
+            content_prompt.push_str(truncated);
+            content_prompt.push('\n');
+        }
+
+        content_prompt
+    }
+
+    async fn llm_analyze_chunk(
+        file_contents: &[(String, String)],
+        module_path: &str,
+        provider: &Arc<dyn LlmProvider>,
+        max_file_content_chars: usize,
+    ) -> Result<ChunkAnalysisOutput> {
+        let content_prompt = Self::build_content_prompt(file_contents, max_file_content_chars);
 
         let prompt = format!(
-            r##"Analyze this module for insights, patterns, and constraints.
+            r#"Analyze the following code files from module "{module_path}". Extract:
 
-MODULE: {}
-FILES:
-{}
+1. **Patterns**: Recurring code patterns (architecture, error handling, concurrency, etc.)
+2. **Conventions**: Naming conventions, error handling styles, async patterns
+3. **Constraints**: Hidden rules, invariants, anti-patterns to avoid
+4. **Gotchas**: Non-obvious pitfalls or tricky behaviors
+5. **Dependencies**: Module dependencies and relationships
 
-Extract:
-1. Key insights (title, description, evidence files)
-2. Code patterns (name, description, locations)
-3. Constraints (name, description, evidence, severity)
+Focus on project-specific knowledge that would help someone work with this code.
+Ignore generic language knowledge.
 
-Focus on project-specific details, not generic advice.
-Return JSON with insights, patterns, and constraints arrays."##,
-            chunk.module_path.display(),
-            file_list
+CODE:
+{content_prompt}
+
+Analyze thoroughly and return structured findings."#
         );
 
-        let schema = serde_json::json!({
+        let schema = Self::chunk_analysis_schema();
+
+        let response = Self::retry_llm_call(provider, &prompt, &schema, module_path).await?;
+        Ok(deserialize_llm_response(&response.content, module_path))
+    }
+
+    async fn retry_llm_call(
+        provider: &Arc<dyn LlmProvider>,
+        prompt: &str,
+        schema: &Value,
+        context: &str,
+    ) -> Result<crate::ai::LlmResponse> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match provider.generate(prompt, schema).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let is_retryable = e.to_string().contains("rate")
+                        || e.to_string().contains("timeout")
+                        || e.to_string().contains("503")
+                        || e.to_string().contains("overloaded");
+
+                    if !is_retryable || attempt == MAX_RETRIES - 1 {
+                        return Err(e);
+                    }
+
+                    let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * (1 << attempt));
+                    tracing::warn!(
+                        context = %context,
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        backoff_ms = backoff.as_millis(),
+                        error = %e,
+                        "LLM call failed, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            ClaudegenError::pipeline(0, "llm_retry", "Max retries exceeded".to_string())
+        }))
+    }
+
+    fn chunk_analysis_schema() -> Value {
+        json!({
             "type": "object",
             "properties": {
-                "insights": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "evidence": {"type": "array", "items": {"type": "string"}},
-                            "tier": {"type": "integer"}
-                        }
-                    }
-                },
                 "patterns": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string"},
+                            "category": {"type": "string", "enum": ["architecture", "error_handling", "concurrency", "data_flow", "testing", "configuration", "logging", "performance", "security", "caching", "validation", "other"]},
                             "description": {"type": "string"},
-                            "locations": {"type": "array", "items": {"type": "string"}}
-                        }
+                            "locations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": {"type": "string"},
+                                        "line": {"type": "integer"},
+                                        "snippet": {"type": "string"}
+                                    }
+                                }
+                            },
+                            "usage_guidance": {"type": "string"}
+                        },
+                        "required": ["name", "category", "description"]
+                    }
+                },
+                "conventions": {
+                    "type": "object",
+                    "properties": {
+                        "naming_patterns": {"type": "object", "additionalProperties": {"type": "integer"}},
+                        "error_handling": {"type": "object", "additionalProperties": {"type": "integer"}},
+                        "async_patterns": {"type": "object", "additionalProperties": {"type": "integer"}},
+                        "import_patterns": {"type": "array", "items": {"type": "string"}}
                     }
                 },
                 "constraints": {
@@ -486,102 +457,62 @@ Return JSON with insights, patterns, and constraints arrays."##,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string"},
+                            "kind": {"type": "string", "enum": ["hidden_dependency", "anti_pattern", "invariant", "ordering", "concurrency", "resource", "security"]},
+                            "title": {"type": "string"},
                             "description": {"type": "string"},
-                            "evidence": {"type": "array", "items": {"type": "string"}},
-                            "severity": {"type": "string"}
+                            "evidence": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["kind", "title", "description"]
+                    }
+                },
+                "gotchas": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string"},
+                            "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]}
+                        },
+                        "required": ["description"]
+                    }
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from_module": {"type": "string"},
+                            "to_module": {"type": "string"},
+                            "dependency_type": {"type": "string"},
+                            "description": {"type": "string"}
                         }
                     }
-                }
-            }
-        });
-
-        let response = self.provider.generate(&prompt, &schema).await?;
-
-        // Parse response
-        let insights = response
-            .content
-            .get("insights")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|i| {
-                        Some(ChunkInsight {
-                            title: i.get("title")?.as_str()?.to_string(),
-                            description: i.get("description")?.as_str()?.to_string(),
-                            evidence: i
-                                .get("evidence")?
-                                .as_array()?
-                                .iter()
-                                .filter_map(|e| e.as_str().map(String::from))
-                                .collect(),
-                            tier: i.get("tier")?.as_u64()? as u8,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let patterns = response
-            .content
-            .get("patterns")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|p| {
-                        Some(ChunkPattern {
-                            name: p.get("name")?.as_str()?.to_string(),
-                            description: p.get("description")?.as_str()?.to_string(),
-                            locations: p
-                                .get("locations")?
-                                .as_array()?
-                                .iter()
-                                .filter_map(|l| l.as_str().map(String::from))
-                                .collect(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let constraints = response
-            .content
-            .get("constraints")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|c| {
-                        let severity_str = c.get("severity")?.as_str()?;
-                        let severity = match severity_str.to_lowercase().as_str() {
-                            "critical" => ConstraintSeverity::Critical,
-                            "important" => ConstraintSeverity::Important,
-                            _ => ConstraintSeverity::Minor,
-                        };
-                        Some(ChunkConstraint {
-                            name: c.get("name")?.as_str()?.to_string(),
-                            description: c.get("description")?.as_str()?.to_string(),
-                            evidence: c
-                                .get("evidence")?
-                                .as_array()?
-                                .iter()
-                                .filter_map(|e| e.as_str().map(String::from))
-                                .collect(),
-                            severity,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(ChunkAnalysisResult {
-            chunk_id: chunk.id.clone(),
-            module_path: chunk.module_path.clone(),
-            insights,
-            patterns,
-            constraints,
-            confidence: 0.8, // Default confidence
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "required": ["patterns", "conventions", "constraints", "gotchas", "dependencies", "confidence"]
         })
     }
+}
+
+// =============================================================================
+// LLM OUTPUT TYPES
+// =============================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ChunkAnalysisOutput {
+    #[serde(default)]
+    patterns: Vec<PatternInstance>,
+    #[serde(default)]
+    conventions: ChunkConventions,
+    #[serde(default)]
+    constraints: Vec<DiscoveredConstraint>,
+    #[serde(default)]
+    gotchas: Vec<Gotcha>,
+    #[serde(default)]
+    dependencies: Vec<ModuleDependency>,
+    #[serde(default)]
+    confidence: f32,
 }
 
 #[cfg(test)]
@@ -589,63 +520,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_module_partitioner() {
-        let partitioner = ModulePartitioner::new();
-        let files = vec![
-            PathBuf::from("src/main.rs"),
-            PathBuf::from("src/lib.rs"),
-            PathBuf::from("src/api/mod.rs"),
-            PathBuf::from("src/api/routes.rs"),
-            PathBuf::from("tests/test_main.rs"),
-        ];
+    fn test_chunk_creation() {
+        let chunk = AnalysisChunk::new(
+            "chunk-1".to_string(),
+            "src/pipeline".to_string(),
+            vec!["src/pipeline/mod.rs".to_string()],
+        )
+        .with_metrics(100, 1500);
 
-        let chunks = partitioner.partition(&files);
-        assert!(!chunks.is_empty());
+        assert_eq!(chunk.chunk_id, "chunk-1");
+        assert_eq!(chunk.total_lines, 100);
+        assert_eq!(chunk.estimated_tokens, 1500);
     }
 
     #[test]
-    fn test_analysis_chunk_priority() {
-        let core_files = vec![PathBuf::from("src/core/main.rs")];
-        let test_files = vec![PathBuf::from("tests/test.rs")];
-
-        let core_chunk = AnalysisChunk::new(PathBuf::from("src/core"), core_files);
-        let test_chunk = AnalysisChunk::new(PathBuf::from("tests"), test_files);
-
-        assert!(core_chunk.priority > test_chunk.priority);
-    }
-
-    #[test]
-    fn test_analysis_merger() {
-        let result1 = ChunkAnalysisResult {
-            chunk_id: "chunk1".to_string(),
-            module_path: PathBuf::from("src/api"),
-            insights: vec![ChunkInsight {
-                title: "API Pattern".to_string(),
-                description: "Description".to_string(),
-                evidence: vec!["src/api/mod.rs:10".to_string()],
-                tier: 3,
-            }],
-            patterns: vec![],
-            constraints: vec![],
-            confidence: 0.9,
-        };
-
-        let result2 = ChunkAnalysisResult {
-            chunk_id: "chunk2".to_string(),
-            module_path: PathBuf::from("src/db"),
-            insights: vec![ChunkInsight {
-                title: "DB Pattern".to_string(),
-                description: "Description".to_string(),
-                evidence: vec!["src/db/mod.rs:5".to_string()],
-                tier: 2,
-            }],
-            patterns: vec![],
-            constraints: vec![],
-            confidence: 0.85,
-        };
-
-        let merged = AnalysisMerger::merge(vec![result1, result2]);
-        assert_eq!(merged.insights.len(), 2);
-        assert_eq!(merged.chunks_analyzed, 2);
+    fn test_chunk_analysis_result_default() {
+        let result = ChunkAnalysisResult::default();
+        assert!(result.patterns.is_empty());
+        assert!(result.constraints.is_empty());
+        assert_eq!(result.confidence, 0.0);
     }
 }

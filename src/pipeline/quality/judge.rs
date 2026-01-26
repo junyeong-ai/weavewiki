@@ -3,7 +3,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::tier_patterns::{count_tier1_matches, count_tier3_matches};
 use crate::Result;
 use crate::ai::LlmProvider;
 use crate::types::{Agent, ContentTier, Rule, Severity, Skill};
@@ -13,32 +12,26 @@ pub struct JudgeConfig {
     pub min_quality_score: f32,
     pub min_reference_count: usize,
     pub tier_validation_enabled: bool,
+    /// Maximum characters to include in content preview for LLM validation
+    pub max_content_preview_chars: usize,
 }
 
 impl Default for JudgeConfig {
     fn default() -> Self {
         Self {
             min_quality_score: 0.7,
-            min_reference_count: 2,
+            min_reference_count: 0, // LLM determines reference sufficiency, not fixed count
             tier_validation_enabled: true,
+            max_content_preview_chars: 4000, // Increased from hardcoded 2000
         }
     }
 }
 
-/// Result of two-pass tier validation
+/// Tier validation result from LLM classification
 #[derive(Debug, Clone)]
 pub struct TierValidation {
     pub tier: ContentTier,
     pub confidence: f32,
-    pub disagreement: Option<TierDisagreement>,
-}
-
-/// Disagreement between LLM and rule-based tier classification
-#[derive(Debug, Clone)]
-pub struct TierDisagreement {
-    pub llm_tier: ContentTier,
-    pub rule_tier: ContentTier,
-    pub reason: String,
 }
 
 pub struct LlmJudge {
@@ -163,9 +156,9 @@ impl LlmJudge {
 ### Evaluation Criteria
 
 1. **Tier Classification**:
-   - Tier 1: Generic knowledge (REJECT) - "Use async/await", "Handle errors"
-   - Tier 2: Project conventions (KEEP) - "Controllers in adapter/inbound/web"
-   - Tier 3: Hidden constraints (ESSENTIAL) - "Provider must be Arc-shared"
+   - Tier 1: Generic knowledge - "Use async/await", "Handle errors"
+   - Tier 2: Project conventions - "Controllers in adapter/inbound/web"
+   - Tier 3: Hidden constraints - Non-obvious gotchas, race conditions, initialization order
 
 2. **Actionability**: Clear specific actions with project-specific context?
 
@@ -302,59 +295,17 @@ impl LlmJudge {
         })
     }
 
-    /// Two-pass tier validation: LLM classification + rule-based verification
+    /// LLM-based tier validation
     pub async fn validate_tier(&self, content: &str) -> Result<TierValidation> {
         if !self.config.tier_validation_enabled {
-            // If validation disabled, use rule-based only
-            let rule_tier = self.classify_tier_rules(content);
             return Ok(TierValidation {
-                tier: rule_tier,
-                confidence: 0.7,
-                disagreement: None,
+                tier: ContentTier::Tier2Convention,
+                confidence: 0.5,
             });
         }
 
-        // First pass: LLM classification
-        let llm_tier = self.classify_tier_llm(content).await?;
-
-        // Second pass: Rule-based verification
-        let rule_tier = self.classify_tier_rules(content);
-
-        if llm_tier != rule_tier {
-            // Disagreement - use stricter (lower) tier
-            let final_tier = tier_min(llm_tier, rule_tier);
-            tracing::debug!(
-                llm_tier = ?llm_tier,
-                rule_tier = ?rule_tier,
-                final_tier = ?final_tier,
-                "Tier classification disagreement, using stricter tier"
-            );
-
-            Ok(TierValidation {
-                tier: final_tier,
-                confidence: 0.5,
-                disagreement: Some(TierDisagreement {
-                    llm_tier,
-                    rule_tier,
-                    reason: format!(
-                        "LLM classified as {:?}, rules classified as {:?}",
-                        llm_tier, rule_tier
-                    ),
-                }),
-            })
-        } else {
-            Ok(TierValidation {
-                tier: llm_tier,
-                confidence: 0.9,
-                disagreement: None,
-            })
-        }
-    }
-
-    /// LLM-based tier classification
-    async fn classify_tier_llm(&self, content: &str) -> Result<ContentTier> {
         let prompt = format!(
-            r#"Classify this content into exactly ONE tier:
+            r#"Classify this content into exactly ONE tier based on its value:
 
 CONTENT:
 ```
@@ -365,14 +316,17 @@ TIER DEFINITIONS:
 - Tier 1 (Generic): Universal programming knowledge anyone could look up
   Examples: "Use async/await", "Handle errors gracefully", "Follow naming conventions"
 
-- Tier 2 (Convention): Project-specific patterns and conventions
+- Tier 2 (Convention): Project-specific patterns, file organization, naming conventions
   Examples: "Controllers in adapter/inbound/web", "Use repository pattern for data access"
 
-- Tier 3 (Constraint): Hidden knowledge that causes bugs if missed
-  Examples: "Provider MUST be Arc-shared for rate limiting", "OnceCell for expensive operations"
+- Tier 3 (Constraint): Hidden knowledge that causes bugs or issues if missed
+  Examples: Specific race conditions, initialization order dependencies, non-obvious side effects
 
 OUTPUT: Single integer 1, 2, or 3"#,
-            content = content.chars().take(2000).collect::<String>()
+            content = content
+                .chars()
+                .take(self.config.max_content_preview_chars)
+                .collect::<String>()
         );
 
         let schema = json!({
@@ -388,81 +342,19 @@ OUTPUT: Single integer 1, 2, or 3"#,
             .content
             .get("tier")
             .and_then(|v| v.as_i64())
-            .unwrap_or(1) as u8;
+            .unwrap_or(2) as u8;
 
-        Ok(match tier_num {
+        let tier = match tier_num {
             1 => ContentTier::Tier1Generic,
             2 => ContentTier::Tier2Convention,
             _ => ContentTier::Tier3Constraint,
+        };
+
+        Ok(TierValidation {
+            tier,
+            confidence: 0.85,
         })
     }
-
-    /// Rule-based tier classification using pattern matching
-    fn classify_tier_rules(&self, content: &str) -> ContentTier {
-        // Check for Tier 3 indicators first (highest value)
-        if count_tier3_matches(content) >= 2 {
-            return ContentTier::Tier3Constraint;
-        }
-
-        // Check for Tier 1 indicators (lowest value)
-        let tier1_matches = count_tier1_matches(content);
-        let content_len = content.len();
-
-        // Tier 1 if many generic patterns and short content
-        if tier1_matches >= 2 && content_len < 500 {
-            return ContentTier::Tier1Generic;
-        }
-
-        // Tier 1 if high ratio of generic patterns
-        if tier1_matches >= 3 {
-            return ContentTier::Tier1Generic;
-        }
-
-        // Default to Tier 2 (middle ground)
-        ContentTier::Tier2Convention
-    }
-
-    /// Validate and potentially upgrade tier based on evidence
-    pub fn validate_tier_with_evidence(
-        &self,
-        content: &str,
-        initial_tier: ContentTier,
-    ) -> TierValidation {
-        let rule_tier = self.classify_tier_rules(content);
-
-        // If rules suggest higher tier, upgrade
-        if tier_value(rule_tier) > tier_value(initial_tier) {
-            TierValidation {
-                tier: rule_tier,
-                confidence: 0.8,
-                disagreement: Some(TierDisagreement {
-                    llm_tier: initial_tier,
-                    rule_tier,
-                    reason: "Rule-based analysis found higher-value content".to_string(),
-                }),
-            }
-        } else {
-            TierValidation {
-                tier: initial_tier,
-                confidence: 0.9,
-                disagreement: None,
-            }
-        }
-    }
-}
-
-fn tier_value(tier: ContentTier) -> u8 {
-    match tier {
-        ContentTier::Tier0Hallucinated => 0,
-        ContentTier::Tier1Generic => 1,
-        ContentTier::Tier2Convention => 2,
-        ContentTier::Tier3Constraint => 3,
-    }
-}
-
-/// Get minimum (stricter) tier
-fn tier_min(a: ContentTier, b: ContentTier) -> ContentTier {
-    if tier_value(a) < tier_value(b) { a } else { b }
 }
 
 #[derive(Default)]
@@ -481,8 +373,15 @@ pub struct JudgmentResult {
 }
 
 impl JudgmentResult {
+    /// Check if content is acceptable based on tier and quality score.
+    /// Tier classification is informational - LLM judgment on quality is authoritative.
+    /// Only Tier0 (hallucinated/invalid) content is rejected outright.
     pub fn is_acceptable(&self, min_score: f32) -> bool {
-        !matches!(self.tier, ContentTier::Tier1Generic) && self.overall_score >= min_score
+        match self.tier {
+            ContentTier::Tier0Hallucinated => false, // Invalid content always rejected
+            // Tier1/2/3 all use same threshold - LLM determines appropriateness
+            _ => self.overall_score >= min_score,
+        }
     }
 
     pub fn critical_issues(&self) -> Vec<&QualityIssue> {
@@ -533,13 +432,34 @@ mod tests {
     }
 
     #[test]
-    fn test_tier1_rejected() {
-        let result = JudgmentResult {
-            overall_score: 0.9,
+    fn test_tier1_uses_standard_threshold() {
+        // Tier1 is now treated the same as other tiers - LLM judgment is authoritative
+        // High quality Tier1 is acceptable
+        let high_quality = JudgmentResult {
+            overall_score: 0.95,
             tier: ContentTier::Tier1Generic,
             issues: vec![],
             suggestions: vec![],
         };
-        assert!(!result.is_acceptable(0.5));
+        assert!(high_quality.is_acceptable(0.5));
+
+        // Tier1 above min_score is acceptable (no special 0.9 threshold)
+        let above_threshold = JudgmentResult {
+            overall_score: 0.85,
+            tier: ContentTier::Tier1Generic,
+            issues: vec![],
+            suggestions: vec![],
+        };
+        assert!(above_threshold.is_acceptable(0.5)); // Now passes - LLM determined quality
+        assert!(!above_threshold.is_acceptable(0.9)); // Below 0.9 threshold
+
+        // Tier0 (hallucinated) is always rejected
+        let hallucinated = JudgmentResult {
+            overall_score: 0.99,
+            tier: ContentTier::Tier0Hallucinated,
+            issues: vec![],
+            suggestions: vec![],
+        };
+        assert!(!hallucinated.is_acceptable(0.5)); // Always rejected
     }
 }

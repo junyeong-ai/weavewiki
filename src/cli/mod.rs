@@ -4,4 +4,4 @@ pub mod ui;
 pub mod util;
 
 pub use progress::{ConsoleRenderer, MessageLevel, ProgressEvent, ProgressState, ProgressTracker};
-pub use util::{is_initialized, require_graph_db_path, require_initialized};
+pub use util::{is_initialized, require_initialized};

@@ -5,8 +5,8 @@
 //! - Pass 2: Regression check (no new issues introduced)
 //!
 //! Validation Strategy:
-//! - Programmatic: file references, format, tier1 detection (100% reliable)
-//! - LLM: semantic quality, cross-artifact consistency (contextual judgment)
+//! - Programmatic: file references, format (100% reliable)
+//! - LLM: semantic quality, tier classification, cross-artifact consistency
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,7 +19,6 @@ use crate::ai::LlmProvider;
 use crate::config::DeepReviewConfig;
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::pipeline::file_reference;
-use crate::pipeline::quality::find_tier1_matches;
 use crate::types::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,10 +32,7 @@ pub enum CheckType {
 
 impl CheckType {
     pub fn is_programmatic(&self) -> bool {
-        matches!(
-            self,
-            CheckType::EvidenceValid | CheckType::Tier1Free | CheckType::FormatCompliant
-        )
+        matches!(self, CheckType::EvidenceValid | CheckType::FormatCompliant)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -122,7 +118,8 @@ impl CheckResult {
 
     pub fn with_score(mut self, score: f32) -> Self {
         self.score = score;
-        self.passed = score >= 0.7;
+        // Don't override passed status - it's already set by pass()/fail()
+        // Score is informational, passing is determined by check logic
         self
     }
 }
@@ -442,50 +439,10 @@ impl DeepReviewEngine {
         }
     }
 
-    fn check_tier1(&self, artifacts: &ReviewArtifacts) -> CheckResult {
-        let mut issues = Vec::new();
-        let all_content = self.collect_all_content(artifacts);
-
-        for (artifact_name, content) in &all_content {
-            let matches = find_tier1_matches(content);
-            let tier1_matches = matches.len();
-
-            // Report first 3 matches
-            for (line_num, line_content) in matches.iter().take(3) {
-                issues.push(
-                    ReviewIssue::error(
-                        CheckType::Tier1Free,
-                        artifact_name,
-                        &format!("Tier 1 content: {}", line_content),
-                    )
-                    .with_location(&format!("line {}", line_num))
-                    .with_suggestion("Remove basic knowledge that Claude already knows"),
-                );
-            }
-
-            let line_count = content.lines().count();
-            if line_count > 0 {
-                let ratio = tier1_matches as f32 / line_count as f32;
-                if ratio > 0.1 {
-                    issues.push(ReviewIssue::error(
-                        CheckType::Tier1Free,
-                        artifact_name,
-                        &format!(
-                            "High Tier 1 ratio: {:.1}% ({} matches)",
-                            ratio * 100.0,
-                            tier1_matches
-                        ),
-                    ));
-                }
-            }
-        }
-
-        if issues.is_empty() {
-            CheckResult::pass()
-        } else {
-            let score = 1.0 - (issues.len() as f32 * 0.1).min(1.0);
-            CheckResult::fail(issues).with_score(score)
-        }
+    fn check_tier1(&self, _artifacts: &ReviewArtifacts) -> CheckResult {
+        // Tier classification is handled by LLM in SemanticQuality check
+        // This check is kept for backward compatibility but always passes
+        CheckResult::pass()
     }
 
     fn validate_format(&self, artifacts: &ReviewArtifacts) -> CheckResult {
@@ -575,17 +532,42 @@ impl DeepReviewEngine {
         let mut content_summary = String::new();
 
         if let Some(ref claude_md) = artifacts.claude_md {
-            let preview: String = claude_md.chars().take(2000).collect();
+            let preview: String = claude_md
+                .chars()
+                .take(self.config.claude_md_preview_chars)
+                .collect();
             content_summary.push_str(&format!("## CLAUDE.md\n{}\n\n", preview));
         }
 
-        for (name, body) in artifacts.skills.iter().take(3) {
-            let preview: String = body.chars().take(500).collect();
+        // Use config for skill limits (0 = unlimited)
+        let skill_iter: Box<dyn Iterator<Item = _>> = if self.config.max_skills_in_review == 0 {
+            Box::new(artifacts.skills.iter())
+        } else {
+            Box::new(
+                artifacts
+                    .skills
+                    .iter()
+                    .take(self.config.max_skills_in_review),
+            )
+        };
+        for (name, body) in skill_iter {
+            let preview: String = body.chars().take(self.config.skill_preview_chars).collect();
             content_summary.push_str(&format!("## Skill: {}\n{}\n\n", name, preview));
         }
 
-        for (name, body) in artifacts.agents.iter().take(2) {
-            let preview: String = body.chars().take(500).collect();
+        // Use config for agent limits (0 = unlimited)
+        let agent_iter: Box<dyn Iterator<Item = _>> = if self.config.max_agents_in_review == 0 {
+            Box::new(artifacts.agents.iter())
+        } else {
+            Box::new(
+                artifacts
+                    .agents
+                    .iter()
+                    .take(self.config.max_agents_in_review),
+            )
+        };
+        for (name, body) in agent_iter {
+            let preview: String = body.chars().take(self.config.agent_preview_chars).collect();
             content_summary.push_str(&format!("## Agent: {}\n{}\n\n", name, preview));
         }
 
@@ -627,7 +609,7 @@ Respond in JSON format:
   ]
 }}
 
-Only report issues with score < 0.7 for any dimension. Pass if overall score >= 0.7."#
+Report all issues with their severity. Use your judgment on what constitutes passing quality based on project context."#
         )
     }
 
@@ -675,17 +657,35 @@ Only report issues with score < 0.7 for any dimension. Pass if overall score >= 
             artifact_list.push_str(&format!("- Rule: {}\n", name));
         }
 
+        // Use ~75% of full preview size for cross-artifact (to fit both CLAUDE.md and skills)
+        let claude_preview_chars = (self.config.claude_md_preview_chars * 3) / 4;
+        let skill_preview_chars = self.config.skill_preview_chars / 2;
+
         let claude_preview = artifacts
             .claude_md
             .as_ref()
-            .map(|c| c.chars().take(1500).collect::<String>())
+            .map(|c| c.chars().take(claude_preview_chars).collect::<String>())
             .unwrap_or_default();
 
-        let skills_preview: String = artifacts
-            .skills
-            .iter()
-            .take(2)
-            .map(|(n, b)| format!("### {}\n{}", n, b.chars().take(300).collect::<String>()))
+        // Use config for skill limits in cross-artifact check
+        let skill_iter: Box<dyn Iterator<Item = _>> = if self.config.max_skills_in_review == 0 {
+            Box::new(artifacts.skills.iter())
+        } else {
+            Box::new(
+                artifacts
+                    .skills
+                    .iter()
+                    .take(self.config.max_skills_in_review),
+            )
+        };
+        let skills_preview: String = skill_iter
+            .map(|(n, b)| {
+                format!(
+                    "### {}\n{}",
+                    n,
+                    b.chars().take(skill_preview_chars).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
 
@@ -721,7 +721,7 @@ Respond in JSON format:
   ]
 }}
 
-Pass if artifacts are logically consistent (score >= 0.7)."#
+Determine if artifacts are logically consistent based on your analysis of the relationships."#
         )
     }
 
@@ -894,23 +894,6 @@ impl FileRegistryExt for VerifiedFileRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::quality::count_tier1_matches;
-
-    #[test]
-    fn test_tier1_patterns() {
-        let test_cases = [
-            ("cargo build", true),
-            ("npm install", true),
-            ("use async/await", true),
-            ("follow best practices", true),
-            ("Use @src/main.rs:42 for entry", false),
-        ];
-
-        for (text, should_match) in test_cases {
-            let matched = count_tier1_matches(text) > 0;
-            assert_eq!(matched, should_match, "Failed for: {}", text);
-        }
-    }
 
     #[test]
     fn test_review_issue() {

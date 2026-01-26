@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::AnalysisConfig;
 use crate::types::Result;
 
 use super::analysis::DeepAnalysisResult;
@@ -120,7 +121,7 @@ impl ClaudegenContext {
         self.analysis_results.deep_analysis = Some(analysis);
     }
 
-    pub fn set_synthesis(&mut self, synthesis: super::analysis::SynthesizedAnalysis) {
+    pub fn set_synthesis(&mut self, synthesis: &super::analysis::SynthesizedAnalysis) {
         self.analysis_results.synthesis = Some(AnalysisSynthesis {
             confidence: synthesis.confidence.overall,
             modules: synthesis.modules.iter().map(|m| m.name.clone()).collect(),
@@ -194,13 +195,102 @@ impl ClaudegenContext {
 // VerifiedFileRegistry - File validation for LLM references
 // ════════════════════════════════════════════════════════════════════════════
 
-const MAX_RECURSION_DEPTH: usize = 50;
+use ignore::WalkBuilder;
+
+/// Enhanced file metadata for 100% coverage analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMetadata {
+    pub path: String,
+    pub line_count: usize,
+    pub extension: Option<String>,
+    pub parent_module: String,
+    pub estimated_complexity: u8,
+    pub estimated_tokens: usize,
+}
+
+impl FileMetadata {
+    fn new(path: String, line_count: usize) -> Self {
+        let extension = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_string());
+
+        let parent_module = Self::extract_parent_module(&path);
+        let estimated_complexity = Self::estimate_complexity(line_count);
+        let estimated_tokens = Self::estimate_tokens(line_count);
+
+        Self {
+            path,
+            line_count,
+            extension,
+            parent_module,
+            estimated_complexity,
+            estimated_tokens,
+        }
+    }
+
+    fn extract_parent_module(path: &str) -> String {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            if parts[0] == "src" && parts.len() >= 3 {
+                parts[1].to_string()
+            } else {
+                parts[0].to_string()
+            }
+        } else {
+            String::from("root")
+        }
+    }
+
+    fn estimate_complexity(line_count: usize) -> u8 {
+        match line_count {
+            0..=50 => 10,
+            51..=150 => 25,
+            151..=300 => 40,
+            301..=500 => 55,
+            501..=800 => 70,
+            801..=1200 => 85,
+            _ => 100,
+        }
+    }
+
+    fn estimate_tokens(line_count: usize) -> usize {
+        (line_count as f64 * 15.0) as usize
+    }
+
+    pub fn is_source_file(&self) -> bool {
+        matches!(
+            self.extension.as_deref(),
+            Some(
+                "rs" | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "py"
+                    | "go"
+                    | "kt"
+                    | "java"
+                    | "cs"
+                    | "cpp"
+                    | "c"
+                    | "swift"
+                    | "rb"
+                    | "php"
+                    | "scala"
+                    | "ex"
+                    | "sh"
+                    | "bash"
+            )
+        )
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct VerifiedFileRegistry {
     verified_files: HashSet<String>,
     file_to_line_count: HashMap<String, usize>,
     directories: HashSet<String>,
+    file_metadata: HashMap<String, FileMetadata>,
 }
 
 impl VerifiedFileRegistry {
@@ -208,67 +298,85 @@ impl VerifiedFileRegistry {
         Self::default()
     }
 
+    /// Build registry with default analysis config
     pub async fn build(project_root: &Path) -> Result<Self> {
-        let mut registry = Self::default();
-        registry
-            .scan_directory(project_root, project_root, 0)
-            .await?;
-        Ok(registry)
+        Self::build_with_config(project_root, &AnalysisConfig::default()).await
     }
 
-    async fn scan_directory(&mut self, root: &Path, current: &Path, depth: usize) -> Result<()> {
-        if depth > MAX_RECURSION_DEPTH {
-            tracing::warn!(path = %current.display(), "Max directory depth exceeded, skipping");
-            return Ok(());
-        }
+    /// Build registry respecting analysis include/exclude patterns and gitignore
+    ///
+    /// Uses ignore crate's WalkBuilder for consistent gitignore handling with FileScanner.
+    pub async fn build_with_config(project_root: &Path, config: &AnalysisConfig) -> Result<Self> {
+        let mut registry = Self::default();
+        let excludes: Vec<glob::Pattern> = config
+            .exclude
+            .iter()
+            .filter_map(|p| glob::Pattern::new(p).ok())
+            .collect();
+        let includes: Vec<glob::Pattern> = config
+            .include
+            .iter()
+            .filter_map(|p| glob::Pattern::new(p).ok())
+            .collect();
 
-        let mut entries = match tokio::fs::read_dir(current).await {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
-        };
+        // Use ignore crate for gitignore-aware walking (consistent with FileScanner)
+        let walker = WalkBuilder::new(project_root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .follow_links(false)
+            .build();
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        for entry in walker.filter_map(|e| e.ok()) {
             let path = entry.path();
 
-            if Self::should_skip(&path) {
-                continue;
-            }
-
-            if let Ok(relative) = path.strip_prefix(root) {
+            if let Ok(relative) = path.strip_prefix(project_root) {
                 let relative_str = relative.to_string_lossy().to_string();
 
+                // Skip empty path (root)
+                if relative_str.is_empty() {
+                    continue;
+                }
+
+                // Check exclude patterns
+                if excludes.iter().any(|p| p.matches(&relative_str)) {
+                    continue;
+                }
+
+                // Skip hidden unless explicitly included
+                if Self::is_hidden(path) && !includes.iter().any(|p| p.matches(&relative_str)) {
+                    continue;
+                }
+
                 if path.is_dir() {
-                    self.directories.insert(relative_str.clone());
-                    Box::pin(self.scan_directory(root, &path, depth + 1)).await?;
+                    registry.directories.insert(relative_str);
                 } else if path.is_file() {
-                    let line_count = Self::count_lines(&path).await.unwrap_or(0);
-                    self.verified_files.insert(relative_str.clone());
-                    self.file_to_line_count.insert(relative_str, line_count);
+                    let matches_include =
+                        includes.is_empty() || includes.iter().any(|p| p.matches(&relative_str));
+                    if matches_include {
+                        let line_count = Self::count_lines(path).await.unwrap_or(0);
+                        registry.verified_files.insert(relative_str.clone());
+                        registry
+                            .file_to_line_count
+                            .insert(relative_str.clone(), line_count);
+                        registry.file_metadata.insert(
+                            relative_str.clone(),
+                            FileMetadata::new(relative_str, line_count),
+                        );
+                    }
                 }
             }
         }
 
-        Ok(())
+        Ok(registry)
     }
 
-    fn should_skip(path: &Path) -> bool {
-        let skip_dirs = [
-            ".git",
-            "target",
-            "node_modules",
-            "dist",
-            "build",
-            ".venv",
-            "__pycache__",
-            ".claudegen",
-            ".claude",
-            "vendor",
-        ];
-
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            return skip_dirs.contains(&name) || name.starts_with('.');
-        }
-        false
+    fn is_hidden(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false)
     }
 
     async fn count_lines(path: &Path) -> Result<usize> {
@@ -276,19 +384,23 @@ impl VerifiedFileRegistry {
         Ok(content.lines().count())
     }
 
+    /// Normalize path by stripping optional @ prefix (used in documentation references)
+    fn normalize_path(path: &str) -> &str {
+        path.strip_prefix('@').unwrap_or(path)
+    }
+
     pub fn contains(&self, path: &str) -> bool {
-        let normalized = path.strip_prefix('@').unwrap_or(path);
-        self.verified_files.contains(normalized)
+        self.verified_files.contains(Self::normalize_path(path))
     }
 
     pub fn directory_exists(&self, path: &str) -> bool {
-        let normalized = path.strip_prefix('@').unwrap_or(path);
-        self.directories.contains(normalized)
+        self.directories.contains(Self::normalize_path(path))
     }
 
     pub fn line_count(&self, path: &str) -> Option<usize> {
-        let normalized = path.strip_prefix('@').unwrap_or(path);
-        self.file_to_line_count.get(normalized).copied()
+        self.file_to_line_count
+            .get(Self::normalize_path(path))
+            .copied()
     }
 
     pub fn file_count(&self) -> usize {
@@ -314,6 +426,52 @@ impl VerifiedFileRegistry {
             .filter(|f| f.starts_with(normalized) && f.len() > normalized.len())
             .cloned()
             .collect()
+    }
+
+    pub fn get_metadata(&self, path: &str) -> Option<&FileMetadata> {
+        self.file_metadata.get(Self::normalize_path(path))
+    }
+
+    pub fn all_metadata(&self) -> impl Iterator<Item = &FileMetadata> {
+        self.file_metadata.values()
+    }
+
+    pub fn files_by_module(&self) -> HashMap<String, Vec<&FileMetadata>> {
+        let mut by_module: HashMap<String, Vec<&FileMetadata>> = HashMap::new();
+        for meta in self.file_metadata.values() {
+            by_module
+                .entry(meta.parent_module.clone())
+                .or_default()
+                .push(meta);
+        }
+        by_module
+    }
+
+    pub fn total_lines(&self) -> usize {
+        self.file_to_line_count.values().sum()
+    }
+
+    pub fn total_estimated_tokens(&self) -> usize {
+        self.file_metadata
+            .values()
+            .map(|m| m.estimated_tokens)
+            .sum()
+    }
+
+    pub fn source_files(&self) -> impl Iterator<Item = &FileMetadata> {
+        self.file_metadata.values().filter(|m| m.is_source_file())
+    }
+
+    pub fn modules(&self) -> Vec<String> {
+        let mut modules: Vec<_> = self
+            .file_metadata
+            .values()
+            .map(|m| m.parent_module.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        modules.sort();
+        modules
     }
 
     pub fn to_prompt_context(&self, max_files: usize) -> String {
@@ -346,17 +504,35 @@ impl VerifiedFileRegistry {
     }
 
     pub fn get_code_samples(&self, max_files: usize) -> String {
+        // Language-agnostic priority patterns for common entry points and core directories
         let priority_patterns = [
-            "src/main.rs",
-            "src/lib.rs",
-            "src/pipeline/",
-            "src/ai/",
-            "src/config/",
-            "src/types/",
+            // Entry points (various languages)
+            "main.",
+            "index.",
+            "app.",
+            "server.",
+            "lib.",
+            // Common source directories
+            "/src/",
+            "/lib/",
+            "/pkg/",
+            "/internal/",
+            "/cmd/",
+            // Configuration and types
+            "/config/",
+            "/types/",
+            "/models/",
+            "/schemas/",
+            // Core logic
+            "/core/",
+            "/domain/",
+            "/services/",
+            "/handlers/",
         ];
 
         let mut selected_files: Vec<&String> = Vec::new();
 
+        // First pass: match priority patterns
         for pattern in &priority_patterns {
             for file in &self.verified_files {
                 if file.contains(pattern)
@@ -368,11 +544,17 @@ impl VerifiedFileRegistry {
             }
         }
 
+        // Second pass: add any source files (language-agnostic extension check)
+        let source_extensions = [
+            ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".kt", ".java", ".cs", ".cpp", ".c",
+            ".swift", ".rb", ".php", ".scala", ".ex",
+        ];
         for file in &self.verified_files {
             if selected_files.len() >= max_files {
                 break;
             }
-            if file.ends_with(".rs") && !selected_files.contains(&file) {
+            let is_source = source_extensions.iter().any(|ext| file.ends_with(ext));
+            if is_source && !selected_files.contains(&file) {
                 selected_files.push(file);
             }
         }

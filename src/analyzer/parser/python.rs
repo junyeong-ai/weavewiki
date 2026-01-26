@@ -57,14 +57,14 @@ impl Parser for PythonParser {
 }
 
 fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (import_statement
             name: (dotted_name) @name
         )
         (import_from_statement
             module_name: (dotted_name) @module
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_python::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -96,11 +96,11 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (class_definition
             name: (identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_python::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();
@@ -138,12 +138,12 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (function_definition
             name: (identifier) @name
             parameters: (parameters) @params
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(&tree_sitter_python::LANGUAGE.into(), query_str) {
         let mut cursor = QueryCursor::new();

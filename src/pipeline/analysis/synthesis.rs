@@ -266,22 +266,17 @@ pub enum GapImpact {
     Low,
 }
 
-/// Merged module from multiple sources
+/// Merged module from multiple analysis sources.
 #[derive(Debug, Clone)]
 pub struct MergedModule {
     pub name: String,
     pub path: String,
     pub responsibility: String,
-    pub file_count: usize,
-    pub key_files: Vec<String>,
-    /// From deep analysis
     pub patterns: Vec<String>,
-    /// From deep analysis
     pub constraints: Vec<String>,
-    /// From structural analysis
     pub coverage_score: f32,
-    /// Combined from all sources
     pub public_items: Vec<String>,
+    pub internal_deps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -504,14 +499,13 @@ impl AnalysisSynthesizer {
             .map(|m| m.name.as_str())
             .collect();
 
-        // Collect all modules from structural analysis (missing + partial + fully covered)
         let structural_modules: HashSet<_> = structural
             .coverage_report
             .missing_modules
             .iter()
             .chain(structural.coverage_report.partially_covered.iter())
             .chain(structural.coverage_report.fully_covered.iter())
-            .map(|m| m.module.name.as_str())
+            .map(|m| m.name.as_str())
             .collect();
 
         // Find confirmed modules (in both)
@@ -606,7 +600,6 @@ impl AnalysisSynthesizer {
     ) -> Vec<MergedModule> {
         let mut modules: HashMap<String, MergedModule> = HashMap::new();
 
-        // Start with deep analysis modules
         for core in &deep.structure.core_modules {
             modules.insert(
                 core.name.clone(),
@@ -614,19 +607,16 @@ impl AnalysisSynthesizer {
                     name: core.name.clone(),
                     path: core.path.clone(),
                     responsibility: core.responsibility.clone(),
-                    file_count: 0,
-                    key_files: vec![core.path.clone()],
                     patterns: Vec::new(),
                     constraints: Vec::new(),
                     coverage_score: 0.0,
                     public_items: core.public_items.clone(),
+                    internal_deps: core.internal_deps.clone(),
                 },
             );
         }
 
-        // Enrich with structural analysis from all coverage categories
         if let Some(structural) = structural {
-            // Iterate over all module coverage types (missing + partial + fully covered)
             let all_coverage = structural
                 .coverage_report
                 .missing_modules
@@ -634,39 +624,31 @@ impl AnalysisSynthesizer {
                 .chain(structural.coverage_report.partially_covered.iter())
                 .chain(structural.coverage_report.fully_covered.iter());
 
-            for module_coverage in all_coverage {
-                let module = &module_coverage.module;
-                if let Some(merged) = modules.get_mut(&module.name) {
-                    merged.file_count = module.file_count;
-                    merged.key_files = module.key_files.clone();
-                    merged.coverage_score = module_coverage.coverage_score;
+            for mc in all_coverage {
+                if let Some(merged) = modules.get_mut(&mc.name) {
+                    merged.coverage_score = mc.coverage_score;
                 } else {
                     modules.insert(
-                        module.name.clone(),
+                        mc.name.clone(),
                         MergedModule {
-                            name: module.name.clone(),
-                            path: module.key_files.first().cloned().unwrap_or_default(),
-                            responsibility: String::new(),
-                            file_count: module.file_count,
-                            key_files: module.key_files.clone(),
+                            name: mc.name.clone(),
+                            path: mc.path.clone(),
+                            responsibility: mc.responsibility.clone(),
                             patterns: Vec::new(),
                             constraints: Vec::new(),
-                            coverage_score: module_coverage.coverage_score,
+                            coverage_score: mc.coverage_score,
                             public_items: Vec::new(),
+                            internal_deps: Vec::new(),
                         },
                     );
                 }
             }
         }
 
-        // Associate patterns with modules
         for pattern in &deep.patterns {
             for location in &pattern.locations {
-                // Find the module that owns this file
                 for module in modules.values_mut() {
-                    if location.file.contains(&module.name)
-                        || module.key_files.iter().any(|f| f == &location.file)
-                    {
+                    if location.file.contains(&module.name) || location.file == module.path {
                         if !module.patterns.contains(&pattern.name) {
                             module.patterns.push(pattern.name.clone());
                         }
@@ -676,13 +658,10 @@ impl AnalysisSynthesizer {
             }
         }
 
-        // Associate constraints with modules
         for constraint in &deep.constraints {
             for evidence in &constraint.evidence {
                 for module in modules.values_mut() {
-                    if evidence.file.contains(&module.name)
-                        || module.key_files.iter().any(|f| f == &evidence.file)
-                    {
+                    if evidence.file.contains(&module.name) || evidence.file == module.path {
                         if !module.constraints.contains(&constraint.title) {
                             module.constraints.push(constraint.title.clone());
                         }
@@ -705,27 +684,52 @@ impl AnalysisSynthesizer {
         let conflict_count = validation.conflicts.len() as f32;
         let gap_count = validation.gaps.len() as f32;
 
-        // Base confidence from confirmation ratio
+        // =================================================================
+        // CONFIDENCE CALCULATION - ADVISORY HEURISTICS
+        //
+        // NOTE: These confidence scores are programmatic ESTIMATES, not
+        // authoritative judgments. The multipliers and weights below are
+        // heuristics that may not fit all project types.
+        //
+        // LLM should use these as INPUT signals but can override based on:
+        // - Project domain (crypto needs fewer patterns, many constraints)
+        // - Project size (small projects may have sparse findings)
+        // - Project type (libraries vs apps vs services)
+        //
+        // These scores are used for:
+        // - Prioritizing re-analysis targets
+        // - Ordering synthesis results
+        // - Progress reporting
+        //
+        // They should NOT be used to:
+        // - Reject valid analysis findings
+        // - Override LLM quality assessments
+        // - Make binary pass/fail decisions
+        // =================================================================
+
+        // Base confidence from confirmation ratio (0.5 default when no data)
         let base_confidence = if confirmed_count + conflict_count > 0.0 {
             confirmed_count / (confirmed_count + conflict_count)
         } else {
-            0.5
+            0.5 // Unknown = neutral confidence
         };
 
-        // Penalty for gaps
+        // Gap penalty: 0.05 per gap, max 0.3 penalty (heuristic)
         let gap_penalty = (gap_count * 0.05).min(0.3);
 
         // Architecture confidence
+        // NOTE: Empty structure is NOT necessarily bad (libraries may have no entry points)
+        // The 0.2 baseline is a conservative estimate, not a penalty
         let architecture =
             if deep.structure.entry_points.is_empty() && deep.structure.core_modules.is_empty() {
-                0.2
+                0.2 // Baseline for unknown structure (not a penalty)
             } else {
                 base_confidence - gap_penalty * 0.5
             };
 
-        // Pattern confidence
+        // Pattern confidence (ratio of patterns with valid locations)
         let patterns = if deep.patterns.is_empty() {
-            0.2
+            0.2 // Baseline when no patterns found
         } else {
             let valid_patterns = deep
                 .patterns
@@ -735,9 +739,9 @@ impl AnalysisSynthesizer {
             (valid_patterns / deep.patterns.len() as f32) * base_confidence
         };
 
-        // Constraint confidence
+        // Constraint confidence (ratio of constraints with evidence)
         let constraints = if deep.constraints.is_empty() {
-            0.3
+            0.3 // Baseline when no constraints found
         } else {
             let with_evidence = deep
                 .constraints
@@ -747,9 +751,9 @@ impl AnalysisSynthesizer {
             (with_evidence / deep.constraints.len() as f32) * base_confidence
         };
 
-        // Dependency confidence (based on actual imports found)
+        // Dependency confidence (code parsing is generally reliable)
         let dependencies = if deep.dependencies.is_empty() {
-            0.5
+            0.5 // Unknown
         } else {
             0.7 // Dependencies from code parsing are reliable
         };
@@ -760,6 +764,8 @@ impl AnalysisSynthesizer {
             .unwrap_or(0.5);
 
         // Overall weighted average
+        // NOTE: These weights (0.2, 0.25, 0.25, 0.1, 0.2) are heuristics.
+        // Different projects may warrant different weightings.
         let overall = (architecture * 0.2
             + patterns * 0.25
             + constraints * 0.25

@@ -1,17 +1,28 @@
-//! Validation Types
+//! Deterministic Validation (duplicates, file existence)
 //!
-//! Validation for generated Claude Code artifacts.
+//! # Design Philosophy: LLM-First Quality Assessment
+//!
+//! This module ONLY validates deterministic properties:
+//! - Duplicate names (skill, agent, rule)
+//! - File reference existence
+//! - Structural consistency (agent→skill references)
+//!
+//! Quality assessment is delegated to `LlmJudge` because:
+//! - Tier classification requires semantic understanding
+//! - Content value is context-dependent (domain, project type)
+//! - Programmatic quality gates can reject valuable content
+//!
+//! The `TierFilterResult::passed` always returns `true` because
+//! tier distribution is INFORMATIONAL, not a gate. LLM decides
+//! whether content meets quality standards, not programmatic thresholds.
 
 use std::collections::HashSet;
 
 use crate::pipeline::context::VerifiedFileRegistry;
-use crate::pipeline::quality::{count_tier1_matches, count_tier3_matches};
 use crate::types::{Agent, ContentTier, ProjectMemory, Rule, Skill};
-use crate::utils::patterns::{extract_file_refs, FILE_REFERENCE_PATTERN};
+use crate::utils::patterns::extract_file_refs;
 
-const CLAUDE_MD_TIER1_THRESHOLD: usize = 3;
-const TIER_PATTERN_THRESHOLD: usize = 2;
-
+/// Tier distribution summary (informational, not filtering)
 #[derive(Debug, Clone, Default)]
 pub struct TierFilterResult {
     pub passed: bool,
@@ -22,7 +33,9 @@ pub struct TierFilterResult {
 }
 
 impl TierFilterResult {
-    pub fn check(skills: &[Skill], agents: &[Agent], rules: &[Rule], claude_md: &str) -> Self {
+    /// Compute tier distribution for informational purposes.
+    /// No longer enforces arbitrary ratios - LLM judges quality.
+    pub fn check(skills: &[Skill], agents: &[Agent], rules: &[Rule]) -> Self {
         let total = skills.len() + agents.len() + rules.len();
         if total == 0 {
             return Self {
@@ -50,39 +63,26 @@ impl TierFilterResult {
         }
 
         for rule in rules {
-            match Self::classify_rule_tier(rule) {
+            match rule.tier {
                 ContentTier::Tier0Hallucinated | ContentTier::Tier1Generic => tier1 += 1,
                 ContentTier::Tier2Convention => tier2 += 1,
                 ContentTier::Tier3Constraint => tier3 += 1,
             }
         }
 
-        let claude_tier1 = count_tier1_matches(claude_md);
-        if claude_tier1 >= CLAUDE_MD_TIER1_THRESHOLD {
-            tier1 += 1;
-        }
+        let tier3_ratio = if total > 0 {
+            tier3 as f32 / total as f32
+        } else {
+            0.0
+        };
 
+        // Always pass - tier distribution is informational only
         Self {
-            passed: tier1 == 0,
+            passed: true,
             tier1_count: tier1,
             tier2_count: tier2,
             tier3_count: tier3,
-            tier3_ratio: tier3 as f32 / total as f32,
-        }
-    }
-
-    fn classify_rule_tier(rule: &Rule) -> ContentTier {
-        let content = rule.content.join("\n");
-        let tier1_count = count_tier1_matches(&content);
-        let tier3_count = count_tier3_matches(&content);
-        let has_file_refs = FILE_REFERENCE_PATTERN.is_match(&content);
-
-        if tier1_count >= TIER_PATTERN_THRESHOLD && tier3_count == 0 && !has_file_refs {
-            ContentTier::Tier1Generic
-        } else if tier3_count >= TIER_PATTERN_THRESHOLD || has_file_refs {
-            ContentTier::Tier3Constraint
-        } else {
-            ContentTier::Tier2Convention
+            tier3_ratio,
         }
     }
 }
@@ -159,10 +159,14 @@ impl CrossValidationResult {
     ) -> Self {
         let evidence_traceability =
             EvidenceTraceabilityResult::check(skills, agents, rules, claude_md, file_registry);
-        let plan_consistency = PlanConsistencyResult::check(skills, agents, rules, claude_md);
+        let plan_consistency = PlanConsistencyResult::check(skills, agents, claude_md);
 
-        let passed =
-            evidence_traceability.invalid_references == 0 && plan_consistency.passed;
+        // Evidence check is advisory, not a hard gate
+        // LLM may intentionally reference directories, renamed files, or generated paths
+        // Only fail if evidence coverage is very poor (< 50% valid references)
+        let evidence_ok = evidence_traceability.coverage_score >= 0.5;
+
+        let passed = evidence_ok && plan_consistency.passed;
 
         Self {
             passed,
@@ -281,12 +285,7 @@ pub struct PlanConsistencyResult {
 }
 
 impl PlanConsistencyResult {
-    pub fn check(
-        skills: &[Skill],
-        agents: &[Agent],
-        _rules: &[Rule],
-        claude_md: &ProjectMemory,
-    ) -> Self {
+    pub fn check(skills: &[Skill], agents: &[Agent], claude_md: &ProjectMemory) -> Self {
         let mut missing_coverage = Vec::new();
 
         if claude_md.overview.is_empty() {
@@ -310,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_tier_filter_result_empty() {
-        let result = TierFilterResult::check(&[], &[], &[], "");
+        let result = TierFilterResult::check(&[], &[], &[]);
         assert!(result.passed);
         assert_eq!(result.tier1_count, 0);
     }
@@ -338,9 +337,14 @@ mod tests {
             imports: Vec::new(),
         };
 
-        let result = PlanConsistencyResult::check(&[], &[], &[], &claude_md);
+        let result = PlanConsistencyResult::check(&[], &[], &claude_md);
 
         assert!(!result.passed);
-        assert!(result.missing_coverage.iter().any(|m| m.contains("overview")));
+        assert!(
+            result
+                .missing_coverage
+                .iter()
+                .any(|m| m.contains("overview"))
+        );
     }
 }

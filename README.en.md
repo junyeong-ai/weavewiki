@@ -23,7 +23,10 @@
 ```
 project/
 ├── CLAUDE.md                          # Project memory (rules, guidelines)
-├── .claudegen/                        # Internal data (graph, cache, config)
+├── .claude/
+│   └── rules/                         # Path-based rules
+│       └── {rule-name}.md
+├── .claudegen/                        # Internal data (cache, config, checkpoints)
 │   └── config.toml
 └── {project-name}-plugin/             # Plugin directory
     ├── .claude-plugin/
@@ -62,11 +65,9 @@ claudegen generate                    # Generate plugin
 claudegen generate --dry-run          # Preview config only
 ```
 
-### Code Analysis
+### Validation
 ```bash
-claudegen analyze                     # Analyze code structure
-claudegen query "src/main.rs"         # Query dependencies
-claudegen validate                    # Verify output
+claudegen validate                    # Verify generated plugin
 ```
 
 ### Management

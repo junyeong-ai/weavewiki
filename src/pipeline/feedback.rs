@@ -5,6 +5,9 @@
 
 use std::collections::HashMap;
 
+/// Maximum number of suggestions to return (0 = unlimited)
+const MAX_SUGGESTIONS: usize = 10; // Increased from hardcoded 5
+
 use serde::{Deserialize, Serialize};
 
 use super::analysis::architectural_analyzer::StructuralValidationResult;
@@ -108,7 +111,8 @@ impl FeedbackAggregator {
         structural: Option<&StructuralValidationResult>,
         cross_validation: Option<&CrossValidationResult>,
     ) -> AggregatedFeedback {
-        let dimension_scores = self.calculate_dimension_scores(judgment, structural, cross_validation);
+        let dimension_scores =
+            self.calculate_dimension_scores(judgment, structural, cross_validation);
         let overall_score = self.calculate_overall_score(&dimension_scores);
         let converged = overall_score >= self.target_quality
             && dimension_scores.all_pass(self.dimension_pass_threshold);
@@ -176,12 +180,9 @@ impl FeedbackAggregator {
                 issues.push(PrioritizedIssue {
                     priority: Severity::High,
                     source: ValidationSource::Structural,
-                    artifact: format!("module:{}", missing.module.name),
-                    description: format!("Module '{}' is not documented", missing.module.name),
-                    suggestion: format!(
-                        "Add documentation covering @{}",
-                        missing.module.key_files.first().unwrap_or(&"src/".into())
-                    ),
+                    artifact: format!("module:{}", missing.name),
+                    description: format!("Module '{}' is not documented", missing.name),
+                    suggestion: format!("Add documentation covering @{}", missing.path),
                     impact_score: 0.8,
                 });
             }
@@ -227,10 +228,15 @@ impl FeedbackAggregator {
             .filter(|i| i.priority == Severity::Critical)
             .count();
         if critical_count > 0 {
-            suggestions.insert(0, format!("Address {} critical issues first", critical_count));
+            suggestions.insert(
+                0,
+                format!("Address {} critical issues first", critical_count),
+            );
         }
 
-        suggestions.truncate(5);
+        if MAX_SUGGESTIONS > 0 {
+            suggestions.truncate(MAX_SUGGESTIONS);
+        }
         suggestions
     }
 
@@ -251,7 +257,7 @@ impl FeedbackAggregator {
                 .coverage_report
                 .missing_modules
                 .iter()
-                .map(|m| m.module.name.clone())
+                .map(|m| m.name.clone())
                 .collect();
         }
 

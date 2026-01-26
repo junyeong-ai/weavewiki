@@ -20,7 +20,6 @@ pub struct IterationState {
     pub satisfied: bool,
     pub revision: Option<RevisionMeta>,
     pub quality_trajectory: VecDeque<f32>,
-    pub tier3_trajectory: VecDeque<usize>,
     pub history: Vec<IterationRecord>,
 }
 
@@ -53,7 +52,6 @@ pub struct IterationRecord {
 pub enum BudgetExtensionTrigger {
     QualityImproving { min_delta: f32 },
     HighUncertainty { threshold: f32 },
-    ValueDiscovery,
 }
 
 impl IterationState {
@@ -67,7 +65,6 @@ impl IterationState {
             satisfied: false,
             revision: None,
             quality_trajectory: VecDeque::with_capacity(MAX_TRAJECTORY_SIZE),
-            tier3_trajectory: VecDeque::with_capacity(MAX_TRAJECTORY_SIZE),
             history: Vec::new(),
         }
     }
@@ -90,7 +87,6 @@ impl IterationState {
                 self.is_quality_improving(min_delta)
             }
             BudgetExtensionTrigger::HighUncertainty { threshold } => self.uncertainty > threshold,
-            BudgetExtensionTrigger::ValueDiscovery => self.is_tier3_increasing(),
         };
 
         if should_extend {
@@ -107,14 +103,6 @@ impl IterationState {
         }
         let len = self.quality_trajectory.len();
         self.quality_trajectory[len - 1] - self.quality_trajectory[len - 2] >= min_delta
-    }
-
-    fn is_tier3_increasing(&self) -> bool {
-        if self.tier3_trajectory.len() < 2 {
-            return false;
-        }
-        let len = self.tier3_trajectory.len();
-        self.tier3_trajectory[len - 1] > self.tier3_trajectory[len - 2]
     }
 
     pub fn calculate_uncertainty(&mut self) {
@@ -162,13 +150,6 @@ impl IterationState {
         }
         self.quality_trajectory.push_back(quality);
         self.calculate_uncertainty();
-    }
-
-    pub fn record_tier3(&mut self, count: usize) {
-        if self.tier3_trajectory.len() >= MAX_TRAJECTORY_SIZE {
-            self.tier3_trajectory.pop_front();
-        }
-        self.tier3_trajectory.push_back(count);
     }
 
     pub fn record(&mut self, record: IterationRecord) {

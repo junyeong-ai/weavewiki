@@ -1,13 +1,56 @@
+//! File Scanner - Public API for codebase scanning
+//!
+//! This module provides a gitignore-aware file scanner for external consumers
+//! who need to scan codebases with the same filtering logic as claudegen.
+//!
+//! # Public API
+//!
+//! `FileScanner` is exported as part of the public API (`claudegen::FileScanner`)
+//! for use by external tools and integrations. Internal claudegen components
+//! use `WalkBuilder` directly for specific requirements.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use claudegen::FileScanner;
+//! use claudegen::config::AnalysisConfig;
+//!
+//! let scanner = FileScanner::new("./my-project", &AnalysisConfig::default())
+//!     .source_only();
+//!
+//! for file in scanner.scan()? {
+//!     println!("{}", file.path.display());
+//! }
+//! ```
+
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 
 use crate::config::AnalysisConfig;
 use crate::types::Result;
 
-/// Common source code extensions
+/// Common source code extensions - language-agnostic, comprehensive list
+/// Includes mainstream and emerging languages for broad coverage
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "rb", "c", "cpp", "h", "hpp", "cs",
-    "swift", "scala", "php", "lua", "sh", "bash", "zsh",
+    // Systems languages
+    "rs", "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "zig", "nim", "v",
+    // JVM languages
+    "java", "kt", "kts", "scala", "sc", "groovy", "clj", "cljs", "cljc",
+    // .NET languages
+    "cs", "fs", "fsx", "vb", // Web/JavaScript ecosystem
+    "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte", "astro", // Python ecosystem
+    "py", "pyi", "pyx", "pxd", // Ruby ecosystem
+    "rb", "rake", "gemspec", "erb", // Go
+    "go",  // Swift/Apple ecosystem
+    "swift", "m", "mm", // Functional languages
+    "hs", "lhs", "ml", "mli", "ex", "exs", "erl", "hrl", "elm", "purs", "rkt",
+    // Scripting languages
+    "php", "lua", "pl", "pm", "r", "jl", // Shell scripts
+    "sh", "bash", "zsh", "fish", "ps1", "psm1", // Mobile/Cross-platform
+    "dart", "cr", // Config as code (often contains logic)
+    "nix", "dhall", // Query/Data languages
+    "sql", "graphql", "gql", // Markup with logic
+    "mdx",
 ];
 
 /// Pre-compiled pattern for efficient matching
@@ -96,6 +139,18 @@ impl CompiledPatternSet {
     }
 }
 
+/// Gitignore-aware file scanner for codebase analysis.
+///
+/// This is the **public API** for scanning files with:
+/// - `.gitignore` / `.git/info/exclude` / global gitignore support
+/// - Configurable include/exclude glob patterns
+/// - File size and sample count limits
+/// - Source-only filtering by extension
+///
+/// # Usage
+///
+/// For external consumers who need claudegen's file scanning logic.
+/// Internal components use `WalkBuilder` directly for specific requirements.
 pub struct FileScanner {
     root: PathBuf,
     /// Pre-compiled include patterns
@@ -121,13 +176,13 @@ impl FileScanner {
         }
     }
 
-    pub fn with_include(mut self, patterns: Vec<String>) -> Self {
-        self.include = CompiledPatternSet::compile(&patterns);
+    pub fn with_include(mut self, patterns: &[String]) -> Self {
+        self.include = CompiledPatternSet::compile(patterns);
         self
     }
 
-    pub fn with_exclude(mut self, patterns: Vec<String>) -> Self {
-        self.exclude = CompiledPatternSet::compile(&patterns);
+    pub fn with_exclude(mut self, patterns: &[String]) -> Self {
+        self.exclude = CompiledPatternSet::compile(patterns);
         self
     }
 

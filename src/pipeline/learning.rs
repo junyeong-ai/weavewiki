@@ -97,6 +97,31 @@ impl QualityRange {
     }
 
     /// Classify quality score using custom thresholds
+    ///
+    /// # ADVISORY HEURISTIC - ARTIFICIAL BOUNDARIES
+    ///
+    /// This classification creates DISCRETE buckets from CONTINUOUS quality scores.
+    /// The thresholds create artificial boundaries that may not reflect meaningful
+    /// quality differences:
+    ///
+    /// - A score of 0.59 → "Medium" and 0.61 → "High" are nearly identical
+    /// - Strategy recommendations based on buckets may treat them very differently
+    /// - Cross-session learning groups patterns by bucket, potentially missing nuances
+    ///
+    /// These thresholds are configurable via `LearningConfig::quality_thresholds`,
+    /// but the fundamental boundary problem remains regardless of threshold values.
+    ///
+    /// ## When buckets are useful:
+    /// - Grouping similar patterns for strategy recommendation
+    /// - Reducing noise in cross-session learning
+    /// - Coarse-grained progress tracking
+    ///
+    /// ## When buckets mislead:
+    /// - Fine-grained quality comparisons (0.79 vs 0.81)
+    /// - Determining if refinement succeeded (check raw score delta instead)
+    /// - Deciding whether to continue iteration (use continuous score + trend)
+    ///
+    /// LLM-based decisions should use raw scores when precision matters.
     pub fn from_score_with_thresholds(score: f32, thresholds: &[f32; 4]) -> Self {
         match score {
             s if s < thresholds[0] => Self::VeryLow,
@@ -149,7 +174,7 @@ impl LearningHistory {
         self.session_stats.total_improvement += record.quality_after - record.quality_before;
 
         for outcome in &record.outcomes {
-            self.record_outcome(outcome.clone());
+            self.record_outcome(outcome);
         }
 
         self.iterations.push(record);
@@ -162,7 +187,7 @@ impl LearningHistory {
         }
     }
 
-    pub fn record_outcome(&mut self, outcome: StrategyOutcome) {
+    pub fn record_outcome(&mut self, outcome: &StrategyOutcome) {
         *self
             .session_stats
             .strategy_usage
@@ -201,10 +226,10 @@ impl LearningHistory {
         };
 
         if outcome.success && outcome.improvement() > self.config.min_improvement_for_pattern {
-            self.update_resolution_path(pattern, &outcome);
+            self.update_resolution_path(pattern, outcome);
         } else if !outcome.success {
             // CRITICAL FIX: Track failures as negative patterns
-            self.record_failure(pattern, &outcome);
+            self.record_failure(pattern, outcome);
         }
     }
 
@@ -791,7 +816,7 @@ mod tests {
             iteration: 1,
         };
 
-        history.record_outcome(outcome);
+        history.record_outcome(&outcome);
 
         // Check that failure was recorded
         let failing_patterns = history.get_failing_patterns();
@@ -827,7 +852,7 @@ mod tests {
                 success: false,
                 iteration: i,
             };
-            history.record_outcome(outcome);
+            history.record_outcome(&outcome);
         }
 
         // Should NOT skip with only 2 failures
@@ -855,7 +880,7 @@ mod tests {
                 success: false,
                 iteration: i,
             };
-            history.record_outcome(outcome);
+            history.record_outcome(&outcome);
         }
 
         // Should skip with 3+ failures
@@ -883,7 +908,7 @@ mod tests {
                 success: false,
                 iteration: i,
             };
-            history.record_outcome(outcome);
+            history.record_outcome(&outcome);
         }
 
         // Different strategy should NOT be skipped
@@ -910,7 +935,7 @@ mod tests {
             success: false,
             iteration: 1,
         };
-        history.record_outcome(outcome);
+        history.record_outcome(&outcome);
 
         assert!(!history.get_failing_patterns().is_empty());
 
@@ -943,8 +968,8 @@ mod tests {
             iteration: 2,
         };
 
-        history.record_outcome(outcome1);
-        history.record_outcome(outcome2);
+        history.record_outcome(&outcome1);
+        history.record_outcome(&outcome2);
 
         let failing_patterns = history.get_failing_patterns();
         assert_eq!(failing_patterns.len(), 1);
@@ -983,7 +1008,7 @@ mod tests {
             success: true,
             iteration: 1,
         };
-        history.record_outcome(outcome);
+        history.record_outcome(&outcome);
 
         // Record a failure pattern
         let failure = StrategyOutcome {
@@ -995,7 +1020,7 @@ mod tests {
             success: false,
             iteration: 2,
         };
-        history.record_outcome(failure);
+        history.record_outcome(&failure);
 
         // Ensure patterns are recorded
         assert!(!history.issue_patterns.is_empty() || !history.get_failing_patterns().is_empty());
@@ -1090,7 +1115,7 @@ mod tests {
             success: true,
             iteration: 1,
         };
-        history.record_outcome(outcome);
+        history.record_outcome(&outcome);
 
         let failure = StrategyOutcome {
             strategy_name: "EvidenceStrategy".into(),
@@ -1101,7 +1126,7 @@ mod tests {
             success: false,
             iteration: 2,
         };
-        history.record_outcome(failure);
+        history.record_outcome(&failure);
 
         // Persist
         history.persist(&temp_dir).await.unwrap();

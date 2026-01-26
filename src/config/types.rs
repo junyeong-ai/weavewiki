@@ -40,7 +40,10 @@ impl ConfigPreset {
 
         match self {
             Self::Quick => {
+                // All Haiku for fast iteration
                 config.llm.default_model = "claude-haiku-4-5-20251001".into();
+                config.llm.fast_model = None; // Same as default
+                config.llm.performance_model = None; // Same as default
                 config.value.min_overall = 0.5;
                 config.convergence.max_iterations = 10;
                 config.convergence.consecutive_passes = 1;
@@ -57,7 +60,10 @@ impl ConfigPreset {
                 config.timeout.specialist_timeout_secs = 60;
             }
             Self::Standard => {
+                // Tiered: Haiku for fast, Sonnet for default/performance
                 config.llm.default_model = "claude-sonnet-4-5-20250929".into();
+                config.llm.fast_model = Some("claude-haiku-4-5-20251001".into());
+                config.llm.performance_model = None; // Same as default (Sonnet)
                 config.value.min_overall = 0.6;
                 config.convergence.max_iterations = 30;
                 config.convergence.consecutive_passes = 2;
@@ -74,7 +80,9 @@ impl ConfigPreset {
                 config.timeout.specialist_timeout_secs = 120;
             }
             Self::Thorough => {
+                // Full tiering: Haiku/Sonnet/Opus
                 config.llm.default_model = "claude-sonnet-4-5-20250929".into();
+                config.llm.fast_model = Some("claude-haiku-4-5-20251001".into());
                 config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
                 config.value.min_overall = 0.7;
                 config.convergence.max_iterations = 50;
@@ -92,7 +100,9 @@ impl ConfigPreset {
                 config.timeout.specialist_timeout_secs = 180;
             }
             Self::Exhaustive => {
+                // All Opus for maximum quality
                 config.llm.default_model = "claude-opus-4-5-20251101".into();
+                config.llm.fast_model = Some("claude-sonnet-4-5-20250929".into()); // Sonnet for fast tasks
                 config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
                 config.value.min_overall = 0.8;
                 config.convergence.max_iterations = 100;
@@ -164,6 +174,7 @@ pub struct Config {
     pub structural_validation: StructuralValidationConfig,
     pub cross_artifact: CrossArtifactConfig,
     pub timeout: TimeoutConfig,
+    pub distributed_analysis: DistributedAnalysisConfig,
 }
 
 impl Default for Config {
@@ -198,6 +209,7 @@ impl Default for Config {
             structural_validation: StructuralValidationConfig::default(),
             cross_artifact: CrossArtifactConfig::default(),
             timeout: TimeoutConfig::default(),
+            distributed_analysis: DistributedAnalysisConfig::default(),
         }
     }
 }
@@ -290,6 +302,15 @@ pub struct GenerationConfig {
     pub strategy: GenerationStrategy,
     pub artifacts: Vec<ArtifactType>,
     pub limits: ArtifactLimits,
+    /// Minimum value score threshold for generating rules.
+    ///
+    /// Rules with scores below this threshold are skipped during generation.
+    /// This is an ADVISORY gate - rules with lower scores may still have value
+    /// in specific contexts (e.g., critical security constraints).
+    ///
+    /// Set to 0.0 to disable filtering and let LLM decide all rule values.
+    /// Default: 0.3
+    pub min_rule_value_score: f32,
 }
 
 impl Default for GenerationConfig {
@@ -303,6 +324,7 @@ impl Default for GenerationConfig {
                 ArtifactType::Agents,
             ],
             limits: ArtifactLimits::default(),
+            min_rule_value_score: 0.3,
         }
     }
 }
@@ -599,18 +621,40 @@ pub enum DomainType {
     FinTech,
     Healthcare,
     SaaS,
+    /// Gaming/Entertainment domain
+    Gaming,
+    /// Education/EdTech domain
+    Education,
+    /// DevTools/Infrastructure domain
+    DevTools,
+    /// Insurance/InsurTech domain
+    Insurance,
+    /// Legal/LegalTech domain
+    Legal,
+    /// IoT/Embedded systems domain
+    IoT,
     #[default]
     Generic,
+    /// Custom domain discovered by LLM
+    #[serde(other)]
+    Other,
 }
 
 impl DomainType {
+    /// Returns common compliance frameworks for the domain.
+    /// For Other/custom domains, LLM should determine applicable compliance.
     pub fn default_compliance(&self) -> Vec<&'static str> {
         match self {
             Self::ECommerce => vec!["PCI-DSS", "GDPR"],
             Self::FinTech => vec!["PCI-DSS", "AML", "KYC", "SOX"],
             Self::Healthcare => vec!["HIPAA", "GDPR"],
             Self::SaaS => vec!["SOC2", "GDPR"],
-            Self::Generic => vec![],
+            Self::Gaming => vec!["COPPA", "GDPR"],
+            Self::Education => vec!["FERPA", "COPPA", "GDPR"],
+            Self::Insurance => vec!["HIPAA", "SOX", "GDPR"],
+            Self::Legal => vec!["GDPR", "attorney-client-privilege"],
+            Self::IoT => vec!["IoT-security-baseline", "GDPR"],
+            Self::DevTools | Self::Generic | Self::Other => vec![],
         }
     }
 
@@ -620,7 +664,14 @@ impl DomainType {
             Self::FinTech => "fintech",
             Self::Healthcare => "healthcare",
             Self::SaaS => "saas",
+            Self::Gaming => "gaming",
+            Self::Education => "education",
+            Self::DevTools => "devtools",
+            Self::Insurance => "insurance",
+            Self::Legal => "legal",
+            Self::IoT => "iot",
             Self::Generic => "generic",
+            Self::Other => "other",
         }
     }
 }
@@ -658,6 +709,8 @@ pub struct LlmConfig {
     pub timeout_secs: u64,
     /// Temperature (0.0 = deterministic, 1.0 = creative)
     pub temperature: f32,
+    /// Maximum tokens to generate per request
+    pub max_tokens: usize,
     /// Provider (claude-agent, openai)
     pub provider: String,
     /// Context configuration
@@ -672,6 +725,7 @@ impl Default for LlmConfig {
             fast_model: None,
             timeout_secs: 300,
             temperature: 0.0,
+            max_tokens: 4096,
             provider: "claude-agent".into(),
             context: ContextWindowConfig::default(),
         }
@@ -782,14 +836,8 @@ impl LlmConfig {
         self.fast_model.as_deref().unwrap_or(&self.default_model)
     }
 
-    pub fn model_for_phase(&self, phase: &str) -> &str {
-        match phase {
-            "project_detection" | "convention_inference" => self.fast_model(),
-            "constraint_extraction" => self.performance_model(),
-            "generation" | "verification" => &self.default_model,
-            _ => &self.default_model,
-        }
-    }
+    // Note: Phase-based model routing is handled by ProviderSet::provider_for_phase()
+    // in src/ai/provider/mod.rs. LlmConfig provides model names, ProviderSet handles routing.
 }
 
 // =============================================================================
@@ -805,6 +853,8 @@ pub struct AnalysisConfig {
     /// Maximum file size in bytes (default: 5MB)
     pub max_file_size: usize,
     pub max_file_samples: usize,
+    /// Maximum key paths to include in agent prompts
+    pub max_key_paths: usize,
 }
 
 impl Default for AnalysisConfig {
@@ -825,6 +875,7 @@ impl Default for AnalysisConfig {
             ],
             max_file_size: 5 * 1024 * 1024,
             max_file_samples: 100,
+            max_key_paths: 10, // Increased from hardcoded 6
         }
     }
 }
@@ -981,6 +1032,9 @@ pub enum BusinessRuleType {
     Calculation,
     Policy,
     Constraint,
+    /// Custom rule type discovered by LLM
+    #[serde(other)]
+    Other,
 }
 
 /// Classification configuration
@@ -1587,7 +1641,6 @@ impl AdaptiveIterationConfig {
                 extension_triggers: vec![
                     ExtensionTriggerConfig::QualityImproving,
                     ExtensionTriggerConfig::HighUncertainty,
-                    ExtensionTriggerConfig::ValueDiscovery,
                 ],
                 allow_early_exit: true,
                 min_iterations_for_exit: 5,
@@ -1600,7 +1653,6 @@ impl AdaptiveIterationConfig {
                 extension_triggers: vec![
                     ExtensionTriggerConfig::QualityImproving,
                     ExtensionTriggerConfig::HighUncertainty,
-                    ExtensionTriggerConfig::ValueDiscovery,
                 ],
                 allow_early_exit: true,
                 min_iterations_for_exit: 10,
@@ -1616,7 +1668,6 @@ impl AdaptiveIterationConfig {
 pub enum ExtensionTriggerConfig {
     QualityImproving,
     HighUncertainty,
-    ValueDiscovery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1627,10 +1678,33 @@ pub struct RefinementConfig {
     pub strategy_rotation_enabled: bool,
     pub timeout_secs: u64,
     pub adaptive_iteration: AdaptiveIterationConfig,
+    /// Number of consecutive low-improvement iterations before escalation
     pub stagnation_patience: usize,
+    /// Minimum improvement delta to reset stagnation counter
     pub stagnation_threshold: f32,
     pub require_all_dimensions: bool,
+    /// Maximum issues to address per refinement iteration
+    ///
+    /// # Advisory Configuration
+    ///
+    /// This limits how many issues are refined in a single iteration:
+    /// - Default: 5 issues per iteration
+    /// - Lower values = more focused but slower convergence
+    /// - Higher values = faster but may overwhelm LLM context
+    ///
+    /// ## When to increase:
+    /// - Large codebases with many interconnected issues
+    /// - High-quality LLM models with large context windows
+    /// - Projects where issues are largely independent
+    ///
+    /// ## When to decrease:
+    /// - Complex projects with deep interdependencies
+    /// - When refinement quality degrades with batch sizes
+    /// - Budget-constrained scenarios (fewer tokens per iteration)
+    ///
+    /// Set to 0 for unlimited (not recommended - may exceed context limits).
     pub issues_per_iteration: usize,
+    /// How many times a strategy can fail before being skipped for a pattern
     pub strategy_retry_limit: usize,
     pub oscillation_strict_passes: usize,
     pub oscillation_lenient_passes: usize,
@@ -1829,7 +1903,6 @@ pub struct QualityConfig {
     pub target_score: f32,
     pub minimum_quality: f32,
     pub min_file_refs: usize,
-    pub min_actionable_count: usize,
     pub max_tier1_ratio: f32,
     pub reference_only_mode: bool,
     pub scoring: TierScoringWeights,
@@ -1848,7 +1921,6 @@ impl Default for QualityConfig {
             target_score: 0.8,
             minimum_quality: 0.5,
             min_file_refs: 2,
-            min_actionable_count: 3,
             max_tier1_ratio: 0.2,
             reference_only_mode: false,
             scoring: TierScoringWeights::default(),
@@ -1896,6 +1968,16 @@ pub struct DeepReviewConfig {
     pub check_regression: bool,
     pub reject_tier1: bool,
     pub min_evidence_ratio: f32,
+    /// Maximum characters of CLAUDE.md to include in semantic quality review
+    pub claude_md_preview_chars: usize,
+    /// Maximum characters per skill body to include in review
+    pub skill_preview_chars: usize,
+    /// Maximum characters per agent body to include in review
+    pub agent_preview_chars: usize,
+    /// Maximum number of skills to include in review (0 = unlimited)
+    pub max_skills_in_review: usize,
+    /// Maximum number of agents to include in review (0 = unlimited)
+    pub max_agents_in_review: usize,
 }
 
 impl Default for DeepReviewConfig {
@@ -1906,8 +1988,14 @@ impl Default for DeepReviewConfig {
             required_passes: 2,
             review_timeout_secs: 300,
             check_regression: true,
-            reject_tier1: true,
+            reject_tier1: false, // LLM determines tier quality in SemanticQuality check
             min_evidence_ratio: 0.5,
+            // Preview sizes - configurable to balance thoroughness vs token limits
+            claude_md_preview_chars: 4000, // Increased from hardcoded 2000
+            skill_preview_chars: 1000,     // Increased from hardcoded 500
+            agent_preview_chars: 1000,     // Increased from hardcoded 500
+            max_skills_in_review: 0,       // 0 = include all (was hardcoded 3)
+            max_agents_in_review: 0,       // 0 = include all (was hardcoded 2)
         }
     }
 }
@@ -2168,6 +2256,14 @@ pub struct MultiAgentConfig {
     pub synthesis_retries: usize,
     pub specialist_timeout_secs: u64,
     pub total_timeout_secs: u64,
+    /// Maximum files to include in pattern analysis prompts
+    pub max_files_for_patterns: usize,
+    /// Maximum lines per file for pattern analysis
+    pub max_lines_per_file_patterns: usize,
+    /// Maximum files to include in constraint analysis prompts
+    pub max_files_for_constraints: usize,
+    /// Maximum lines per file for constraint analysis
+    pub max_lines_per_file_constraints: usize,
 }
 
 impl Default for MultiAgentConfig {
@@ -2187,6 +2283,11 @@ impl Default for MultiAgentConfig {
             synthesis_retries: 3,
             specialist_timeout_secs: 120,
             total_timeout_secs: 600,
+            // Code preview limits - configurable to balance context vs token limits
+            max_files_for_patterns: 15,      // Increased from hardcoded 10
+            max_lines_per_file_patterns: 80, // Increased from hardcoded 50
+            max_files_for_constraints: 20,   // Increased from hardcoded 15
+            max_lines_per_file_constraints: 150, // Increased from hardcoded 100
         }
     }
 }
@@ -2644,7 +2745,6 @@ impl Default for TierScoringWeights {
 #[serde(default)]
 pub struct SkillQualityConfig {
     pub min_file_refs: usize,
-    pub min_actionable_count: usize,
     pub min_score: f32,
     pub min_chars: usize,
     pub min_steps: usize,
@@ -2655,7 +2755,6 @@ impl Default for SkillQualityConfig {
     fn default() -> Self {
         Self {
             min_file_refs: 2,
-            min_actionable_count: 3,
             min_score: 0.6,
             min_chars: 500,
             min_steps: 3,
@@ -2779,6 +2878,56 @@ impl Default for TimeoutConfig {
 impl TimeoutConfig {
     pub fn effective_checkpoint_interval_secs(&self) -> u64 {
         (self.quality_loop_timeout_secs / 4).max(60)
+    }
+}
+
+// =============================================================================
+// DISTRIBUTED ANALYSIS CONFIG
+// =============================================================================
+
+/// Configuration for distributed parallel analysis (100% coverage)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DistributedAnalysisConfig {
+    /// Enable distributed analysis
+    pub enabled: bool,
+    /// Maximum parallel analysis agents
+    pub max_parallel_agents: usize,
+    /// Maximum tokens per analysis chunk
+    pub max_tokens_per_chunk: usize,
+    /// Overlap lines between chunks for context continuity
+    pub chunk_overlap_lines: usize,
+    /// Minimum files to trigger distributed analysis
+    pub min_files_for_distributed: usize,
+    /// Maximum characters to include per file in LLM prompts
+    pub max_file_content_chars: usize,
+    /// Maximum common import patterns to track in aggregation
+    pub max_common_import_patterns: usize,
+    /// Maximum dependency edges to display in prompts
+    pub max_dependency_display: usize,
+    /// Timeout for file read operations in seconds
+    pub file_read_timeout_secs: u64,
+}
+
+impl Default for DistributedAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_parallel_agents: 5,
+            max_tokens_per_chunk: 50_000,
+            chunk_overlap_lines: 50,
+            min_files_for_distributed: 50,
+            max_file_content_chars: 10_000,
+            max_common_import_patterns: 10,
+            max_dependency_display: 20,
+            file_read_timeout_secs: 30,
+        }
+    }
+}
+
+impl Config {
+    pub fn distributed_analysis(&self) -> &DistributedAnalysisConfig {
+        &self.distributed_analysis
     }
 }
 

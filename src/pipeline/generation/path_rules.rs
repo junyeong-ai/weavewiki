@@ -14,34 +14,63 @@ use crate::pipeline::phases::convention_inference::InferredConventions;
 use crate::pipeline::phases::monorepo_analyzer::MonorepoAnalysis;
 use crate::pipeline::phases::output_router::{OutputPlan, PlannedRuleGroup, RuleContentSource};
 
-/// Minimum value score threshold for generating rules
-/// Rules below this threshold are considered low-value and skipped
-const MIN_RULE_VALUE_SCORE: f32 = 0.3;
+/// Minimum value score threshold for generating rules.
+///
+/// NOTE: This is a default threshold, not an authoritative gate.
+/// Rules with lower scores may still have value in specific contexts.
+/// LLM should determine if a rule is worth including based on project needs,
+/// not solely based on this programmatic score.
+///
+/// The score is calculated from:
+/// - Pattern counts (logarithmic scaling)
+/// - Constraint severity
+/// - File reference count
+///
+/// These metrics may not capture domain-specific value (e.g., a single
+/// critical security constraint may be more valuable than many patterns).
+///
+/// This constant is kept as a FALLBACK default. Use `GenerationConfig::min_rule_value_score`
+/// for configurable threshold. Set to 0.0 to disable filtering.
+const DEFAULT_MIN_RULE_VALUE_SCORE: f32 = 0.3;
 
 pub struct PathRulesGenerator;
 
 impl PathRulesGenerator {
-    /// Generate rules with value score enforcement
+    /// Generate rules with value score enforcement using default threshold.
+    ///
+    /// For configurable threshold, use `generate_with_threshold` instead.
     pub fn generate(
         plan: &OutputPlan,
         monorepo: Option<&MonorepoAnalysis>,
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
     ) -> Result<Vec<Rule>> {
-        Self::generate_with_value_filter(plan, monorepo, conventions, constraints, None, None)
+        Self::generate_with_threshold(
+            plan,
+            monorepo,
+            conventions,
+            constraints,
+            None,
+            None,
+            DEFAULT_MIN_RULE_VALUE_SCORE,
+        )
     }
 
-    /// Generate rules with full value score enforcement
+    /// Generate rules with configurable value score threshold.
     ///
-    /// This version accepts synthesis results and file registry for accurate
-    /// value assessment before generation.
-    pub fn generate_with_value_filter(
+    /// # Arguments
+    /// * `min_value_score` - Minimum value score for rules (0.0 = no filtering)
+    ///
+    /// Rules with scores below the threshold are skipped. Set to 0.0 to
+    /// disable filtering and let LLM decide all rule values.
+    pub fn generate_with_threshold(
         plan: &OutputPlan,
         monorepo: Option<&MonorepoAnalysis>,
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
         synthesis: Option<&SynthesizedAnalysis>,
         file_registry: Option<&VerifiedFileRegistry>,
+        min_value_score: f32,
     ) -> Result<Vec<Rule>> {
         let mut rules = Vec::new();
         let mut skipped_low_value = 0;
@@ -51,11 +80,12 @@ impl PathRulesGenerator {
             let value_score =
                 Self::assess_rule_value(group, conventions, constraints, synthesis, file_registry);
 
-            if value_score < MIN_RULE_VALUE_SCORE {
+            // Skip only if filtering is enabled (threshold > 0) and score is below threshold
+            if min_value_score > 0.0 && value_score < min_value_score {
                 tracing::debug!(
                     group = group.name,
                     score = value_score,
-                    threshold = MIN_RULE_VALUE_SCORE,
+                    threshold = min_value_score,
                     "Skipping low-value rule group"
                 );
                 skipped_low_value += 1;
@@ -71,10 +101,32 @@ impl PathRulesGenerator {
         tracing::info!(
             rule_count = rules.len(),
             skipped = skipped_low_value,
+            threshold = min_value_score,
             "Generated path-based rules with value filtering"
         );
 
         Ok(rules)
+    }
+
+    /// Generate rules with full value score enforcement (legacy API).
+    #[deprecated(note = "Use generate_with_threshold for configurable filtering")]
+    pub fn generate_with_value_filter(
+        plan: &OutputPlan,
+        monorepo: Option<&MonorepoAnalysis>,
+        conventions: &InferredConventions,
+        constraints: &ExtractedConstraints,
+        synthesis: Option<&SynthesizedAnalysis>,
+        file_registry: Option<&VerifiedFileRegistry>,
+    ) -> Result<Vec<Rule>> {
+        Self::generate_with_threshold(
+            plan,
+            monorepo,
+            conventions,
+            constraints,
+            synthesis,
+            file_registry,
+            DEFAULT_MIN_RULE_VALUE_SCORE,
+        )
     }
 
     /// Assess the value score of a rule group
@@ -112,7 +164,8 @@ impl PathRulesGenerator {
             .count();
 
         if relevant_anti_patterns > 0 {
-            score += 0.15 * (relevant_anti_patterns.min(3) as f32);
+            // Logarithmic scaling - more patterns continue to add value with diminishing returns
+            score += 0.15 * (relevant_anti_patterns as f32 + 1.0).log2().min(3.0);
         }
 
         // Check for hidden dependencies involving these paths
@@ -128,7 +181,8 @@ impl PathRulesGenerator {
             .count();
 
         if relevant_deps > 0 {
-            score += 0.2 * (relevant_deps.min(3) as f32);
+            // Logarithmic scaling for dependencies
+            score += 0.2 * (relevant_deps as f32 + 1.0).log2().min(3.0);
         }
 
         // Check for gotchas
@@ -144,7 +198,8 @@ impl PathRulesGenerator {
             .count();
 
         if relevant_gotchas > 0 {
-            score += 0.15 * (relevant_gotchas.min(3) as f32);
+            // Logarithmic scaling for gotchas
+            score += 0.15 * (relevant_gotchas as f32 + 1.0).log2().min(3.0);
         }
 
         // Check synthesis for module-specific insights
@@ -178,9 +233,9 @@ impl PathRulesGenerator {
             }
         }
 
-        // Content sources boost
+        // Content sources boost - logarithmic scaling
         if !group.content_sources.is_empty() {
-            score += 0.05 * (group.content_sources.len().min(4) as f32);
+            score += 0.05 * (group.content_sources.len() as f32 + 1.0).log2().min(3.0);
         }
 
         score.min(1.0)
@@ -211,13 +266,9 @@ impl PathRulesGenerator {
                     }
                 }
                 RuleContentSource::AntiPatterns => {
-                    // Filter anti-patterns by language for monorepo subprojects
-                    let filtered_anti_patterns = Self::filter_anti_patterns_by_language(
-                        &constraints.anti_patterns,
-                        &group.languages,
-                    );
+                    // Include all anti-patterns - LLM determines relevance during generation
                     let anti_pattern_content =
-                        Self::generate_anti_pattern_content(&filtered_anti_patterns);
+                        Self::generate_anti_pattern_content(&constraints.anti_patterns);
                     if !anti_pattern_content.is_empty() {
                         content.push("## Anti-Patterns".to_string());
                         content.push(String::new());
@@ -266,7 +317,7 @@ impl PathRulesGenerator {
             },
             content: content_vec,
             evidence: Vec::new(),
-            generation_context: None,
+            tier: crate::types::ContentTier::default(),
         })
     }
 
@@ -356,91 +407,6 @@ impl PathRulesGenerator {
         }
 
         content
-    }
-
-    /// Filter anti-patterns by language to avoid cross-language contamination
-    /// (e.g., TypeScript anti-patterns should not appear in Kotlin rules)
-    fn filter_anti_patterns_by_language(
-        anti_patterns: &[AntiPattern],
-        target_languages: &[String],
-    ) -> Vec<AntiPattern> {
-        // If no target languages specified, return all anti-patterns
-        if target_languages.is_empty() {
-            return anti_patterns.to_vec();
-        }
-
-        // Language-specific anti-pattern markers
-        let typescript_markers = [
-            "as any",
-            "as unknown",
-            "type assertion",
-            "typescript",
-            "tsx",
-            "jsx",
-        ];
-        let rust_markers = [
-            "unwrap",
-            "expect",
-            "panic",
-            "pub(crate)",
-            "Result<",
-            "Option<",
-            "cargo",
-            ".rs",
-            "rust",
-        ];
-        let kotlin_markers = ["kotlin", "suspend", "coroutine", "gradle", ".kt"];
-        let java_markers = ["java", "jvm", "spring", "hibernate", ".java"];
-        let python_markers = ["python", "pytest", "pydantic", ".py", "async def"];
-        let go_markers = ["go", "goroutine", "channel", "defer", ".go"];
-
-        anti_patterns
-            .iter()
-            .filter(|ap| {
-                let text = format!(
-                    "{} {} {} {}",
-                    ap.name.to_lowercase(),
-                    ap.description.to_lowercase(),
-                    ap.why_bad.to_lowercase(),
-                    ap.correct_approach.to_lowercase()
-                );
-
-                // Check if the anti-pattern is language-specific
-                let is_typescript_specific = typescript_markers.iter().any(|m| text.contains(m));
-                let is_rust_specific = rust_markers.iter().any(|m| text.contains(m));
-                let is_kotlin_specific = kotlin_markers.iter().any(|m| text.contains(m));
-                let is_java_specific = java_markers.iter().any(|m| text.contains(m));
-                let is_python_specific = python_markers.iter().any(|m| text.contains(m));
-                let is_go_specific = go_markers.iter().any(|m| text.contains(m));
-
-                // If it's not language-specific, include it
-                let is_language_specific = is_typescript_specific
-                    || is_rust_specific
-                    || is_kotlin_specific
-                    || is_java_specific
-                    || is_python_specific
-                    || is_go_specific;
-
-                if !is_language_specific {
-                    return true;
-                }
-
-                // Check if the target languages match
-                let target_langs: Vec<_> =
-                    target_languages.iter().map(|s| s.to_lowercase()).collect();
-
-                (is_typescript_specific
-                    && (target_langs
-                        .iter()
-                        .any(|l| l.contains("typescript") || l.contains("javascript"))))
-                    || (is_rust_specific && target_langs.iter().any(|l| l.contains("rust")))
-                    || (is_kotlin_specific && target_langs.iter().any(|l| l.contains("kotlin")))
-                    || (is_java_specific && target_langs.iter().any(|l| l.contains("java")))
-                    || (is_python_specific && target_langs.iter().any(|l| l.contains("python")))
-                    || (is_go_specific && target_langs.iter().any(|l| l.contains("go")))
-            })
-            .cloned()
-            .collect()
     }
 
     fn generate_anti_pattern_content(anti_patterns: &[AntiPattern]) -> Vec<String> {
@@ -838,7 +804,7 @@ mod tests {
             PathRulesGenerator::assess_rule_value(&group, &conventions, &constraints, None, None);
 
         // Empty context should have low value
-        assert!(score < MIN_RULE_VALUE_SCORE);
+        assert!(score < DEFAULT_MIN_RULE_VALUE_SCORE);
     }
 
     #[test]
@@ -894,7 +860,7 @@ mod tests {
         );
 
         assert!(
-            score < MIN_RULE_VALUE_SCORE,
+            score < DEFAULT_MIN_RULE_VALUE_SCORE,
             "Empty group should be below threshold"
         );
     }

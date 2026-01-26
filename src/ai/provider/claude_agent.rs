@@ -1,11 +1,4 @@
 //! Claude Agent SDK Provider
-//!
-//! Direct API integration using the claude-agent SDK with OAuth support.
-//! Supports 1M extended context window via BetaFeature::Context1M (API key only).
-//!
-//! Context Window Behavior:
-//! - OAuth (Claude Code CLI): Always uses standard context (200K for Sonnet/Opus)
-//! - API Key: Can enable extended context (1M) for supported models
 
 #[cfg(feature = "claude-agent")]
 mod inner {
@@ -14,18 +7,23 @@ mod inner {
         BetaFeature, CreateMessageRequest, ProviderConfig as SdkProviderConfig,
         transform_for_strict,
     };
+    use claude_agent::types::StopReason as SdkStopReason;
     use claude_agent::{Auth, Client, Message, OAuthConfig};
     use serde_json::Value;
     use std::time::Instant;
 
     use crate::ai::model_capabilities::{AuthMode, ModelRegistry};
     use crate::ai::provider::{
-        LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, TokenUsage,
+        LlmProvider, LlmResponse, ProviderConfig, ResponseMetadata, ResponseTiming, StopReason,
+        TokenUsage,
     };
+    use crate::ai::validation::parse_structured_output;
     use crate::constants::provider::{CLAUDE_AGENT_MAX_TOKENS, HEALTH_CHECK_MAX_TOKENS};
+    use crate::types::{ClaudegenError, Result};
 
     const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
-    use crate::types::Result;
+    const MAX_ATTEMPTS: u32 = 2;
+    const TOKEN_INCREASE_FACTOR: f64 = 1.5;
 
     pub struct ClaudeAgentProvider {
         client: Client,
@@ -36,7 +34,6 @@ mod inner {
     }
 
     impl ClaudeAgentProvider {
-        /// Get effective context window based on model and auth mode
         pub fn context_window(&self) -> u64 {
             let registry = ModelRegistry::global();
             let caps = registry.get_or_default(&self.model);
@@ -51,24 +48,20 @@ mod inner {
             self.auth_mode
         }
 
-        /// Check if extended context is available for this model with current auth mode
         pub fn extended_available(&self) -> bool {
             let registry = ModelRegistry::global();
-            if let Some(caps) = registry.get(&self.model) {
-                caps.extended_available(self.auth_mode)
-            } else {
-                false
-            }
+            registry
+                .get(&self.model)
+                .map(|caps| caps.extended_available(self.auth_mode))
+                .unwrap_or(false)
         }
 
-        /// Check if model supports extended context (requires API key)
         pub fn supports_extended_context(model: &str) -> bool {
             let registry = ModelRegistry::global();
-            if let Some(caps) = registry.get(model) {
-                caps.extended_context_window.is_some()
-            } else {
-                false
-            }
+            registry
+                .get(model)
+                .map(|caps| caps.extended_context_window.is_some())
+                .unwrap_or(false)
         }
 
         async fn build_client(
@@ -77,7 +70,7 @@ mod inner {
             extended_context: bool,
         ) -> Result<Client> {
             let mut builder = Client::builder().auth(auth).await.map_err(|e| {
-                crate::types::ClaudegenError::Config(format!(
+                ClaudegenError::Config(format!(
                     "Auth failed: {e}. Run 'claude login' or set ANTHROPIC_API_KEY."
                 ))
             })?;
@@ -86,7 +79,6 @@ mod inner {
                 builder = builder.oauth_config(OAuthConfig::default());
             }
 
-            // Always enable StructuredOutputs for JSON schema support
             let mut sdk_config =
                 SdkProviderConfig::default().with_beta(BetaFeature::StructuredOutputs);
 
@@ -96,14 +88,12 @@ mod inner {
 
             builder = builder.config(sdk_config);
 
-            builder.build().await.map_err(|e| {
-                crate::types::ClaudegenError::Config(format!("Client build failed: {e}"))
-            })
+            builder
+                .build()
+                .await
+                .map_err(|e| ClaudegenError::Config(format!("Client build failed: {e}")))
         }
 
-        /// Create provider with extended context (1M)
-        /// NOTE: Extended context requires API key authentication.
-        /// OAuth (Claude Code CLI) does not support extended context.
         pub async fn with_extended_context(model: &str) -> Result<Self> {
             if !Self::supports_extended_context(model) {
                 let registry = ModelRegistry::global();
@@ -112,13 +102,12 @@ mod inner {
                     .into_iter()
                     .filter(|id| Self::supports_extended_context(id))
                     .collect();
-                return Err(crate::types::ClaudegenError::Config(format!(
-                    "Model {model} does not support extended context. Supported models: {:?}",
+                return Err(ClaudegenError::Config(format!(
+                    "Model {model} does not support extended context. Supported: {:?}",
                     supported
                 )));
             }
 
-            // Extended context requires API key, not OAuth
             let client = Self::build_client(Auth::FromEnv, None, true).await?;
             let registry = ModelRegistry::global();
             let caps = registry.get_or_default(model);
@@ -127,7 +116,7 @@ mod inner {
             tracing::info!(
                 model,
                 context_window,
-                "Created provider with extended context (API key required)"
+                "Created provider with extended context"
             );
 
             Ok(Self {
@@ -139,19 +128,8 @@ mod inner {
             })
         }
 
-        /// Create provider using Claude Code CLI OAuth
-        /// NOTE: OAuth does not support extended context (limited to 200K)
         pub async fn from_cli(model: &str) -> Result<Self> {
             let client = Self::build_client(Auth::ClaudeCli, None, false).await?;
-            let registry = ModelRegistry::global();
-            let caps = registry.get_or_default(model);
-            let context_window = caps.effective_context_window(AuthMode::OAuth, false);
-
-            tracing::debug!(
-                model,
-                context_window,
-                "Created OAuth provider (extended context not available)"
-            );
 
             Ok(Self {
                 client,
@@ -162,23 +140,17 @@ mod inner {
             })
         }
 
-        /// Create provider from environment (prefers OAuth, falls back to API key)
         pub async fn from_env(model: &str) -> Result<Self> {
             if let Ok(provider) = Self::from_cli(model).await {
                 tracing::info!(
                     context_window = provider.context_window(),
-                    "Using Claude Code CLI OAuth (200K context)"
+                    "Using Claude Code CLI OAuth"
                 );
                 return Ok(provider);
             }
 
             tracing::info!("CLI OAuth not available, trying ANTHROPIC_API_KEY");
             let client = Self::build_client(Auth::FromEnv, None, false).await?;
-            let registry = ModelRegistry::global();
-            let caps = registry.get_or_default(model);
-            let context_window = caps.effective_context_window(AuthMode::ApiKey, false);
-
-            tracing::info!(context_window, "Using API key authentication");
 
             Ok(Self {
                 client,
@@ -189,7 +161,6 @@ mod inner {
             })
         }
 
-        /// Create provider with explicit API key
         pub async fn with_api_key(api_key: &str, model: &str) -> Result<Self> {
             let client =
                 Self::build_client(Auth::ApiKey(api_key.to_string()), Some(api_key), false).await?;
@@ -203,10 +174,9 @@ mod inner {
             })
         }
 
-        /// Create provider with explicit API key and extended context
         pub async fn with_api_key_extended(api_key: &str, model: &str) -> Result<Self> {
             if !Self::supports_extended_context(model) {
-                return Err(crate::types::ClaudegenError::Config(format!(
+                return Err(ClaudegenError::Config(format!(
                     "Model {model} does not support extended context"
                 )));
             }
@@ -223,22 +193,17 @@ mod inner {
             })
         }
 
-        /// Create provider from configuration
         pub async fn from_config(config: &ProviderConfig) -> Result<Self> {
             let model = config.model.as_deref().unwrap_or(DEFAULT_MODEL);
 
-            let (auth, auth_mode) = if let Some(api_key) = &config.api_key {
-                (Auth::ApiKey(api_key.clone()), AuthMode::ApiKey)
-            } else {
-                (Auth::ClaudeCli, AuthMode::OAuth)
+            let (auth, auth_mode) = match &config.api_key {
+                Some(key) => (Auth::ApiKey(key.clone()), AuthMode::ApiKey),
+                None => (Auth::ClaudeCli, AuthMode::OAuth),
             };
 
-            // Extended context only available with API key
             let use_extended = config.extended_context && auth_mode == AuthMode::ApiKey;
             if config.extended_context && auth_mode == AuthMode::OAuth {
-                tracing::warn!(
-                    "Extended context requested but OAuth doesn't support it. Using standard context."
-                );
+                tracing::warn!("Extended context requires API key, using standard context");
             }
 
             let client = Self::build_client(auth, config.api_key.as_deref(), use_extended).await?;
@@ -256,53 +221,94 @@ mod inner {
             self.max_tokens = max_tokens;
             self
         }
+
+        fn convert_stop_reason(sdk_reason: Option<SdkStopReason>) -> StopReason {
+            match sdk_reason {
+                Some(SdkStopReason::EndTurn) => StopReason::EndTurn,
+                Some(SdkStopReason::MaxTokens) => StopReason::MaxTokens,
+                Some(SdkStopReason::StopSequence) => StopReason::StopSequence,
+                Some(SdkStopReason::Refusal) => StopReason::Refusal,
+                Some(SdkStopReason::ToolUse) | None => StopReason::EndTurn,
+            }
+        }
     }
 
     #[async_trait]
     impl LlmProvider for ClaudeAgentProvider {
         async fn generate(&self, prompt: &str, schema: &Value) -> Result<LlmResponse> {
-            use crate::ai::validation::extract_json_from_response;
-
             let start = Instant::now();
+            let mut current_max_tokens = self.max_tokens as u32;
 
-            // Build request with native JSON schema structured output
-            let mut request = CreateMessageRequest::new(&self.model, vec![Message::user(prompt)])
-                .with_system("You are a code documentation expert.")
-                .with_max_tokens(self.max_tokens as u32);
+            for attempt in 1..=MAX_ATTEMPTS {
+                let mut request =
+                    CreateMessageRequest::new(&self.model, vec![Message::user(prompt)])
+                        .with_system(
+                            "You are a code documentation expert. Respond with valid JSON only.",
+                        )
+                        .with_max_tokens(current_max_tokens);
 
-            // Use native JSON schema when schema is provided
-            // Transform schema for strict mode (adds additionalProperties: false)
-            if !schema.is_null() && schema.is_object() {
-                let strict_schema = transform_for_strict(schema.clone());
-                request = request.with_json_schema(strict_schema);
+                if !schema.is_null() && schema.is_object() {
+                    request = request.with_json_schema(transform_for_strict(schema.clone()));
+                }
+
+                let response = self
+                    .client
+                    .send(request)
+                    .await
+                    .map_err(|e| ClaudegenError::LlmApi(format!("Claude API error: {e}")))?;
+
+                let sdk_stop_reason = response.stop_reason;
+                let stop_reason = Self::convert_stop_reason(sdk_stop_reason);
+
+                if stop_reason == StopReason::Refusal {
+                    return Err(ClaudegenError::LlmApi(
+                        "Model refused structured output request".to_string(),
+                    ));
+                }
+
+                let raw_text = response.text();
+
+                match parse_structured_output(&raw_text) {
+                    Ok(content) => {
+                        let usage = TokenUsage {
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                            cache_read_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
+                            cache_write_tokens: response
+                                .usage
+                                .cache_creation_input_tokens
+                                .unwrap_or(0),
+                        };
+
+                        return Ok(LlmResponse::new(
+                            content,
+                            usage,
+                            ResponseTiming::from_duration(start.elapsed()),
+                            ResponseMetadata {
+                                model: self.model.clone(),
+                                provider: "claude-agent".to_string(),
+                            },
+                            stop_reason,
+                        ));
+                    }
+                    Err(e) => {
+                        let can_retry =
+                            stop_reason == StopReason::MaxTokens && attempt < MAX_ATTEMPTS;
+                        if can_retry {
+                            current_max_tokens =
+                                (current_max_tokens as f64 * TOKEN_INCREASE_FACTOR) as u32;
+                            tracing::warn!(
+                                attempt,
+                                new_max_tokens = current_max_tokens,
+                                "Response truncated, retrying with increased tokens"
+                            );
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                }
             }
-
-            let response = self.client.send(request).await.map_err(|e| {
-                crate::types::ClaudegenError::LlmApi(format!("Claude API error: {e}"))
-            })?;
-
-            let elapsed = start.elapsed();
-
-            // Parse response with robust JSON extraction
-            let content = extract_json_from_response(&response.text())?;
-
-            let usage = TokenUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                cache_read_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
-                cache_write_tokens: response.usage.cache_creation_input_tokens.unwrap_or(0),
-            };
-
-            Ok(LlmResponse::with_metrics(
-                content,
-                usage,
-                0.0,
-                ResponseTiming::from_duration(elapsed),
-                ResponseMetadata {
-                    model: self.model.clone(),
-                    provider: "claude-agent".to_string(),
-                },
-            ))
+            unreachable!("Loop always returns")
         }
 
         fn name(&self) -> &str {
@@ -320,7 +326,7 @@ mod inner {
             match self.client.send(request).await {
                 Ok(_) => Ok(true),
                 Err(e) => {
-                    tracing::warn!("Claude Agent health check failed: {}", e);
+                    tracing::warn!("Health check failed: {}", e);
                     Ok(false)
                 }
             }
@@ -328,12 +334,9 @@ mod inner {
     }
 }
 
-// Re-export ClaudeAgentProvider
-// Note: Context window constants removed - use ModelRegistry instead
 #[cfg(feature = "claude-agent")]
 pub use inner::ClaudeAgentProvider;
 
-// Stub for when claude-agent feature is disabled
 #[cfg(not(feature = "claude-agent"))]
 pub struct ClaudeAgentProvider;
 
@@ -341,17 +344,17 @@ pub struct ClaudeAgentProvider;
 impl ClaudeAgentProvider {
     pub async fn from_env(_model: &str) -> crate::types::Result<Self> {
         Err(crate::types::ClaudegenError::Config(
-            "claude-agent feature not enabled. Enable it in Cargo.toml or use API key.".to_string(),
+            "claude-agent feature not enabled".to_string(),
         ))
     }
 
     pub async fn from_config(_config: &super::ProviderConfig) -> crate::types::Result<Self> {
         Err(crate::types::ClaudegenError::Config(
-            "claude-agent feature not enabled. Enable it in Cargo.toml or use API key.".to_string(),
+            "claude-agent feature not enabled".to_string(),
         ))
     }
 
     pub fn context_window(&self) -> u64 {
-        200_000 // Default fallback
+        200_000
     }
 }

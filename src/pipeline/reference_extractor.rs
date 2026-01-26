@@ -120,27 +120,78 @@ impl ReferenceExtractor {
     ) -> Result<Vec<CodeReference>> {
         let mut refs = Vec::new();
 
+        // Common entry point patterns - these are HINTS validated by file existence.
+        //
+        // NOTE: These patterns cover common conventions but may miss:
+        // - Custom entry points (cli.rs, server.rs, app/start.py)
+        // - Projects not using src/ directory structure
+        // - Go projects with multiple main packages
+        //
+        // File existence is checked below - only patterns that actually exist are used.
+        // LLM can discover additional entry points during analysis.
+        let common_patterns: Vec<(&str, ReferenceType)> = vec![
+            // Configuration files (language-agnostic)
+            ("Cargo.toml", ReferenceType::ConfigFile),
+            ("package.json", ReferenceType::ConfigFile),
+            ("pyproject.toml", ReferenceType::ConfigFile),
+            ("go.mod", ReferenceType::ConfigFile),
+            ("build.gradle", ReferenceType::ConfigFile),
+            ("pom.xml", ReferenceType::ConfigFile),
+            // Entry points (various languages)
+            ("src/main.rs", ReferenceType::EntryPoint),
+            ("src/lib.rs", ReferenceType::EntryPoint),
+            ("src/index.ts", ReferenceType::EntryPoint),
+            ("src/index.js", ReferenceType::EntryPoint),
+            ("src/App.tsx", ReferenceType::EntryPoint),
+            ("src/main.tsx", ReferenceType::EntryPoint),
+            ("src/main.py", ReferenceType::EntryPoint),
+            ("main.go", ReferenceType::EntryPoint),
+            ("cmd/main.go", ReferenceType::EntryPoint),
+            ("app/main.py", ReferenceType::EntryPoint),
+            // Module directories
+            ("src/api/", ReferenceType::Module),
+            ("src/domain/", ReferenceType::Module),
+            ("src/services/", ReferenceType::Module),
+            ("src/handlers/", ReferenceType::Module),
+            ("src/routes/", ReferenceType::Module),
+            ("internal/", ReferenceType::Module),
+            ("pkg/", ReferenceType::Module),
+        ];
+
+        // Filter based on project type for prioritization, but include common patterns
         let key_patterns: Vec<(&str, ReferenceType)> = match project_type {
-            ProjectType::Cli => vec![
-                ("Cargo.toml", ReferenceType::ConfigFile),
-                ("src/cli/mod.rs", ReferenceType::Module),
-                ("src/config/mod.rs", ReferenceType::Module),
-            ],
-            ProjectType::Backend => vec![
-                ("src/api/mod.rs", ReferenceType::Module),
-                ("src/domain/mod.rs", ReferenceType::Module),
-                ("src/routes.rs", ReferenceType::EntryPoint),
-            ],
-            ProjectType::Frontend => vec![
-                ("package.json", ReferenceType::ConfigFile),
-                ("src/App.tsx", ReferenceType::EntryPoint),
-                ("src/main.tsx", ReferenceType::EntryPoint),
-            ],
-            ProjectType::Library => vec![
-                ("Cargo.toml", ReferenceType::ConfigFile),
-                ("src/lib.rs", ReferenceType::EntryPoint),
-            ],
-            _ => vec![],
+            ProjectType::Cli | ProjectType::Library => common_patterns
+                .into_iter()
+                .filter(|(p, _)| {
+                    p.ends_with(".toml")
+                        || p.contains("main")
+                        || p.contains("lib")
+                        || p.contains("cli")
+                        || p.contains("cmd")
+                })
+                .collect(),
+            ProjectType::Backend => common_patterns
+                .into_iter()
+                .filter(|(p, _)| {
+                    p.ends_with(".toml")
+                        || p.ends_with(".json")
+                        || p.ends_with(".mod")
+                        || p.contains("api")
+                        || p.contains("routes")
+                        || p.contains("handlers")
+                        || p.contains("main")
+                })
+                .collect(),
+            ProjectType::Frontend => common_patterns
+                .into_iter()
+                .filter(|(p, _)| {
+                    p.contains("App")
+                        || p.contains("index")
+                        || p.contains("main")
+                        || p.ends_with(".json")
+                })
+                .collect(),
+            _ => common_patterns,
         };
 
         for (path, ref_type) in key_patterns {

@@ -23,7 +23,10 @@
 ```
 project/
 ├── CLAUDE.md                          # 프로젝트 메모리 (규칙, 가이드라인)
-├── .claudegen/                        # 내부 데이터 (graph, cache, config)
+├── .claude/
+│   └── rules/                         # 경로 기반 규칙
+│       └── {rule-name}.md
+├── .claudegen/                        # 내부 데이터 (cache, config, checkpoints)
 │   └── config.toml
 └── {project-name}-plugin/             # 플러그인 디렉토리
     ├── .claude-plugin/
@@ -62,11 +65,9 @@ claudegen generate                    # 플러그인 생성
 claudegen generate --dry-run          # 설정만 확인
 ```
 
-### 코드 분석
+### 검증
 ```bash
-claudegen analyze                     # 코드 구조 분석
-claudegen query "src/main.rs"         # 의존성 조회
-claudegen validate                    # 출력 검증
+claudegen validate                    # 생성된 플러그인 검증
 ```
 
 ### 관리

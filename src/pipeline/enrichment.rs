@@ -1,13 +1,4 @@
-//! Enrichment Engine - Bridges Synthesis to Generation
-//!
-//! Solves the critical gap where synthesis findings are not consumed by generation.
-//! Maps constraints, patterns, and insights from analysis to actual artifact content.
-//!
-//! Key responsibilities:
-//! - Map synthesis findings to output plan items
-//! - Inject Tier3 constraints into skill/agent prompts
-//! - Track coverage (which constraints appear in which artifacts)
-//! - Identify gaps and suggest additional artifacts
+//! Enrichment Engine - Maps synthesis findings to artifact content
 
 use std::collections::{HashMap, HashSet};
 
@@ -150,6 +141,12 @@ pub struct EnrichmentEngine {
     min_coverage_ratio: f32,
     max_constraints_per_skill: usize,
     max_knowledge_items_per_agent: usize,
+    max_anti_patterns_per_agent: usize,
+    max_key_references_per_agent: usize,
+    /// Maximum evidence locations per pattern (0 = unlimited)
+    max_locations_per_pattern: usize,
+    /// Maximum evidence references per constraint (0 = unlimited)
+    max_evidence_per_constraint: usize,
 }
 
 impl Default for EnrichmentEngine {
@@ -158,6 +155,10 @@ impl Default for EnrichmentEngine {
             min_coverage_ratio: 0.8,
             max_constraints_per_skill: 5,
             max_knowledge_items_per_agent: 10,
+            max_anti_patterns_per_agent: 10,
+            max_key_references_per_agent: 10,
+            max_locations_per_pattern: 5,   // Increased from hardcoded 2
+            max_evidence_per_constraint: 5, // Increased from hardcoded 2
         }
     }
 }
@@ -182,13 +183,14 @@ impl EnrichmentEngine {
         let all_constraints = self.collect_all_constraints(synthesis, constraints);
         let mut artifact_coverage: HashMap<String, Vec<String>> = HashMap::new();
 
-        // Map constraints to skills
+        // Map constraints to skills using file-based matching
         for planned_skill in &plan.skills_plan.planned_skills {
             let relevant = self.find_relevant_constraints(
                 &planned_skill.name,
                 &planned_skill.trigger,
                 &all_constraints,
                 synthesis,
+                &constraints.complex_workflows,
             );
 
             // Track coverage
@@ -459,41 +461,89 @@ impl EnrichmentEngine {
         result
     }
 
-    /// Find constraints relevant to a specific skill
+    /// Find constraints relevant to a specific skill using structural matching
     fn find_relevant_constraints(
         &self,
         skill_name: &str,
         trigger: &str,
         all_constraints: &[EnrichedConstraint],
-        _synthesis: Option<&SynthesizedAnalysis>,
+        synthesis: Option<&SynthesizedAnalysis>,
+        workflows: &[super::phases::constraint_extraction::ComplexWorkflow],
     ) -> Vec<EnrichedConstraint> {
-        let skill_lower = skill_name.to_lowercase();
-        let trigger_lower = trigger.to_lowercase();
+        // 1. Get files involved in this skill's workflow
+        let skill_files: HashSet<String> = workflows
+            .iter()
+            .find(|w| Self::to_kebab_case(&w.name) == skill_name)
+            .map(|w| {
+                w.steps
+                    .iter()
+                    .flat_map(|s| s.files_involved.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        // Keywords from skill name and trigger
-        let keywords: Vec<&str> = skill_lower
-            .split(|c: char| !c.is_alphanumeric())
-            .chain(trigger_lower.split(|c: char| !c.is_alphanumeric()))
-            .filter(|s| s.len() > 2)
+        // 2. Extract module prefixes from files
+        let skill_modules: HashSet<String> = skill_files
+            .iter()
+            .filter_map(|f| Self::extract_module_prefix(f))
             .collect();
 
+        // 3. Get synthesis modules if available
+        let synthesis_modules: HashSet<String> = synthesis
+            .map(|s| {
+                s.modules
+                    .iter()
+                    .filter(|m| {
+                        let name_lower = skill_name.to_lowercase();
+                        m.name.to_lowercase().contains(&name_lower)
+                            || name_lower.contains(&m.name.to_lowercase())
+                    })
+                    .map(|m| Self::extract_module_prefix(&m.path).unwrap_or_default())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 4. Combine all known modules for this skill
+        let all_skill_modules: HashSet<_> =
+            skill_modules.union(&synthesis_modules).cloned().collect();
+
+        // 5. Match constraints by file/module overlap
         let mut relevant: Vec<_> = all_constraints
             .iter()
             .filter(|c| {
-                let desc_lower = c.description.to_lowercase();
+                // Check if constraint's file refs overlap with skill's modules
+                let file_match = c.file_refs.iter().any(|ref_path| {
+                    let ref_module = Self::extract_module_prefix(ref_path).unwrap_or_default();
+                    all_skill_modules.contains(&ref_module)
+                        || skill_files.iter().any(|sf| {
+                            let sf_norm = sf.strip_prefix('@').unwrap_or(sf);
+                            let ref_norm = ref_path.strip_prefix('@').unwrap_or(ref_path);
+                            sf_norm == ref_norm
+                        })
+                });
 
-                // Match by keywords
-                keywords.iter().any(|kw| desc_lower.contains(kw))
-                    // Or match by related modules
-                    || c.related_modules.iter().any(|m| {
-                        let m_lower = m.to_lowercase();
-                        keywords.iter().any(|kw| m_lower.contains(kw))
+                // Check if constraint's related_modules overlap
+                let module_match = c.related_modules.iter().any(|m| {
+                    let m_lower = m.to_lowercase();
+                    all_skill_modules.iter().any(|sm| {
+                        sm.to_lowercase().contains(&m_lower) || m_lower.contains(&sm.to_lowercase())
                     })
-                    // Or high severity constraints that affect common areas
-                    || (c.severity >= Severity::High && self.is_common_constraint(c))
+                });
+
+                // High severity common constraints (fallback)
+                let severity_match =
+                    c.severity >= Severity::Critical && self.is_common_constraint(c);
+
+                file_match || module_match || severity_match
             })
             .cloned()
             .collect();
+
+        // Keyword matching when structural analysis has no overlap
+        if relevant.is_empty() {
+            relevant = self.keyword_matching(skill_name, trigger, all_constraints);
+        }
 
         // Sort by severity (highest first) and take top N
         relevant.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -502,10 +552,70 @@ impl EnrichmentEngine {
         relevant
     }
 
+    fn keyword_matching(
+        &self,
+        skill_name: &str,
+        trigger: &str,
+        all_constraints: &[EnrichedConstraint],
+    ) -> Vec<EnrichedConstraint> {
+        let skill_lower = skill_name.to_lowercase();
+        let trigger_lower = trigger.to_lowercase();
+
+        let keywords: Vec<&str> = skill_lower
+            .split(|c: char| !c.is_alphanumeric())
+            .chain(trigger_lower.split(|c: char| !c.is_alphanumeric()))
+            .filter(|s| s.len() > 2)
+            .collect();
+
+        all_constraints
+            .iter()
+            .filter(|c| {
+                let desc_lower = c.description.to_lowercase();
+                keywords.iter().any(|kw| desc_lower.contains(kw))
+                    || c.related_modules.iter().any(|m| {
+                        let m_lower = m.to_lowercase();
+                        keywords.iter().any(|kw| m_lower.contains(kw))
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn to_kebab_case(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_whitespace() || c == '_' {
+                    '-'
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect::<String>()
+            .replace("--", "-")
+            .trim_matches('-')
+            .to_string()
+    }
+
+    fn extract_module_prefix(path: &str) -> Option<String> {
+        let path = path.strip_prefix('@').unwrap_or(path);
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 2 {
+            let start = if parts[0] == "src" { 1 } else { 0 };
+            // Need at least one directory between start and the filename
+            if parts.len() > start + 1 {
+                Some(parts[start..parts.len() - 1].join("/"))
+            } else {
+                None // File directly in root (like src/lib.rs) has no module
+            }
+        } else {
+            None
+        }
+    }
+
     /// Build internal knowledge for an agent from synthesis
     fn build_agent_knowledge(
         &self,
-        _agent_name: &str,
+        agent_name: &str,
         role: &str,
         synthesis: Option<&SynthesizedAnalysis>,
         constraints: &ExtractedConstraints,
@@ -565,7 +675,12 @@ impl EnrichmentEngine {
             // Add pattern locations as references
             for pattern in &synth.deep.patterns {
                 if self.is_relevant_to_role(&pattern.name, &role_lower) {
-                    for location in pattern.locations.iter().take(2) {
+                    let take_count = if self.max_locations_per_pattern == 0 {
+                        pattern.locations.len()
+                    } else {
+                        self.max_locations_per_pattern
+                    };
+                    for location in pattern.locations.iter().take(take_count) {
                         key_references.push(KeyReference {
                             path: format!("@{}:{}", location.file, location.line),
                             line: Some(location.line),
@@ -599,7 +714,12 @@ impl EnrichmentEngine {
                     }
 
                     // Add evidence as key references
-                    for evidence in constraint.evidence.iter().take(2) {
+                    let evidence_take = if self.max_evidence_per_constraint == 0 {
+                        constraint.evidence.len()
+                    } else {
+                        self.max_evidence_per_constraint
+                    };
+                    for evidence in constraint.evidence.iter().take(evidence_take) {
                         if let Some(line) = evidence.line {
                             key_references.push(KeyReference {
                                 path: format!("@{}:{}", evidence.file, line),
@@ -612,16 +732,40 @@ impl EnrichmentEngine {
             }
         }
 
-        // Deduplicate and limit
+        // Deduplicate and limit with logging when truncation occurs
         gotchas.sort();
         gotchas.dedup();
+        if gotchas.len() > self.max_knowledge_items_per_agent {
+            tracing::debug!(
+                agent = %agent_name,
+                original = gotchas.len(),
+                limit = self.max_knowledge_items_per_agent,
+                "Truncating gotchas for agent"
+            );
+        }
         gotchas.truncate(self.max_knowledge_items_per_agent);
 
         anti_patterns.sort();
         anti_patterns.dedup();
-        anti_patterns.truncate(5);
+        if anti_patterns.len() > self.max_anti_patterns_per_agent {
+            tracing::debug!(
+                agent = %agent_name,
+                original = anti_patterns.len(),
+                limit = self.max_anti_patterns_per_agent,
+                "Truncating anti-patterns for agent"
+            );
+        }
+        anti_patterns.truncate(self.max_anti_patterns_per_agent);
 
-        key_references.truncate(6);
+        if key_references.len() > self.max_key_references_per_agent {
+            tracing::debug!(
+                agent = %agent_name,
+                original = key_references.len(),
+                limit = self.max_key_references_per_agent,
+                "Truncating key references for agent"
+            );
+        }
+        key_references.truncate(self.max_key_references_per_agent);
 
         AgentInternalKnowledge {
             gotchas,
@@ -918,5 +1062,35 @@ mod tests {
             ..coverage
         };
         assert!(!engine.meets_coverage_threshold(&low_coverage));
+    }
+
+    #[test]
+    fn test_extract_module_prefix() {
+        assert_eq!(
+            EnrichmentEngine::extract_module_prefix("src/ai/provider.rs"),
+            Some("ai".to_string())
+        );
+        assert_eq!(
+            EnrichmentEngine::extract_module_prefix("@src/pipeline/phases/detection.rs"),
+            Some("pipeline/phases".to_string())
+        );
+        assert_eq!(EnrichmentEngine::extract_module_prefix("src/lib.rs"), None);
+        assert_eq!(
+            EnrichmentEngine::extract_module_prefix("config/types.rs"),
+            Some("config".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_kebab_case() {
+        assert_eq!(
+            EnrichmentEngine::to_kebab_case("Hello World"),
+            "hello-world"
+        );
+        assert_eq!(EnrichmentEngine::to_kebab_case("API_Client"), "api-client");
+        assert_eq!(
+            EnrichmentEngine::to_kebab_case("Provider Initialization"),
+            "provider-initialization"
+        );
     }
 }

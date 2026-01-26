@@ -1,7 +1,22 @@
 //! Pipeline Validation Module
 //!
-//! Validation result types for quality assessment.
-//! For LLM-as-Judge functionality, use `crate::pipeline::quality` directly.
+//! ## Architecture
+//!
+//! This module provides **deterministic validation** for pipeline outputs:
+//! - `TierFilterResult`: Tier ratio validation (Tier1 ≤ 10%, Tier3 ≥ 30%)
+//! - `ConsistencyResult`: Duplicate names, cross-references
+//! - `CrossValidationResult`: Evidence traceability, plan consistency
+//! - `EvidenceTraceabilityResult`: File reference validation against registry
+//!
+//! ## Role Separation
+//!
+//! | Module | Type | Purpose |
+//! |--------|------|---------|
+//! | `validation` | Deterministic | Fast pre-checks, tier ratios, file existence |
+//! | `quality::LlmJudge` | Semantic | LLM-based content quality assessment |
+//!
+//! Use this module for programmatic checks. For semantic quality assessment,
+//! use `crate::pipeline::quality::LlmJudge` directly.
 
 mod simplified;
 

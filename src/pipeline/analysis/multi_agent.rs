@@ -63,12 +63,33 @@ pub struct SpecialistResult {
     pub gaps: Vec<AnalysisGap>,
 }
 
+/// Configurable limits for specialist code analysis
+#[derive(Debug, Clone, Copy)]
+pub struct SpecialistLimits {
+    pub max_files_for_patterns: usize,
+    pub max_lines_per_file_patterns: usize,
+    pub max_files_for_constraints: usize,
+    pub max_lines_per_file_constraints: usize,
+}
+
+impl Default for SpecialistLimits {
+    fn default() -> Self {
+        Self {
+            max_files_for_patterns: 15,
+            max_lines_per_file_patterns: 80,
+            max_files_for_constraints: 20,
+            max_lines_per_file_constraints: 150,
+        }
+    }
+}
+
 pub struct MultiAgentAnalyzer {
     provider: Arc<dyn LlmProvider>,
     enabled: bool,
     specialists: Vec<AnalysisSpecialty>,
     timeout_secs: u64,
     cross_validate: bool,
+    limits: SpecialistLimits,
 }
 
 impl MultiAgentAnalyzer {
@@ -83,6 +104,7 @@ impl MultiAgentAnalyzer {
             ],
             timeout_secs: 60,
             cross_validate: true,
+            limits: SpecialistLimits::default(),
         }
     }
 
@@ -101,6 +123,11 @@ impl MultiAgentAnalyzer {
         self
     }
 
+    pub fn with_limits(mut self, limits: SpecialistLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
         self
@@ -113,6 +140,7 @@ impl MultiAgentAnalyzer {
 
         let context = Arc::new(context);
         let timeout = Duration::from_secs(self.timeout_secs);
+        let limits = self.limits;
 
         let mut handles = Vec::new();
         for specialty in &self.specialists {
@@ -121,7 +149,7 @@ impl MultiAgentAnalyzer {
             let specialty = *specialty;
 
             let handle = tokio::spawn(async move {
-                let specialist = Self::create_specialist(provider, specialty);
+                let specialist = Self::create_specialist(provider, specialty, limits);
                 tokio::time::timeout(timeout, specialist.analyze(&ctx)).await
             });
             handles.push((specialty, handle));
@@ -197,18 +225,23 @@ impl MultiAgentAnalyzer {
     fn create_specialist(
         provider: Arc<dyn LlmProvider>,
         specialty: AnalysisSpecialty,
+        limits: SpecialistLimits,
     ) -> Box<dyn SpecialistAgent> {
         match specialty {
             AnalysisSpecialty::Structure => Box::new(StructureSpecialist::new(provider)),
-            AnalysisSpecialty::Pattern => Box::new(PatternSpecialist::new(provider.clone())),
-            AnalysisSpecialty::Constraint => Box::new(ConstraintSpecialist::new(provider.clone())),
+            AnalysisSpecialty::Pattern => {
+                Box::new(PatternSpecialist::new(provider.clone(), limits))
+            }
+            AnalysisSpecialty::Constraint => {
+                Box::new(ConstraintSpecialist::new(provider.clone(), limits))
+            }
             // Additional specialties use pattern specialist as fallback
             AnalysisSpecialty::Architecture
             | AnalysisSpecialty::Security
             | AnalysisSpecialty::Performance
             | AnalysisSpecialty::Testing
             | AnalysisSpecialty::Documentation
-            | AnalysisSpecialty::Domain => Box::new(PatternSpecialist::new(provider)),
+            | AnalysisSpecialty::Domain => Box::new(PatternSpecialist::new(provider, limits)),
         }
     }
 
@@ -452,7 +485,39 @@ Only output valid JSON."#,
             file_summary
         );
 
-        let schema = serde_json::json!({"type": "object"});
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "entry_points": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "kind": { "type": "string" },
+                            "description": { "type": "string" }
+                        },
+                        "required": ["path", "kind", "description"]
+                    }
+                },
+                "core_modules": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "name": { "type": "string" },
+                            "responsibility": { "type": "string" },
+                            "public_items": { "type": "array", "items": { "type": "string" } },
+                            "internal_deps": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["path", "name", "responsibility"]
+                    }
+                },
+                "layers": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["entry_points", "core_modules", "layers"]
+        });
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => Ok(SpecialistResult {
@@ -480,11 +545,12 @@ Only output valid JSON."#,
 
 struct PatternSpecialist {
     provider: Arc<dyn LlmProvider>,
+    limits: SpecialistLimits,
 }
 
 impl PatternSpecialist {
-    fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+    fn new(provider: Arc<dyn LlmProvider>, limits: SpecialistLimits) -> Self {
+        Self { provider, limits }
     }
 }
 
@@ -498,9 +564,13 @@ impl SpecialistAgent for PatternSpecialist {
         let code_samples: Vec<_> = context
             .file_contents
             .iter()
-            .take(10)
+            .take(self.limits.max_files_for_patterns)
             .map(|(path, content)| {
-                let preview = content.lines().take(50).collect::<Vec<_>>().join("\n");
+                let preview = content
+                    .lines()
+                    .take(self.limits.max_lines_per_file_patterns)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 format!("=== {} ===\n{}", path, preview)
             })
             .collect();
@@ -515,7 +585,31 @@ Only output valid JSON."#,
             code_samples.join("\n\n")
         );
 
-        let schema = serde_json::json!({"type": "array"});
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "category": { "type": "string", "enum": ["architecture", "naming", "error_handling", "concurrency", "dependency"] },
+                    "description": { "type": "string" },
+                    "locations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string" },
+                                "line": { "type": "integer" },
+                                "snippet": { "type": "string" }
+                            },
+                            "required": ["file", "line"]
+                        }
+                    },
+                    "usage_guidance": { "type": "string" }
+                },
+                "required": ["name", "category", "description", "locations"]
+            }
+        });
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => Ok(SpecialistResult {
@@ -534,11 +628,12 @@ Only output valid JSON."#,
 
 struct ConstraintSpecialist {
     provider: Arc<dyn LlmProvider>,
+    limits: SpecialistLimits,
 }
 
 impl ConstraintSpecialist {
-    fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+    fn new(provider: Arc<dyn LlmProvider>, limits: SpecialistLimits) -> Self {
+        Self { provider, limits }
     }
 }
 
@@ -552,9 +647,13 @@ impl SpecialistAgent for ConstraintSpecialist {
         let code_samples: Vec<_> = context
             .file_contents
             .iter()
-            .take(15)
+            .take(self.limits.max_files_for_constraints)
             .map(|(path, content)| {
-                let preview = content.lines().take(100).collect::<Vec<_>>().join("\n");
+                let preview = content
+                    .lines()
+                    .take(self.limits.max_lines_per_file_constraints)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 format!("=== {} ===\n{}", path, preview)
             })
             .collect();
@@ -569,7 +668,32 @@ Only output valid JSON."#,
             code_samples.join("\n\n")
         );
 
-        let schema = serde_json::json!({"type": "array"});
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["anti_pattern", "hidden_dependency", "ordering_constraint", "invariant", "gotcha"] },
+                    "title": { "type": "string" },
+                    "description": { "type": "string" },
+                    "rationale": { "type": "string" },
+                    "evidence": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string" },
+                                "line": { "type": "integer" },
+                                "context": { "type": "string" }
+                            },
+                            "required": ["file", "line"]
+                        }
+                    },
+                    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] }
+                },
+                "required": ["kind", "title", "description", "severity"]
+            }
+        });
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => Ok(SpecialistResult {

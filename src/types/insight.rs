@@ -15,32 +15,50 @@ pub enum TierClassification {
 }
 
 impl TierClassification {
+    /// Check if content should be kept based on tier classification
+    ///
+    /// # ADVISORY HEURISTIC - BINARY BOUNDARY
+    ///
+    /// This creates a BINARY decision from what is actually a SPECTRUM:
+    /// - Tier1 (generic) is rejected, Tier2 (convention) is kept
+    /// - But some Tier1 content may be valuable in specific contexts
+    /// - Borderline content (almost Tier2) gets the same treatment as obvious Tier1
+    ///
+    /// ## When this heuristic is useful:
+    /// - Quick filtering of obviously generic content ("use cargo build")
+    /// - Reducing noise in generated artifacts
+    ///
+    /// ## When this heuristic may mislead:
+    /// - Generic knowledge with project-specific application
+    /// - Content that's Tier2 in one context but Tier1 in another
+    /// - LLM-classified borderline content
+    ///
+    /// LLM should have final say on content value. Use this for pre-filtering,
+    /// not as authoritative rejection.
     pub fn should_keep(&self) -> bool {
         matches!(self, Self::Tier2Convention | Self::Tier3Constraint)
     }
 
+    /// Check if content is essential (Tier3 constraint)
+    ///
+    /// Tier3 content represents hidden constraints and gotchas that are
+    /// most valuable for Claude Code. This classification is more reliable
+    /// than the should_keep() boundary since Tier3 content is distinctively
+    /// different from generic knowledge.
     pub fn is_essential(&self) -> bool {
         matches!(self, Self::Tier3Constraint)
     }
 
+    /// Check if content should be rejected (Tier0/Tier1)
+    ///
+    /// # ADVISORY HEURISTIC - See `should_keep()` documentation
+    ///
+    /// Same binary boundary applies. Use for pre-filtering, not final rejection.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Tier0Hallucinated | Self::Tier1Generic)
     }
 
-    pub fn is_rejectable(&self) -> bool {
-        self.is_rejected()
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Tier0Hallucinated => "tier0",
-            Self::Tier1Generic => "tier1",
-            Self::Tier2Convention => "tier2",
-            Self::Tier3Constraint => "tier3",
-        }
-    }
-
-    pub fn as_priority(&self) -> u8 {
+    pub fn value(&self) -> u8 {
         match self {
             Self::Tier0Hallucinated => 0,
             Self::Tier1Generic => 1,
@@ -49,15 +67,18 @@ impl TierClassification {
         }
     }
 
-    pub fn value_multiplier(&self) -> f32 {
-        match self {
-            Self::Tier0Hallucinated => 0.0,
-            Self::Tier1Generic => 0.3,
-            Self::Tier2Convention => 0.6,
-            Self::Tier3Constraint => 1.0,
+    pub fn from_value(v: u8) -> Self {
+        match v {
+            0 => Self::Tier0Hallucinated,
+            1 => Self::Tier1Generic,
+            2 => Self::Tier2Convention,
+            _ => Self::Tier3Constraint,
         }
     }
 }
+
+/// Alias for TierClassification - used in artifact types for clarity
+pub type ContentTier = TierClassification;
 
 impl std::fmt::Display for TierClassification {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

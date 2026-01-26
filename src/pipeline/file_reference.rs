@@ -1,7 +1,6 @@
-//! Unified File Reference Module
+//! File Reference Parsing and Validation
 //!
-//! Single source of truth for file reference parsing, validation, and resolution.
-//! Replaces fragmented regex patterns across multiple modules.
+//! Parses @path:line references and validates against VerifiedFileRegistry.
 
 use std::path::{Path, PathBuf};
 
@@ -29,19 +28,26 @@ impl FileReference {
     /// Parse a file reference from raw text
     pub fn parse(raw: &str) -> Option<Self> {
         FILE_REFERENCE_PATTERN.captures(raw).and_then(|cap| {
-            let path = cap.get(1)?.as_str().to_string();
+            // Group 1 = quoted path, Group 2 = unquoted path
+            let path = cap
+                .get(1)
+                .or_else(|| cap.get(2))
+                .map(|m| m.as_str().to_string())?;
 
             // Skip non-file references
             if path.is_empty()
                 || path.starts_with("http")
+                || path.starts_with("https")
                 || path.starts_with("CLAUDE")
                 || path.contains('@')
+                || path.chars().all(|c| c.is_ascii_digit())
             {
                 return None;
             }
 
-            let line_start = cap.get(2).and_then(|m| m.as_str().parse().ok());
-            let line_end = cap.get(3).and_then(|m| m.as_str().parse().ok());
+            // Line numbers are in groups 3 and 4 now
+            let line_start = cap.get(3).and_then(|m| m.as_str().parse().ok());
+            let line_end = cap.get(4).and_then(|m| m.as_str().parse().ok());
 
             Some(Self {
                 raw: raw.to_string(),

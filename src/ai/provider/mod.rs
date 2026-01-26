@@ -12,6 +12,7 @@
 mod chain;
 mod circuit_breaker;
 mod openai;
+mod tracked;
 
 #[cfg(feature = "claude-agent")]
 mod claude_agent;
@@ -21,6 +22,7 @@ pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
 };
 pub use openai::OpenAiProvider;
+pub use tracked::TrackedProvider;
 
 // Note: Context window constants removed - use ModelRegistry instead
 #[cfg(feature = "claude-agent")]
@@ -40,23 +42,45 @@ use crate::types::Result;
 // LLM Response with Usage Metrics
 // =============================================================================
 
-/// Complete LLM response including content, usage metrics, and actual cost
+/// Why the LLM stopped generating
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StopReason {
+    #[default]
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+    Refusal,
+}
+
+/// Complete LLM response including content, usage metrics, and stop reason
 #[derive(Debug, Clone)]
 pub struct LlmResponse {
-    /// Generated content (structured JSON)
     pub content: Value,
-    /// Token usage metrics
     pub usage: TokenUsage,
-    /// Actual cost in USD (from provider API response)
     pub cost_usd: f64,
-    /// Response timing
     pub timing: ResponseTiming,
-    /// Provider and model info
     pub metadata: ResponseMetadata,
+    pub stop_reason: StopReason,
 }
 
 impl LlmResponse {
-    /// Create response with content only (usage/cost unknown)
+    pub fn new(
+        content: Value,
+        usage: TokenUsage,
+        timing: ResponseTiming,
+        metadata: ResponseMetadata,
+        stop_reason: StopReason,
+    ) -> Self {
+        Self {
+            content,
+            usage,
+            cost_usd: 0.0,
+            timing,
+            metadata,
+            stop_reason,
+        }
+    }
+
     pub fn content_only(content: Value) -> Self {
         Self {
             content,
@@ -64,10 +88,10 @@ impl LlmResponse {
             cost_usd: 0.0,
             timing: ResponseTiming::default(),
             metadata: ResponseMetadata::default(),
+            stop_reason: StopReason::EndTurn,
         }
     }
 
-    /// Create full response with all metrics including actual cost
     pub fn with_metrics(
         content: Value,
         usage: TokenUsage,
@@ -81,7 +105,12 @@ impl LlmResponse {
             cost_usd,
             timing,
             metadata,
+            stop_reason: StopReason::EndTurn,
         }
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        self.stop_reason == StopReason::MaxTokens
     }
 }
 
@@ -156,6 +185,155 @@ pub struct ResponseMetadata {
 
 /// Shared LLM provider type for concurrent access across pipeline stages.
 pub type SharedProvider = Arc<dyn LlmProvider + Send + Sync>;
+
+// =============================================================================
+// Provider Set - Tiered Model Routing
+// =============================================================================
+
+/// Model tiers for different task types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    /// Fast model for quick, simple tasks (Haiku-class)
+    /// Used for: classification, detection, validation
+    Fast,
+    /// Default model for standard operations (Sonnet-class)
+    /// Used for: generation, refinement, review
+    Default,
+    /// Performance model for critical high-intelligence tasks (Opus-class)
+    /// Used for: constraint extraction, mistake discovery, deep analysis
+    Performance,
+}
+
+/// Pipeline phase identifiers for type-safe phase-based routing
+///
+/// Use these constants with `ProviderSet::provider_for_phase()` to ensure
+/// compile-time verification of phase names.
+pub mod phase_id {
+    // Fast tier phases (quick classification)
+    pub const PROJECT_DETECTION: &str = "project_detection";
+    pub const CONVENTION_INFERENCE: &str = "convention_inference";
+    pub const VALIDATION: &str = "validation";
+    pub const TIER_CLASSIFICATION: &str = "tier_classification";
+
+    // Performance tier phases (high-intelligence)
+    pub const CONSTRAINT_EXTRACTION: &str = "constraint_extraction";
+    pub const MISTAKE_DISCOVERY: &str = "mistake_discovery";
+    pub const DEEP_ANALYSIS: &str = "deep_analysis";
+    pub const SYNTHESIS: &str = "synthesis";
+    pub const DEEP_REVIEW: &str = "deep_review";
+
+    // Default tier phases
+    pub const GENERATION: &str = "generation";
+    pub const REFINEMENT: &str = "refinement";
+    pub const REVIEW: &str = "review";
+}
+
+/// Set of providers for tiered model routing
+///
+/// Enables phase-based model selection where different pipeline phases
+/// use different model tiers based on task complexity.
+#[derive(Clone)]
+pub struct ProviderSet {
+    /// Fast model provider (Haiku-class)
+    pub fast: Arc<dyn LlmProvider>,
+    /// Default model provider (Sonnet-class)
+    pub default: Arc<dyn LlmProvider>,
+    /// Performance model provider (Opus-class)
+    pub performance: Arc<dyn LlmProvider>,
+}
+
+impl ProviderSet {
+    /// Create a new ProviderSet with the same provider for all tiers.
+    ///
+    /// **Warning**: This does NOT wrap providers in ProviderChain, so there is:
+    /// - No circuit breaker protection
+    /// - No retry on transient failures
+    /// - No fallback to alternative providers
+    ///
+    /// For production use with resilience, use `create_provider_set()` instead.
+    pub fn single(provider: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            fast: Arc::clone(&provider),
+            default: Arc::clone(&provider),
+            performance: provider,
+        }
+    }
+
+    /// Enable budget and metrics tracking for all providers
+    pub fn with_tracking(
+        self,
+        budget: crate::ai::budget::SharedBudget,
+        metrics: crate::ai::metrics::SharedMetrics,
+    ) -> Self {
+        Self {
+            fast: TrackedProvider::wrap_with_tracking(self.fast, budget.clone(), metrics.clone()),
+            default: TrackedProvider::wrap_with_tracking(
+                self.default,
+                budget.clone(),
+                metrics.clone(),
+            ),
+            performance: TrackedProvider::wrap_with_tracking(self.performance, budget, metrics),
+        }
+    }
+
+    /// Get provider for a specific tier
+    pub fn provider_for_tier(&self, tier: ModelTier) -> &Arc<dyn LlmProvider> {
+        match tier {
+            ModelTier::Fast => &self.fast,
+            ModelTier::Default => &self.default,
+            ModelTier::Performance => &self.performance,
+        }
+    }
+
+    /// Get provider for a specific pipeline phase
+    ///
+    /// Phase-to-tier mapping:
+    /// - Fast: project_detection, convention_inference, validation
+    /// - Default: generation, refinement, review
+    /// - Performance: constraint_extraction, mistake_discovery, deep_analysis
+    ///
+    /// Use `phase_id::*` constants for type-safe phase names.
+    pub fn provider_for_phase(&self, phase: &str) -> &Arc<dyn LlmProvider> {
+        // Fast tier - quick classification and detection
+        if matches!(
+            phase,
+            phase_id::PROJECT_DETECTION
+                | phase_id::CONVENTION_INFERENCE
+                | phase_id::VALIDATION
+                | phase_id::TIER_CLASSIFICATION
+        ) {
+            return &self.fast;
+        }
+        // Performance tier - high-intelligence tasks
+        if matches!(
+            phase,
+            phase_id::CONSTRAINT_EXTRACTION
+                | phase_id::MISTAKE_DISCOVERY
+                | phase_id::DEEP_ANALYSIS
+                | phase_id::SYNTHESIS
+                | phase_id::DEEP_REVIEW
+        ) {
+            return &self.performance;
+        }
+        // Default tier - everything else
+        &self.default
+    }
+
+    /// Get the default provider (backward compatibility)
+    pub fn default_provider(&self) -> &Arc<dyn LlmProvider> {
+        &self.default
+    }
+}
+
+impl std::fmt::Debug for ProviderSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderSet")
+            .field("fast", &self.fast.model())
+            .field("default", &self.default.model())
+            .field("performance", &self.performance.model())
+            .finish()
+    }
+}
 
 // =============================================================================
 // Provider Configuration
@@ -295,4 +473,74 @@ pub async fn create_provider_for_model(
     let mut config = base_config.clone();
     config.model = Some(model.to_string());
     create_provider(&config).await
+}
+
+/// Create a tiered provider set from LlmConfig with resilience
+///
+/// Creates separate providers for fast, default, and performance tiers
+/// based on the configured models. Each provider is wrapped in a ProviderChain
+/// for circuit breaker protection and retry logic.
+///
+/// The circuit_breaker config from Config is converted and applied to each provider chain.
+pub async fn create_provider_set(
+    base_config: &ProviderConfig,
+    llm_config: &crate::config::LlmConfig,
+    circuit_breaker_config: &crate::config::CircuitBreakerConfig,
+) -> Result<ProviderSet> {
+    // Convert config type to provider circuit breaker type
+    let cb_config = CircuitBreakerConfig {
+        failure_threshold: circuit_breaker_config.failure_threshold as u32,
+        success_threshold: 2, // Default: 2 successes to close
+        open_timeout: std::time::Duration::from_secs(circuit_breaker_config.recovery_timeout_secs),
+        half_open_max_requests: circuit_breaker_config.half_open_max_calls as u32,
+    };
+
+    // Create default provider first
+    let default_raw = create_provider(base_config).await?;
+    let default = wrap_with_resilience(default_raw, &cb_config);
+
+    // Create fast provider (falls back to default if not configured)
+    let fast = if let Some(fast_model) = &llm_config.fast_model {
+        let raw = create_provider_for_model(base_config, fast_model).await?;
+        wrap_with_resilience(raw, &cb_config)
+    } else {
+        Arc::clone(&default)
+    };
+
+    // Create performance provider (falls back to default if not configured)
+    let performance = if let Some(perf_model) = &llm_config.performance_model {
+        let raw = create_provider_for_model(base_config, perf_model).await?;
+        wrap_with_resilience(raw, &cb_config)
+    } else {
+        Arc::clone(&default)
+    };
+
+    tracing::info!(
+        fast_model = fast.model(),
+        default_model = default.model(),
+        performance_model = performance.model(),
+        "ProviderSet created with tiered models and resilience"
+    );
+
+    Ok(ProviderSet {
+        fast,
+        default,
+        performance,
+    })
+}
+
+/// Wrap a provider in ProviderChain for circuit breaker and retry support
+fn wrap_with_resilience(
+    provider: SharedProvider,
+    circuit_breaker_config: &CircuitBreakerConfig,
+) -> Arc<dyn LlmProvider> {
+    let chain_config = ChainConfig {
+        circuit_breaker: circuit_breaker_config.clone(),
+        ..ChainConfig::default()
+    };
+    let chain = ProviderChainBuilder::new()
+        .add_shared(provider)
+        .with_config(chain_config)
+        .build();
+    Arc::new(chain)
 }

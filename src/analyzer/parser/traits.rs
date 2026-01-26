@@ -67,7 +67,7 @@ pub fn get_node_position(node: tree_sitter::Node) -> (u32, u32, u32, u32) {
     )
 }
 
-/// Creates a file node for the knowledge graph.
+/// Creates a file node for analysis tracking.
 /// Shared across all language parsers.
 pub fn create_file_node(path: &str) -> Node {
     Node {

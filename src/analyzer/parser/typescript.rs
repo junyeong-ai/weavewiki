@@ -61,11 +61,11 @@ impl Parser for TypeScriptParser {
 }
 
 fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (import_statement
             source: (string) @source
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -116,7 +116,7 @@ fn extract_imports(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_exports(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (export_statement
             declaration: [
                 (function_declaration name: (identifier) @name)
@@ -124,7 +124,7 @@ fn extract_exports(root: tree_sitter::Node, content: &str, path: &str, result: &
                 (lexical_declaration (variable_declarator name: (identifier) @name))
             ]
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -166,11 +166,11 @@ fn extract_exports(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (class_declaration
             name: (type_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -233,12 +233,12 @@ fn extract_classes(root: tree_sitter::Node, content: &str, path: &str, result: &
 }
 
 fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result: &mut ParseResult) {
-    let query_str = r#"
+    let query_str = r"
         (function_declaration
             name: (identifier) @name
             parameters: (formal_parameters) @params
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -324,11 +324,11 @@ fn extract_interfaces(
     path: &str,
     result: &mut ParseResult,
 ) {
-    let query_str = r#"
+    let query_str = r"
         (interface_declaration
             name: (type_identifier) @name
         )
-    "#;
+    ";
 
     if let Ok(query) = Query::new(
         &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),

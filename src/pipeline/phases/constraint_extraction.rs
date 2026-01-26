@@ -217,7 +217,6 @@ impl ConstraintExtractor {
                 });
             }
 
-            // Extract module-specific constraints from synthesis
             for constraint_desc in &module.constraints {
                 if !constraint_desc.is_empty() {
                     constraints.gotchas.push(Gotcha {
@@ -225,7 +224,7 @@ impl ConstraintExtractor {
                         description: constraint_desc.clone(),
                         when: format!("Working with {} module", module.name),
                         solution: "Follow the identified constraint".to_string(),
-                        related_files: module.key_files.clone(),
+                        related_files: vec![module.path.clone()],
                     });
                 }
             }

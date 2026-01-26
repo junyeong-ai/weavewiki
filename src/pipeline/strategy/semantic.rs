@@ -43,42 +43,20 @@ impl SemanticStrategy {
         context: &StrategyContext<'_>,
     ) -> String {
         let file_context = context.file_registry.to_prompt_context(50);
-        let source_insights = context.format_source_insights();
-        let project_context = context.format_project_context();
         let issues = context.format_issues();
 
         const DEFAULT_SUGGESTIONS: &str =
             "- Add more specific file references\n- Use stronger directive language";
 
-        // Build prompt with full context
-        let mut prompt = format!(
+        let prompt = format!(
             r##"Improve this {content_type} for a Claude Code plugin. Preserve the original insights while making it more actionable and specific.
 
 ## QUALITY ISSUES TO ADDRESS
 {issues}
 
 {feedback_section}
-"##,
-            content_type = content_type,
-            issues = issues,
-            feedback_section = context.feedback_section(),
-        );
 
-        // Add source insights if available
-        if !source_insights.is_empty() {
-            prompt.push_str(&source_insights);
-            prompt.push('\n');
-        }
-
-        // Add project context if available
-        if !project_context.is_empty() {
-            prompt.push_str(&project_context);
-            prompt.push('\n');
-        }
-
-        // Add file context and current content
-        prompt.push_str(&format!(
-            r##"## AVAILABLE PROJECT FILES
+## AVAILABLE PROJECT FILES
 {file_context}
 
 ## CURRENT CONTENT
@@ -88,24 +66,26 @@ Description: {description}
 {body}
 ---
 
-## ENHANCEMENT REQUIREMENTS
-1. PRESERVE all insights from SOURCE INSIGHTS section
-2. Use directive language: 'You must...', 'Always...', 'Never...', 'Avoid...', 'Prefer...'
-3. Add @file:line references from AVAILABLE FILES (e.g., '@src/main.rs:42')
-4. Add concrete examples with good/bad comparison where helpful
-5. Remove generic phrases: 'typically', 'usually', 'best practices', 'as needed'
-6. Let structure emerge naturally - do NOT force fixed sections
+## ENHANCEMENT GUIDELINES
+1. Use clear, actionable language appropriate for the project context
+2. Add @file:line references from AVAILABLE FILES when relevant
+3. Include concrete examples where helpful
+4. Be specific to the project rather than giving generic advice
+5. Let structure emerge naturally from the content
 
 ## SUGGESTIONS
 {suggestions}
 
 Return JSON with enhanced content in 'enhanced_body' field."##,
+            content_type = content_type,
+            issues = issues,
+            feedback_section = context.feedback_section(),
             file_context = file_context,
             name = name,
             description = description,
             body = body,
             suggestions = context.suggestions_section(DEFAULT_SUGGESTIONS),
-        ));
+        );
 
         prompt
     }

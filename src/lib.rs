@@ -1,6 +1,6 @@
 //! claudegen - Claude Code Plugin Generator
 //!
-//! Analyzes codebases and generates Claude Code plugins following official structure:
+//! Analyzes codebases and generates Claude Code plugins:
 //! - CLAUDE.md (project memory)
 //! - {project-name}-plugin/.claude-plugin/plugin.json (plugin manifest)
 //! - {project-name}-plugin/skills/{name}/SKILL.md (automated skills)
@@ -18,16 +18,13 @@ pub mod storage;
 pub mod types;
 pub mod utils;
 
-pub use config::{Config, ConfigLoader};
-pub use storage::database::PoolConfig;
-pub use storage::{Database, SharedDatabase};
+pub use config::{Config, ConfigLoader, TimeoutConfig};
 pub use types::error::{ClaudegenError, ErrorCategory, Result, ResultExt};
 
 pub use ai::{
     GlobalTokenBudget, LlmProvider, LlmResponse, MetricsCollector, ProviderChain,
     ProviderChainBuilder, SharedBudget, SharedMetrics, with_timeout,
 };
-pub use config::TimeoutConfig;
 
 #[cfg(feature = "claude-agent")]
 pub use ai::ClaudeAgentProvider;
@@ -37,11 +34,4 @@ pub use analyzer::{
     scanner::FileScanner,
 };
 
-pub use pipeline::{
-    AdaptivePipeline,
-    AdaptivePipelineOutput,
-    GateResult,
-    // Quality gate
-    QualityGate,
-    QualityGateConfig,
-};
+pub use pipeline::{AdaptivePipeline, AdaptivePipelineOutput};

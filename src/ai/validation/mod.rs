@@ -1,24 +1,20 @@
-//! AI Response Validation and Quality Assurance
-//!
-//! Comprehensive validation layer for LLM responses.
+//! AI Response Validation
 
 mod diagram;
-mod json_repair;
 mod response;
+mod structured_output;
 
 pub use diagram::{
     DiagramError, DiagramValidation, DiagramValidator, DiagramWarning, is_valid_mermaid,
     validate_mermaid,
 };
-pub use json_repair::{JsonRepairer, extract_json_from_response, extract_json_with_repair_status};
 pub use response::{ResponseValidationResult, ResponseValidator};
+pub use structured_output::{deserialize_llm_response, parse_structured_output};
 
 use crate::types::Result;
 use serde_json::Value;
 
-/// Unified validation pipeline combining all validation steps
 pub struct ValidationPipeline {
-    repairer: JsonRepairer,
     validator: ResponseValidator,
 }
 
@@ -31,20 +27,15 @@ impl Default for ValidationPipeline {
 impl ValidationPipeline {
     pub fn new() -> Self {
         Self {
-            repairer: JsonRepairer::new(),
             validator: ResponseValidator::new(),
         }
     }
 
     pub fn process(&self, raw_response: &str) -> Result<ProcessedResponse> {
-        let (value, was_repaired) = self.repairer.parse_or_repair(raw_response)?;
+        let value = parse_structured_output(raw_response)?;
         let validation = self.validator.validate_batch_response(&value);
 
-        Ok(ProcessedResponse {
-            value,
-            was_repaired,
-            validation,
-        })
+        Ok(ProcessedResponse { value, validation })
     }
 
     pub fn validate_only(&self, value: &Value) -> ResponseValidationResult {
@@ -55,7 +46,6 @@ impl ValidationPipeline {
 #[derive(Debug)]
 pub struct ProcessedResponse {
     pub value: Value,
-    pub was_repaired: bool,
     pub validation: ResponseValidationResult,
 }
 
@@ -103,15 +93,14 @@ mod tests {
 
         let result = pipeline.process(valid_json).unwrap();
         assert!(result.is_usable());
-        assert!(!result.was_repaired);
     }
 
     #[test]
-    fn test_pipeline_repairs_json() {
+    fn test_pipeline_rejects_malformed_json() {
         let pipeline = ValidationPipeline::new();
         let malformed = r#"{"files": [{"path": "test.rs", "sections": []}]"#;
 
-        let result = pipeline.process(malformed).unwrap();
-        assert!(result.was_repaired);
+        let result = pipeline.process(malformed);
+        assert!(result.is_err());
     }
 }

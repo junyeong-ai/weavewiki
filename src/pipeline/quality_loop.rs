@@ -2,10 +2,10 @@
 //!
 //! Orchestrates the complete generation pipeline with quality gates:
 //! 1. Analysis Quality Gate: Ensure analysis confidence meets threshold
-//! 2. Generation Quality Gate: Ensure semantic/structural quality meets threshold
-//! 3. Evidence Quality Gate: Validate all file references against source
-//! 4. 5-Layer Validation Pipeline: Format → Evidence → Semantic → Value → Cross-Artifact
-//! 5. Clean Pass Guarantee: N consecutive passes with zero issues
+//! 2. Synthesis Quality Gate: Ensure synthesis confidence meets threshold
+//! 3. Evidence Quality Gate: Validate file references against VerifiedFileRegistry
+//! 4. 3-Layer Validation: Tier Filter → Consistency → Cross-Artifact
+//! 5. Deep Review: Two-pass LLM review (optional)
 //!
 //! Durable Execution Features:
 //! - Periodic checkpointing for crash recovery
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
-use crate::ai::{LlmProvider, with_timeout};
+use crate::ai::{LlmProvider, ProviderSet, phase_id, with_timeout};
 use crate::config::{AnalysisDepth, Config};
 use crate::types::Result;
 
@@ -88,20 +88,49 @@ pub struct DiscoveredGap {
 pub struct QualityLoop {
     project_root: PathBuf,
     output_dir: Option<PathBuf>,
-    provider: Arc<dyn LlmProvider>,
+    providers: ProviderSet,
     config: Config,
     file_registry: OnceCell<VerifiedFileRegistry>,
+    budget: Option<crate::ai::budget::SharedBudget>,
+    metrics: Option<crate::ai::metrics::SharedMetrics>,
 }
 
 impl QualityLoop {
-    pub fn new(project_root: PathBuf, provider: Arc<dyn LlmProvider>, config: Config) -> Self {
+    /// Create a new QualityLoop with tiered providers for phase-based model routing
+    pub fn new(project_root: PathBuf, providers: ProviderSet, config: Config) -> Self {
         Self {
             project_root,
             output_dir: None,
-            provider,
+            providers,
             config,
             file_registry: OnceCell::new(),
+            budget: None,
+            metrics: None,
         }
+    }
+
+    /// Enable budget tracking for checkpoint persistence
+    pub fn with_budget(mut self, budget: crate::ai::budget::SharedBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Enable metrics tracking for checkpoint persistence
+    pub fn with_metrics(mut self, metrics: crate::ai::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Create a QualityLoop with a single provider for all phases (backward compatibility)
+    ///
+    /// **Warning**: This path does NOT include ProviderChain resilience (circuit breaker, retry).
+    /// For production use, prefer `QualityLoop::new()` with a ProviderSet from `create_provider_set()`.
+    pub fn with_single_provider(
+        project_root: PathBuf,
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+    ) -> Self {
+        Self::new(project_root, ProviderSet::single(provider), config)
     }
 
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
@@ -114,9 +143,36 @@ impl QualityLoop {
         self
     }
 
+    /// Update checkpoint with current budget and metrics state
+    fn update_checkpoint_stats(&self, checkpoint: &mut ExecutionCheckpoint) {
+        // Update budget stats
+        if let Some(ref budget) = self.budget {
+            let stats = budget.stats();
+            checkpoint.tokens_used = stats.consumed;
+            checkpoint.budget_remaining = stats.remaining;
+        } else {
+            checkpoint.budget_remaining = self.config.budget.total_tokens;
+        }
+
+        // Update metrics stats
+        if let Some(ref metrics) = self.metrics {
+            let summary = metrics.summary();
+            checkpoint.api_calls = summary.api_calls;
+            checkpoint.input_tokens = summary.input_tokens;
+            checkpoint.output_tokens = summary.output_tokens;
+            checkpoint.avg_latency_ms = summary.avg_latency_ms;
+            checkpoint.total_cost_usd = summary.total_cost_usd;
+            checkpoint.total_duration_ms = summary.total_duration_ms;
+        }
+    }
+
     async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
+        let root = &self.project_root;
+        let analysis_config = &self.config.analysis;
         self.file_registry
-            .get_or_try_init(|| async { VerifiedFileRegistry::build(&self.project_root).await })
+            .get_or_try_init(|| async move {
+                VerifiedFileRegistry::build_with_config(root, analysis_config).await
+            })
             .await
             .cloned()
     }
@@ -218,10 +274,10 @@ impl QualityLoop {
                     .collect(),
             };
 
-            // Run deep review on the recovered artifacts
+            // Run deep review on the recovered artifacts (performance tier)
             let file_registry = self.get_file_registry().await?;
             let engine = DeepReviewEngine::new(
-                Arc::clone(&self.provider),
+                Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_REVIEW)),
                 self.config.deep_review(),
                 file_registry,
             );
@@ -279,7 +335,7 @@ impl QualityLoop {
         let mut gaps_discovered = Vec::new();
         let mut analysis_rerun_count = 0;
         let mut checkpoint = ExecutionCheckpoint::new();
-        checkpoint.budget_remaining = self.config.budget.total_tokens;
+        self.update_checkpoint_stats(&mut checkpoint);
 
         // Track best result across iterations
         let mut best_result: Option<AdaptivePipelineOutput> = None;
@@ -291,6 +347,7 @@ impl QualityLoop {
         for outer_iter in 0..loop_config.max_iterations {
             checkpoint.current_phase = PipelinePhase::Analysis;
             checkpoint.phase_progress = outer_iter as f32 / loop_config.max_iterations as f32;
+            self.update_checkpoint_stats(&mut checkpoint);
 
             // Save checkpoint periodically
             if let Some(manager) = checkpoint_manager.as_mut() {
@@ -307,7 +364,7 @@ impl QualityLoop {
             // Create pipeline with current config (may have escalated depth)
             let pipeline = AdaptivePipeline::new(
                 self.project_root.clone(),
-                Arc::clone(&self.provider),
+                self.providers.clone(),
                 current_config.clone(),
             );
 
@@ -359,6 +416,7 @@ impl QualityLoop {
             });
             checkpoint.refinement_iteration = result.refinement_iterations;
             checkpoint.current_phase = PipelinePhase::Refinement;
+            self.update_checkpoint_stats(&mut checkpoint);
 
             // Save checkpoint after each pipeline run
             if let Some(manager) = checkpoint_manager.as_mut() {
@@ -447,10 +505,9 @@ impl QualityLoop {
                             required: 1,
                         },
                     });
-                } else {
-                    analysis_rerun_count += 1;
-                    continue;
                 }
+                analysis_rerun_count += 1;
+                continue;
             }
 
             if synthesis_confidence < loop_config.target_score {
@@ -494,10 +551,9 @@ impl QualityLoop {
                             required: 1,
                         },
                     });
-                } else {
-                    analysis_rerun_count += 1;
-                    continue;
                 }
+                analysis_rerun_count += 1;
+                continue;
             }
 
             let evidence_check = self.validate_evidence(&result).await;
@@ -546,10 +602,9 @@ impl QualityLoop {
                                 required: 1,
                             },
                         });
-                    } else {
-                        analysis_rerun_count += 1;
-                        continue;
                     }
+                    analysis_rerun_count += 1;
+                    continue;
                 }
             }
 
@@ -563,7 +618,7 @@ impl QualityLoop {
                         (true, 0)
                     };
 
-                // Run 5-layer validation pipeline
+                // Run 3-layer validation: Tier Filter → Consistency → Cross-Artifact
                 let validation_result = self.run_validation_pipeline(&result).await?;
 
                 let clean_pass_status = validation_result.1;
@@ -580,6 +635,7 @@ impl QualityLoop {
                     );
 
                     checkpoint.current_phase = PipelinePhase::Finalization;
+                    self.update_checkpoint_stats(&mut checkpoint);
                     if let Some(manager) = checkpoint_manager.as_mut() {
                         let _ = manager.save_checkpoint(&checkpoint).await;
                     }
@@ -595,15 +651,14 @@ impl QualityLoop {
                         validation_results: Some(validation_result.0),
                         clean_pass_status,
                     });
-                } else {
-                    tracing::warn!(
-                        iteration = outer_iter + 1,
-                        deep_review_attempts,
-                        deep_review_passed,
-                        validation_passed,
-                        "Review/validation incomplete, continuing refinement"
-                    );
                 }
+                tracing::warn!(
+                    iteration = outer_iter + 1,
+                    deep_review_attempts,
+                    deep_review_passed,
+                    validation_passed,
+                    "Review/validation incomplete, continuing refinement"
+                );
             }
 
             tracing::debug!(
@@ -647,7 +702,7 @@ impl QualityLoop {
         // Fallback: run one more pipeline attempt
         let fallback_pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
-            Arc::clone(&self.provider),
+            self.providers.clone(),
             current_config,
         );
         let timeout = Duration::from_secs(self.config.timeout().quality_loop_timeout_secs);
@@ -691,6 +746,7 @@ impl QualityLoop {
     ) -> Result<QualityLoopResult> {
         let mut checkpoint = ExecutionCheckpoint::new();
         checkpoint.current_phase = PipelinePhase::Analysis;
+        self.update_checkpoint_stats(&mut checkpoint);
 
         if let Some(manager) = checkpoint_manager.as_mut() {
             let _ = manager.save_checkpoint(&checkpoint).await;
@@ -698,7 +754,7 @@ impl QualityLoop {
 
         let pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
-            Arc::clone(&self.provider),
+            self.providers.clone(),
             self.config.clone(),
         );
 
@@ -738,8 +794,9 @@ impl QualityLoop {
 
     async fn run_deep_review(&self, result: &AdaptivePipelineOutput) -> Result<(bool, u32)> {
         let file_registry = self.get_file_registry().await?;
+        // Use performance tier for deep review (high-intelligence task)
         let engine = DeepReviewEngine::new(
-            Arc::clone(&self.provider),
+            Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_REVIEW)),
             self.config.deep_review(),
             file_registry,
         );
@@ -883,26 +940,25 @@ impl QualityLoop {
         };
 
         // Convergence requires: quality met + no errors + all validations pass
-        let all_validations_pass = result.tier_filter_result.passed
-            && result.consistency_result.passed
-            && cross.passed;
+        let all_validations_pass =
+            result.tier_filter_result.passed && result.consistency_result.passed && cross.passed;
 
-        let status = if quality_score >= required_quality && error_count == 0 && all_validations_pass
-        {
-            CleanPassStatus::Converged { passes: 1 }
-        } else if quality_score < required_quality {
-            CleanPassStatus::Failed {
-                reason: FailureReason::QualityBelow {
-                    score: quality_score,
-                    threshold: required_quality,
-                },
-            }
-        } else {
-            CleanPassStatus::InProgress {
-                streak: 0,
-                required: 1,
-            }
-        };
+        let status =
+            if quality_score >= required_quality && error_count == 0 && all_validations_pass {
+                CleanPassStatus::Converged { passes: 1 }
+            } else if quality_score < required_quality {
+                CleanPassStatus::Failed {
+                    reason: FailureReason::QualityBelow {
+                        score: quality_score,
+                        threshold: required_quality,
+                    },
+                }
+            } else {
+                CleanPassStatus::InProgress {
+                    streak: 0,
+                    required: 1,
+                }
+            };
 
         Ok((validation_results, status))
     }
@@ -1056,7 +1112,7 @@ impl QualityLoop {
         // Plugin artifacts go to output_dir (if set) or project root
         let pipeline = AdaptivePipeline::new(
             self.project_root.clone(),
-            Arc::clone(&self.provider),
+            self.providers.clone(),
             self.config.clone(),
         );
 
@@ -1069,7 +1125,7 @@ impl QualityLoop {
         {
             let plugin_pipeline = AdaptivePipeline::new(
                 output_dir.clone(),
-                Arc::clone(&self.provider),
+                self.providers.clone(),
                 self.config.clone(),
             );
             plugin_pipeline.write_plugin_only(output).await?;
@@ -1103,4 +1159,3 @@ struct EvidenceCheckResult {
     invalid_ratio: f32,
     gaps: Vec<String>,
 }
-

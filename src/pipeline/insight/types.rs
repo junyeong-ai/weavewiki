@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ValueScore;
-
 pub use crate::config::BusinessRuleType;
 pub use crate::types::insight::TierClassification;
 
@@ -11,13 +9,36 @@ pub use crate::types::insight::TierClassification;
 pub use crate::types::insight::ArtifactClassification;
 
 // ============================================================================
-// Keyword Matching Utilities
+// Value Score
 // ============================================================================
 
-/// Check if text contains any of the given keywords
-pub fn text_contains_any(text: &str, keywords: &[&str]) -> bool {
-    keywords.iter().any(|k| text.contains(k))
+/// Value score for an insight (3-dimensional quality metric)
+#[derive(Debug, Clone, Default)]
+pub struct ValueScore {
+    /// How well this prevents AI mistakes (0.0 - 1.0)
+    pub mistake_prevention: f32,
+    /// How hard this is to discover from code (0.0 - 1.0)
+    pub discoverability: f32,
+    /// How well this fits the artifact type (0.0 - 1.0)
+    pub artifact_fitness: f32,
+    /// Overall weighted score
+    pub overall: f32,
 }
+
+impl ValueScore {
+    pub fn new(mistake_prevention: f32, discoverability: f32, artifact_fitness: f32) -> Self {
+        Self {
+            mistake_prevention,
+            discoverability,
+            artifact_fitness,
+            overall: (mistake_prevention + discoverability + artifact_fitness) / 3.0,
+        }
+    }
+}
+
+// ============================================================================
+// Core Insight Types
+// ============================================================================
 
 /// Raw insight extracted from analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,8 +187,8 @@ pub struct Constraint {
     pub severity: String,
 }
 
-/// Type of constraint
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Type of constraint - extensible for diverse languages/frameworks
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintType {
     Concurrency,
@@ -175,6 +196,18 @@ pub enum ConstraintType {
     Security,
     Boundary,
     Performance,
+    // Extended types for diverse languages/frameworks
+    Memory,          // C++, Rust memory management
+    ThreadSafety,    // Java, C# thread safety
+    NullHandling,    // C#, Kotlin null safety
+    TypeSafety,      // TypeScript, Flow type constraints
+    StateManagement, // React, Vue state constraints
+    Transaction,     // Database transaction constraints
+    ApiContract,     // REST/GraphQL API constraints
+    /// Catch-all for domain-specific or language-specific constraints
+    /// LLM can classify freely without being limited to predefined types
+    #[serde(other)]
+    Other,
 }
 
 impl ConstraintType {
@@ -185,6 +218,14 @@ impl ConstraintType {
             Self::Security => "security",
             Self::Boundary => "boundary",
             Self::Performance => "performance",
+            Self::Memory => "memory",
+            Self::ThreadSafety => "thread_safety",
+            Self::NullHandling => "null_handling",
+            Self::TypeSafety => "type_safety",
+            Self::StateManagement => "state_management",
+            Self::Transaction => "transaction",
+            Self::ApiContract => "api_contract",
+            Self::Other => "other",
         }
     }
 }

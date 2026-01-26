@@ -204,6 +204,13 @@ impl ConfigLoader {
     }
 
     fn detect_preset_from_global() -> Option<super::ConfigPreset> {
+        // Check env var first (consistent with detect_preset)
+        if let Ok(preset_str) = env::var("CLAUDEGEN_PRESET")
+            && let Ok(preset) = preset_str.parse()
+        {
+            return Some(preset);
+        }
+
         if let Some(global_path) = Self::global_config_path()
             && global_path.exists()
         {
@@ -394,7 +401,6 @@ impl ConfigLoader {
 
         // Create directories
         fs::create_dir_all(&project_dir)?;
-        fs::create_dir_all(project_dir.join("graph"))?;
         fs::create_dir_all(project_dir.join("cache"))?;
         fs::create_dir_all(project_dir.join("checkpoints"))?;
 
@@ -488,7 +494,8 @@ mod tests {
 
         assert!(PathBuf::from(".claudegen").exists());
         assert!(PathBuf::from(".claudegen/config.toml").exists());
-        assert!(PathBuf::from(".claudegen/graph").exists());
+        assert!(PathBuf::from(".claudegen/cache").exists());
+        assert!(PathBuf::from(".claudegen/checkpoints").exists());
     }
 
     #[test]

@@ -1,12 +1,4 @@
 //! Adaptive Pipeline - Project-Type Agnostic Generation
-//!
-//! A new generation pipeline that:
-//! 1. Detects project type automatically
-//! 2. Analyzes monorepo structure if applicable
-//! 3. Infers conventions using few-shot learning
-//! 4. Extracts hidden constraints (Tier 3 value)
-//! 5. Routes to appropriate output strategy
-//! 6. Generates filtered, project-consistent output
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +7,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::ai::{LlmProvider, with_timeout};
+use crate::ai::{LlmProvider, ProviderSet, phase_id, with_timeout};
 use crate::config::Config;
 use crate::types::{Agent, AgentModel, Plugin, PluginManifest, ProjectMemory, Result, Rule, Skill};
 
@@ -60,24 +52,38 @@ pub struct AdaptivePipelineOutput {
 
 pub struct AdaptivePipeline {
     project_root: PathBuf,
-    provider: Arc<dyn LlmProvider>,
+    providers: ProviderSet,
     config: Config,
     file_registry: OnceCell<VerifiedFileRegistry>,
 }
 
 impl AdaptivePipeline {
-    pub fn new(project_root: PathBuf, provider: Arc<dyn LlmProvider>, config: Config) -> Self {
+    /// Create a new AdaptivePipeline with tiered providers
+    pub fn new(project_root: PathBuf, providers: ProviderSet, config: Config) -> Self {
         Self {
             project_root,
-            provider,
+            providers,
             config,
             file_registry: OnceCell::new(),
         }
     }
 
+    /// Create with a single provider (testing only, no circuit breaker)
+    pub fn with_single_provider(
+        project_root: PathBuf,
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+    ) -> Self {
+        Self::new(project_root, ProviderSet::single(provider), config)
+    }
+
     async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
+        let root = &self.project_root;
+        let analysis_config = &self.config.analysis;
         self.file_registry
-            .get_or_try_init(|| async { VerifiedFileRegistry::build(&self.project_root).await })
+            .get_or_try_init(|| async move {
+                VerifiedFileRegistry::build_with_config(root, analysis_config).await
+            })
             .await
             .cloned()
     }
@@ -151,15 +157,26 @@ impl AdaptivePipeline {
             "File registry ready for reference validation"
         );
 
-        // Phase 2.5: Deep Analysis (if enabled) with timeout
+        // Phase 2.5: Deep Analysis (if enabled) with graceful timeout handling
         let analysis_timeout =
             Duration::from_secs(self.config.timeout().analysis_phase_timeout_secs);
-        let deep_analysis = with_timeout(
+        let deep_analysis = match with_timeout(
             analysis_timeout,
             self.run_deep_analysis(&detection),
             "deep_analysis",
         )
-        .await?;
+        .await
+        {
+            Ok(result) => result,
+            Err(crate::types::ClaudegenError::Timeout { .. }) => {
+                tracing::warn!(
+                    timeout_secs = self.config.timeout().analysis_phase_timeout_secs,
+                    "Deep analysis timed out - proceeding with partial results"
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        };
         if let Some(ref analysis) = deep_analysis {
             tracing::info!(
                 patterns = analysis.patterns.len(),
@@ -281,7 +298,7 @@ impl AdaptivePipeline {
             ctx.set_deep_analysis(deep.clone());
         }
         if let Some(ref synth) = synthesis {
-            ctx.set_synthesis(synth.clone());
+            ctx.set_synthesis(synth);
         }
 
         // Log synthesis insights if available
@@ -371,11 +388,14 @@ impl AdaptivePipeline {
             synthesis.as_ref(),
         )?;
 
-        let rules = PathRulesGenerator::generate(
+        let rules = PathRulesGenerator::generate_with_threshold(
             &output_plan,
             monorepo.as_ref(),
             &conventions,
             &constraints,
+            synthesis.as_ref(),
+            Some(&file_registry),
+            self.config.generation.min_rule_value_score,
         )?;
 
         let skills = self
@@ -399,13 +419,28 @@ impl AdaptivePipeline {
         );
 
         // Phase 7: Quality-Based Refinement Loop with Cross-Session Learning
-        let mut refinement_engine = RefinementEngine::new_async(
+        let refinement_engine = RefinementEngine::new_async(
             self.project_root.clone(),
-            Arc::clone(&self.provider),
+            Arc::clone(self.providers.default_provider()),
             self.config.clone(),
             file_registry.clone(),
         )
         .await?;
+
+        // Pass LLM-identified core modules to refinement for accurate structural validation
+        let mut refinement_engine = if let Some(ref synth) = synthesis {
+            if !synth.deep.structure.core_modules.is_empty() {
+                tracing::debug!(
+                    modules = synth.deep.structure.core_modules.len(),
+                    "Passing LLM-identified modules to refinement engine"
+                );
+                refinement_engine.with_llm_modules(synth.deep.structure.core_modules.clone())
+            } else {
+                refinement_engine
+            }
+        } else {
+            refinement_engine
+        };
 
         let refinement_result = refinement_engine
             .refine(skills, agents, rules, &claude_md, &output_plan)
@@ -423,8 +458,7 @@ impl AdaptivePipeline {
         let rules = refinement_result.rules;
 
         // Phase 8: Final Validation (simplified - actual validation via LLM Judge)
-        let tier_result =
-            TierFilterResult::check(&skills, &agents, &rules, &claude_md.to_markdown());
+        let tier_result = TierFilterResult::check(&skills, &agents, &rules);
 
         let consistency_result =
             ConsistencyResult::check(detection.is_monorepo, &skills, &agents, &rules);
@@ -482,7 +516,7 @@ impl AdaptivePipeline {
     }
 
     async fn detect_project(&self) -> Result<ProjectDetection> {
-        project_detection::detect(&self.project_root).await
+        project_detection::detect(&self.project_root, &self.config.analysis).await
     }
 
     async fn analyze_monorepo(&self, detection: &ProjectDetection) -> Result<MonorepoAnalysis> {
@@ -491,10 +525,14 @@ impl AdaptivePipeline {
 
     async fn infer_conventions(&self, detection: &ProjectDetection) -> Result<InferredConventions> {
         let max_samples = self.config.few_shot.max_examples;
+        // Use fast tier for convention inference (quick classification task)
         convention_inference::infer(
             &self.project_root,
             detection,
-            self.provider.clone(),
+            Arc::clone(
+                self.providers
+                    .provider_for_phase(phase_id::CONVENTION_INFERENCE),
+            ),
             max_samples,
         )
         .await
@@ -506,9 +544,13 @@ impl AdaptivePipeline {
         conventions: &InferredConventions,
         synthesis: Option<&SynthesizedAnalysis>,
     ) -> Result<ExtractedConstraints> {
+        // Use performance tier for constraint extraction (high-intelligence task)
         let extractor = constraint_extraction::ConstraintExtractor::new(
             &self.project_root,
-            self.provider.clone(),
+            Arc::clone(
+                self.providers
+                    .provider_for_phase(phase_id::CONSTRAINT_EXTRACTION),
+            ),
         );
         extractor
             .extract_with_synthesis(detection, conventions, synthesis)
@@ -528,9 +570,10 @@ impl AdaptivePipeline {
             return self.run_multi_agent_analysis(detection).await;
         }
 
+        // Use performance tier for deep analysis (high-intelligence task)
         let analyzer = DeepAnalyzer::new(
             &self.project_root,
-            Arc::clone(&self.provider),
+            Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS)),
             self.config.analysis.clone(),
             self.config.deep_analysis.clone(),
         );
@@ -603,7 +646,9 @@ impl AdaptivePipeline {
                 .collect(),
         };
 
-        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
+        // Use performance tier for multi-agent deep analysis (high-intelligence task)
+        let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
+        let multi_analyzer = MultiAgentAnalyzer::new(provider)
             .with_timeout(self.config.multi_agent.specialist_timeout_secs);
 
         let result = multi_analyzer.analyze(context).await?;
@@ -768,7 +813,9 @@ impl AdaptivePipeline {
                 .collect(),
         };
 
-        let multi_analyzer = MultiAgentAnalyzer::new(Arc::clone(&self.provider))
+        // Use performance tier for multi-agent deep analysis (high-intelligence task)
+        let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
+        let multi_analyzer = MultiAgentAnalyzer::new(provider)
             .with_timeout(self.config.multi_agent.specialist_timeout_secs);
 
         let result = multi_analyzer.analyze(context).await?;
@@ -1077,15 +1124,28 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             "required": ["prompt"]
         });
 
-        match self.provider.generate(&prompt, &schema).await {
+        match self
+            .providers
+            .default_provider()
+            .generate(&prompt, &schema)
+            .await
+        {
             Ok(response) => {
-                if let Some(prompt_text) = response.content.get("prompt").and_then(|v| v.as_str()) {
+                if let Some(prompt_text) = response
+                    .content
+                    .get("prompt")
+                    .and_then(|v: &serde_json::Value| v.as_str())
+                {
                     Ok(prompt_text.trim().to_string())
                 } else {
+                    tracing::debug!(role = %role, "LLM response missing prompt field, using template");
                     Ok(Self::fallback_agent_prompt(role, detection, &key_paths))
                 }
             }
-            Err(_) => Ok(Self::fallback_agent_prompt(role, detection, &key_paths)),
+            Err(e) => {
+                tracing::debug!(role = %role, error = %e, "Agent prompt generation failed, using template");
+                Ok(Self::fallback_agent_prompt(role, detection, &key_paths))
+            }
         }
     }
 
@@ -1096,7 +1156,7 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             ReferenceExtractor::extract_key_references(&self.project_root, detection.primary_type)
                 .await
         {
-            for r in refs.into_iter().take(6) {
+            for r in refs.into_iter().take(self.config.analysis.max_key_paths) {
                 paths.push(r.to_string_ref());
             }
         }
@@ -1134,7 +1194,10 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             paths.push("@src/".to_string());
         }
 
-        paths.into_iter().take(6).collect()
+        paths
+            .into_iter()
+            .take(self.config.analysis.max_key_paths)
+            .collect()
     }
 
     fn fallback_agent_prompt(

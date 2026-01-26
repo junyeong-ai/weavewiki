@@ -29,12 +29,27 @@ impl Severity {
         matches!(self, Severity::Critical | Severity::High)
     }
 
+    /// Suggests a severity based on score - ADVISORY ONLY.
+    /// LLM should determine actual severity based on context.
+    /// This is a fallback when LLM classification is not available.
+    #[deprecated(note = "Use LLM-classified severity instead of score-based mapping")]
     pub fn from_score(score: f32) -> Self {
         match score {
             s if s >= 0.9 => Severity::Critical,
             s if s >= 0.7 => Severity::High,
             s if s >= 0.4 => Severity::Medium,
             _ => Severity::Low,
+        }
+    }
+
+    /// Parse severity from LLM output string (preferred method)
+    pub fn from_llm_classification(classification: &str) -> Option<Self> {
+        match classification.to_lowercase().trim() {
+            "critical" | "blocker" | "breaking" => Some(Severity::Critical),
+            "high" | "major" | "important" => Some(Severity::High),
+            "medium" | "moderate" | "normal" => Some(Severity::Medium),
+            "low" | "minor" | "trivial" | "info" => Some(Severity::Low),
+            _ => None, // Let caller decide default
         }
     }
 }

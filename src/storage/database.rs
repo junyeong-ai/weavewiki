@@ -299,8 +299,7 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
 
-        assert!(tables.contains(&"nodes".to_string()));
-        assert!(tables.contains(&"edges".to_string()));
+        // Schema has sessions and llm_metrics tables
         assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"llm_metrics".to_string()));
     }

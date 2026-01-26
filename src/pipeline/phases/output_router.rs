@@ -136,6 +136,10 @@ pub enum AgentScope {
     Domain(String),
 }
 
+/// Maximum number of agents to plan (prevents agent sprawl)
+/// Set to 0 for unlimited. LLM can generate fewer based on project needs.
+const MAX_PLANNED_AGENTS: usize = 10; // Increased from hardcoded 5
+
 pub struct OutputRouter;
 
 impl OutputRouter {
@@ -351,11 +355,9 @@ impl OutputRouter {
             }
         }
 
-        // Use synthesis to identify additional skills from deep analysis
         if let Some(synth) = synthesis {
-            // Create skills for modules with many patterns (likely complex)
             for module in &synth.modules {
-                if module.patterns.len() >= 3 && module.key_files.len() >= 2 {
+                if module.patterns.len() >= 3 && !module.internal_deps.is_empty() {
                     let skill_name = format!("{}-workflow", to_kebab_case(&module.name));
                     if !planned_skills.iter().any(|s| s.name == skill_name) {
                         planned_skills.push(PlannedSkill {
@@ -397,13 +399,11 @@ impl OutputRouter {
     ) -> AgentsPlan {
         let mut planned_agents = Vec::new();
 
-        // Primary: Derive agents from synthesis analysis (AI-driven insights)
         if let Some(synth) = synthesis {
-            // Create domain expert agents for modules with significant complexity
             for module in &synth.modules {
                 let complexity_score = module.constraints.len() as f32 * 0.4
                     + module.patterns.len() as f32 * 0.3
-                    + module.key_files.len() as f32 * 0.3;
+                    + module.internal_deps.len() as f32 * 0.3;
 
                 // Only create agents for truly complex modules
                 if complexity_score >= 2.0 && !module.responsibility.is_empty() {
@@ -490,7 +490,9 @@ impl OutputRouter {
         }
 
         // Limit to most valuable agents (avoid agent sprawl)
-        planned_agents.truncate(5);
+        if MAX_PLANNED_AGENTS > 0 {
+            planned_agents.truncate(MAX_PLANNED_AGENTS);
+        }
 
         AgentsPlan {
             generate_agents: !planned_agents.is_empty(),
@@ -499,27 +501,13 @@ impl OutputRouter {
     }
 }
 
-/// Check if agent name is too generic (Tier 1)
-fn is_generic_agent_name(name: &str) -> bool {
-    const GENERIC_PATTERNS: &[&str] = &[
-        "code-reviewer",
-        "test-writer",
-        "bug-fixer",
-        "feature-developer",
-        "code-assistant",
-        "helper",
-        "navigator",
-        "guide",
-        "checker",
-        "general",
-        "generic",
-        "default",
-        "main",
-        "core",
-        "basic",
-    ];
-    let name_lower = name.to_lowercase();
-    GENERIC_PATTERNS.iter().any(|p| name_lower.contains(p))
+/// Agent name filtering is delegated to LLM during generation.
+/// Programmatic filtering with hardcoded patterns causes:
+/// - False positives ("main-handler", "core-service" are legitimate)
+/// - English-only bias
+/// - No override mechanism for context-specific names
+fn is_generic_agent_name(_name: &str) -> bool {
+    false // LLM determines agent name quality, not pattern matching
 }
 
 fn to_kebab_case(s: &str) -> String {

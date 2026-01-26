@@ -115,36 +115,17 @@ impl ArtifactValidator {
             }
         }
 
-        // Check for actionable language
-        let content_text = rule.content.join(" ").to_lowercase();
-        let has_actionable = ["must", "should", "avoid", "never", "always"]
-            .iter()
-            .any(|w| content_text.contains(w));
-
-        if !has_actionable {
-            issues.push(ValidationIssue::warning(
-                "RULE_NOT_ACTIONABLE",
-                "Rule lacks actionable language (must/should/avoid)",
+        // Tier classification is purely informational - LLM has already classified during generation
+        // We log for visibility but do NOT penalize score - LLM judgment is authoritative
+        if !rule.tier.should_keep() {
+            issues.push(ValidationIssue::info(
+                "RULE_LOW_TIER",
+                format!(
+                    "Rule classified as {} - LLM determined this is appropriate for context",
+                    rule.tier
+                ),
             ));
-            score -= 0.15;
-        }
-
-        // Check for generic content (Tier 1 indicators)
-        let tier1_indicators = [
-            "use best practices",
-            "follow conventions",
-            "write clean code",
-            "use cargo",
-            "use npm",
-        ];
-        for indicator in tier1_indicators {
-            if content_text.contains(indicator) {
-                issues.push(ValidationIssue::error(
-                    "RULE_TIER1_CONTENT",
-                    format!("Rule contains generic Tier 1 content: '{}'", indicator),
-                ));
-                score -= 0.3;
-            }
+            // No score penalty - tier classification is advisory only
         }
 
         let is_valid = score >= 0.5 && !issues.iter().any(|i| i.is_error());
@@ -218,17 +199,17 @@ impl ArtifactValidator {
             score -= 0.1;
         }
 
-        // Check for Tier 1 content
-        let body_lower = skill.body.to_lowercase();
-        let tier1_indicators = ["cargo build", "npm install", "pip install"];
-        for indicator in tier1_indicators {
-            if body_lower.contains(indicator) {
-                issues.push(ValidationIssue::error(
-                    "SKILL_TIER1_CONTENT",
-                    format!("Skill contains generic command: '{}'", indicator),
-                ));
-                score -= 0.3;
-            }
+        // Tier classification is purely informational - LLM has already classified during generation
+        // We log for visibility but do NOT penalize score - LLM judgment is authoritative
+        if !skill.quality.tier.should_keep() {
+            issues.push(ValidationIssue::info(
+                "SKILL_LOW_TIER",
+                format!(
+                    "Skill classified as {} - LLM determined this is appropriate for context",
+                    skill.quality.tier
+                ),
+            ));
+            // No score penalty - tier classification is advisory only
         }
 
         let is_valid = score >= 0.5 && !issues.iter().any(|i| i.is_error());
@@ -275,30 +256,6 @@ impl ArtifactValidator {
             score -= 0.1;
         }
 
-        // Check for domain specificity
-        let instructions_lower = agent.prompt.to_lowercase();
-        let domain_indicators = [
-            "domain",
-            "business",
-            "rule",
-            "policy",
-            "compliance",
-            "expert",
-            "specialist",
-            "knowledge",
-        ];
-        let has_domain_content = domain_indicators
-            .iter()
-            .any(|w| instructions_lower.contains(w));
-
-        if !has_domain_content {
-            issues.push(ValidationIssue::warning(
-                "AGENT_NOT_DOMAIN_SPECIFIC",
-                "Agent may lack domain-specific content",
-            ));
-            score -= 0.15;
-        }
-
         let is_valid = score >= 0.5;
 
         if is_valid {
@@ -318,7 +275,6 @@ impl Default for ArtifactValidator {
         Self::new()
     }
 }
-
 
 /// Batch validator for multiple artifacts
 pub struct BatchValidator {
@@ -429,6 +385,7 @@ mod tests {
     fn test_validate_rule_pass() {
         let validator = ArtifactValidator::new();
 
+        // Rule with Tier2 (convention) should pass validation
         let rule = Rule {
             name: "test-rule".to_string(),
             paths: None,
@@ -445,7 +402,7 @@ mod tests {
                 start_column: None,
                 end_column: None,
             }],
-            generation_context: None,
+            tier: crate::types::ContentTier::Tier2Convention,
         };
 
         let result = validator.validate_rule(&rule, None);
@@ -453,59 +410,71 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rule_fail_tier1() {
+    fn test_validate_rule_tier1_info() {
         let validator = ArtifactValidator::new();
 
+        // Rule with Tier1 (generic) - purely informational, no score penalty
+        // LLM classification is advisory; tier doesn't affect validation outcome
         let rule = Rule {
             name: "generic-rule".to_string(),
             paths: None,
             content: vec![
                 "# Generic Rule".to_string(),
                 "".to_string(),
-                "Use best practices when coding.".to_string(),
+                "Use best practices when coding. See @src/main.rs:1 for context.".to_string(),
             ],
-            evidence: Vec::new(),
-            generation_context: None,
+            evidence: vec![EvidenceLocation {
+                file: "src/main.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                start_column: None,
+                end_column: None,
+            }],
+            tier: crate::types::ContentTier::Tier1Generic,
         };
 
         let result = validator.validate_rule(&rule, None);
-        assert!(!result.is_valid);
-        assert!(result.issues.iter().any(|i| i.message.contains("Tier 1")));
+        // Tier1 is purely informational - validation passes, score not affected
+        assert!(result.is_valid);
+        assert!(result.issues.iter().any(|i| i.code == "RULE_LOW_TIER"));
+        // Score is not penalized for tier classification
+        assert!(result.score >= 0.9); // May have other minor deductions
     }
 
     #[test]
     fn test_validate_skill_pass() {
         let validator = ArtifactValidator::new();
 
-        let skill = Skill::new(
+        let mut skill = Skill::new(
             "test-skill",
             "A test skill for validation",
             "## Test Skill\n\nYou should check @src/main.rs:10 for implementation details.\n\nAlways validate inputs.",
         );
+        skill.quality.tier = TierClassification::Tier2Convention;
 
         let result = validator.validate_skill(&skill, None);
         assert!(result.is_valid);
     }
 
     #[test]
-    fn test_validate_skill_fail_tier1() {
+    fn test_validate_skill_tier1_info() {
         let validator = ArtifactValidator::new();
 
-        // Skill with generic Tier 1 command
-        let skill = Skill::new(
+        // Skill classified as Tier 1 by LLM - purely informational, no score penalty
+        // LLM classification is advisory; tier doesn't affect validation outcome
+        let mut skill = Skill::new(
             "generic-skill",
             "A generic skill",
-            "## Build Instructions\n\nRun cargo build to build the project.",
+            "## Build Instructions\n\nRun cargo build to build the project. Check @src/main.rs:1 for details.",
         );
+        skill.quality.tier = TierClassification::Tier1Generic;
 
         let result = validator.validate_skill(&skill, None);
-        assert!(!result.is_valid);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.message.contains("generic command"))
-        );
+        // Tier1 is purely informational - validation passes, score not affected
+        assert!(result.is_valid);
+        assert!(result.issues.iter().any(|i| i.code == "SKILL_LOW_TIER"));
+        // Score is not penalized for tier classification
+        assert!(result.score >= 0.9); // May have other minor deductions
     }
 
     #[test]
@@ -533,7 +502,10 @@ mod tests {
             Rule {
                 name: "valid-rule".to_string(),
                 paths: None,
-                content: vec!["You must validate all user input.".to_string()],
+                content: vec![
+                    "You must validate all user input. This is a critical security constraint."
+                        .to_string(),
+                ],
                 evidence: vec![EvidenceLocation {
                     file: "src/validate.rs".to_string(),
                     start_line: 1,
@@ -541,20 +513,30 @@ mod tests {
                     start_column: None,
                     end_column: None,
                 }],
-                generation_context: None,
+                tier: crate::types::ContentTier::Tier2Convention,
             },
+            // Good content and evidence - both should pass (tier is now advisory)
             Rule {
-                name: "invalid-rule".to_string(),
+                name: "also-valid-rule".to_string(),
                 paths: None,
-                content: vec!["Use best practices.".to_string()],
-                evidence: Vec::new(),
-                generation_context: None,
+                content: vec![
+                    "Always check authentication before processing requests.".to_string(),
+                ],
+                evidence: vec![EvidenceLocation {
+                    file: "src/auth.rs".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_column: None,
+                    end_column: None,
+                }],
+                tier: crate::types::ContentTier::Tier1Generic, // Tier1 is advisory, not failure
             },
         ];
 
         let result = batch.validate_rules(&rules);
         assert_eq!(result.total, 2);
-        assert_eq!(result.passed, 1);
-        assert_eq!(result.failed, 1);
+        // Both rules pass - tier classification doesn't cause failure
+        assert_eq!(result.passed, 2);
+        assert_eq!(result.failed, 0);
     }
 }

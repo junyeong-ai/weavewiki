@@ -114,6 +114,24 @@ pub struct ExecutionCheckpoint {
     pub tokens_used: u64,
     /// Budget remaining
     pub budget_remaining: u64,
+    /// API call count (v2+)
+    #[serde(default)]
+    pub api_calls: u32,
+    /// Input tokens total (v2+)
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens total (v2+)
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Average latency in milliseconds (v2+)
+    #[serde(default)]
+    pub avg_latency_ms: f64,
+    /// Total cost in USD (v2+)
+    #[serde(default)]
+    pub total_cost_usd: f64,
+    /// Total execution duration in milliseconds (v2+)
+    #[serde(default)]
+    pub total_duration_ms: u64,
     /// Iteration counts
     pub refinement_iteration: usize,
     pub deep_review_pass: u32,
@@ -124,7 +142,7 @@ pub struct ExecutionCheckpoint {
 impl ExecutionCheckpoint {
     pub fn new() -> Self {
         Self {
-            version: 1,
+            version: 2,
             created_at: Utc::now(),
             current_phase: PipelinePhase::Initialization,
             phase_progress: 0.0,
@@ -134,6 +152,12 @@ impl ExecutionCheckpoint {
             quality_history: Vec::new(),
             tokens_used: 0,
             budget_remaining: 0,
+            api_calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            avg_latency_ms: 0.0,
+            total_cost_usd: 0.0,
+            total_duration_ms: 0,
             refinement_iteration: 0,
             deep_review_pass: 0,
             metadata: HashMap::new(),
@@ -150,7 +174,7 @@ impl ExecutionCheckpoint {
 
     /// Check if compatible with current version
     pub fn is_compatible(&self) -> bool {
-        self.version == 1
+        self.version == 1 || self.version == 2
     }
 }
 

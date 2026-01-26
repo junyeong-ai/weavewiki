@@ -1,18 +1,12 @@
 //! Status Command
-//!
-//! Display claudegen project status.
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::util::{
-    CLAUDEGEN_DIR, CONFIG_PATH, GRAPH_DB_PATH, ProjectState, claudegen_dir, is_initialized,
-};
+use crate::cli::util::{CLAUDEGEN_DIR, CONFIG_PATH, ProjectState, is_initialized};
 use crate::config::ConfigLoader;
-use crate::storage::Database;
 use crate::types::Result;
 
 pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<()> {
-    let claudegen_dir = claudegen_dir();
     let json_output = format == "json";
 
     if !is_initialized() {
@@ -23,14 +17,11 @@ pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<(
             println!("══════════════════════════════════════");
             println!("Not initialized. Run 'claudegen init' first.");
         }
-        // Return Ok for status command - it's informational
         return Ok(());
     }
 
-    // status operates on CWD, but use load_for_project for consistency
     let project_root = std::env::current_dir()?;
     let config = ConfigLoader::load_for_project(&project_root, config_path)?;
-    let (node_count, edge_count) = get_graph_stats(&claudegen_dir)?;
     let plugin_manifest = find_plugin_with_state(&project_root);
 
     if json_output {
@@ -38,12 +29,11 @@ pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<(
             "status": "initialized",
             "project": config.project.name,
             "type": config.project.project_type,
-            "graph": {
-                "nodes": node_count,
-                "edges": edge_count
-            },
             "plugin_generated": plugin_manifest.is_some(),
-            "plugin_path": plugin_manifest.as_ref().and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.display().to_string())
+            "plugin_path": plugin_manifest.as_ref()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|p| p.display().to_string())
         });
 
         let json =
@@ -59,11 +49,6 @@ pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<(
         println!("Type: {:?}", config.project.project_type);
         println!();
 
-        println!("Knowledge Graph:");
-        println!("  Nodes: {node_count}");
-        println!("  Edges: {edge_count}");
-        println!();
-
         if let Some(ref manifest) = plugin_manifest {
             if let Some(plugin_dir) = manifest.parent().and_then(|p| p.parent()) {
                 println!("Plugin: Generated ({})", plugin_dir.display());
@@ -77,7 +62,6 @@ pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<(
         if detailed {
             println!();
             println!("Paths:");
-            println!("  Graph DB: {}/{}", CLAUDEGEN_DIR, GRAPH_DB_PATH);
             if let Some(ref manifest) = plugin_manifest {
                 println!("  Plugin: {}", manifest.display());
             }
@@ -88,35 +72,7 @@ pub fn run(format: &str, detailed: bool, config_path: Option<&Path>) -> Result<(
     Ok(())
 }
 
-fn get_graph_stats(claudegen_dir: &Path) -> Result<(i64, i64)> {
-    let db_path = claudegen_dir.join(GRAPH_DB_PATH);
-    if !db_path.exists() {
-        return Ok((0, 0));
-    }
-
-    let db = Database::open(&db_path)?;
-    let conn = db.connection()?;
-
-    let node_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to count nodes");
-            0
-        });
-
-    let edge_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to count edges");
-            0
-        });
-
-    Ok((node_count, edge_count))
-}
-
-/// Find plugin manifest, checking saved output directory first, then project root
 fn find_plugin_with_state(project_root: &Path) -> Option<PathBuf> {
-    // First, check saved output directory from state
     match ProjectState::load() {
         Ok(state) => {
             if let Some(ref output_dir) = state.last_output_dir
@@ -126,16 +82,12 @@ fn find_plugin_with_state(project_root: &Path) -> Option<PathBuf> {
             }
         }
         Err(e) => {
-            // Warn about corrupted state file - user may have hidden output paths
-            tracing::warn!(error = %e, "Failed to load project state, plugin location may be inaccurate");
+            tracing::warn!(error = %e, "Failed to load project state");
         }
     }
-
-    // Fall back to searching in project root
     find_plugin_manifest(project_root)
 }
 
-/// Find plugin manifest in directory (looks for *-plugin/.claude-plugin/plugin.json)
 fn find_plugin_manifest(search_dir: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(search_dir).ok()?;
 

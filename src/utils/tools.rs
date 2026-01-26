@@ -189,7 +189,9 @@ mod tests {
         // Valid MCP tools
         assert!(is_valid_tool("mcp__context7__query-docs"));
         assert!(is_valid_tool("mcp__context7__resolve-library-id"));
-        assert!(is_valid_tool("mcp__sequential-thinking__sequentialthinking"));
+        assert!(is_valid_tool(
+            "mcp__sequential-thinking__sequentialthinking"
+        ));
         assert!(is_valid_tool("mcp__my-server__my-tool"));
 
         // Invalid MCP patterns

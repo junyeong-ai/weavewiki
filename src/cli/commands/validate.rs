@@ -12,14 +12,12 @@ use std::path::{Path, PathBuf};
 use serde_yaml_bw as serde_yaml;
 
 use crate::cli::util::ProjectState;
+use crate::config::ConfigLoader;
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::pipeline::validation::{ConsistencyResult, CrossValidationResult, TierFilterResult};
 use crate::types::{
     Agent, ClaudegenError, DevelopmentCommand, DiagnosticLevel, ProjectMemory, Result, Rule, Skill,
 };
-
-/// Minimum acceptable Tier3 (constraint) content ratio
-const MIN_TIER3_RATIO: f32 = 0.3;
 
 /// Detect if the project is a monorepo by checking for workspace configuration files
 /// Aligned with project_detection.rs detect_workspace() for consistency
@@ -32,10 +30,7 @@ fn detect_monorepo(root: &Path) -> bool {
         "nx.json",
         "go.work",
     ];
-    if file_indicators
-        .iter()
-        .any(|f| root.join(f).exists())
-    {
+    if file_indicators.iter().any(|f| root.join(f).exists()) {
         return true;
     }
 
@@ -54,29 +49,33 @@ fn detect_monorepo(root: &Path) -> bool {
     })
 }
 
-pub async fn run(
-    path: Option<PathBuf>,
-    severity: &str,
-    config_path: Option<&Path>,
-) -> Result<()> {
+pub async fn run(path: Option<PathBuf>, severity: &str) -> Result<()> {
     let root =
         path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Note: config_path reserved for future config-driven validation
-    let _ = config_path;
 
     println!("Validating generated plugin output...");
     println!("  Root: {}", root.display());
 
-    // Build file registry for reference validation
-    let file_registry = VerifiedFileRegistry::build(&root).await?;
+    // Load config to respect analysis include/exclude patterns
+    let config = match ConfigLoader::load_for_project(&root, None) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("  ⚠️  Warning: Failed to load config: {}", e);
+            eprintln!("     Using default configuration. Results may differ from generation.");
+            crate::config::Config::default()
+        }
+    };
+
+    // Build file registry respecting analysis config (same patterns used during generation)
+    let file_registry = VerifiedFileRegistry::build_with_config(&root, &config.analysis).await?;
     println!("  Files indexed: {}", file_registry.file_count());
     println!();
 
     // Load generated artifacts
     let (claude_md, skills, agents, rules) = load_artifacts(&root)?;
 
-    let has_artifacts = claude_md.is_some() || !skills.is_empty() || !agents.is_empty() || !rules.is_empty();
+    let has_artifacts =
+        claude_md.is_some() || !skills.is_empty() || !agents.is_empty() || !rules.is_empty();
     if !has_artifacts {
         println!("No generated artifacts found.");
         println!("  Expected locations:");
@@ -88,8 +87,7 @@ pub async fn run(
     }
 
     // Run validations
-    let claude_md_content = claude_md.as_ref().map(|m| m.to_markdown()).unwrap_or_default();
-    let tier_result = TierFilterResult::check(&skills, &agents, &rules, &claude_md_content);
+    let tier_result = TierFilterResult::check(&skills, &agents, &rules);
     let is_monorepo = detect_monorepo(&root);
     let consistency = ConsistencyResult::check(is_monorepo, &skills, &agents, &rules);
     let cross_validation = claude_md
@@ -136,18 +134,11 @@ pub async fn run(
         }
     }
 
-    // Tier filter issues
+    // Tier filter issues (informational - LlmJudge is the final quality arbiter)
     if !tier_result.passed {
-        errors.push(format!(
+        info.push(format!(
             "Tier1 (generic) content detected: {} items",
             tier_result.tier1_count
-        ));
-    }
-    if tier_result.tier3_ratio < MIN_TIER3_RATIO && (skills.len() + agents.len() + rules.len()) > 0 {
-        warnings.push(format!(
-            "Low Tier3 (constraint) ratio: {:.0}% (target: {:.0}%+)",
-            tier_result.tier3_ratio * 100.0,
-            MIN_TIER3_RATIO * 100.0
         ));
     }
 
@@ -240,16 +231,12 @@ fn load_artifacts(root: &Path) -> Result<LoadedArtifacts> {
     let claude_md = load_claude_md(root)?;
     let rules = load_markdown_artifacts(root, ".claude/rules", parse_rule)?;
 
-    // Try plugin directory first (*-plugin/), fall back to legacy .claude/ paths
     let (skills, agents) = if let Some(plugin_dir) = find_plugin_dir(root) {
         let skills = load_plugin_skills(&plugin_dir)?;
         let agents = load_markdown_artifacts(&plugin_dir, "agents", parse_agent)?;
         (skills, agents)
     } else {
-        // Legacy fallback
-        let skills = load_markdown_artifacts(root, ".claude/skills", parse_skill)?;
-        let agents = load_markdown_artifacts(root, ".claude/agents", parse_agent)?;
-        (skills, agents)
+        (Vec::new(), Vec::new())
     };
 
     Ok((claude_md, skills, agents, rules))
@@ -545,18 +532,9 @@ fn parse_skill(path: &Path, content: &str) -> Option<Skill> {
         return Some(skill);
     }
 
-    // Fallback: simple text parsing for non-frontmatter files
-    let name = extract_skill_name_from_path(path);
-    let body = extract_fallback_body(content);
-    Some(Skill::new(&name, &name, &body))
-}
-
-fn extract_fallback_body(content: &str) -> String {
-    content
-        .lines()
-        .skip_while(|l| l.starts_with('#') || l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    // No frontmatter = invalid skill file (require structured format)
+    tracing::warn!(path = %path.display(), "Skill file missing YAML frontmatter");
+    None
 }
 
 fn extract_skill_name_from_path(path: &Path) -> String {
@@ -611,7 +589,10 @@ fn parse_agent(path: &Path, content: &str) -> Option<Agent> {
         }
 
         // Extract disallowedTools (comma-separated or array)
-        if let Some(disallowed) = frontmatter.get("disallowedTools").and_then(parse_tools_field) {
+        if let Some(disallowed) = frontmatter
+            .get("disallowedTools")
+            .and_then(parse_tools_field)
+        {
             agent.disallowed_tools = Some(disallowed);
         }
 
@@ -633,9 +614,9 @@ fn parse_agent(path: &Path, content: &str) -> Option<Agent> {
         return Some(agent);
     }
 
-    // Fallback: simple text parsing
-    let body = extract_fallback_body(content);
-    Some(Agent::new(&name, &name, &body))
+    // No frontmatter = invalid agent file (require structured format)
+    tracing::warn!(path = %path.display(), "Agent file missing YAML frontmatter");
+    None
 }
 
 /// Parse YAML frontmatter from markdown content

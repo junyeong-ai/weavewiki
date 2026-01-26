@@ -1,7 +1,5 @@
 //! Claude Code Skill types - Official spec compliant
 
-use std::sync::Arc;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_yaml_bw as serde_yaml;
@@ -10,18 +8,16 @@ use super::hook::ToolHooks;
 use super::node::EvidenceLocation;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
-use crate::pipeline::generation::GenerationContext;
 use crate::utils::is_valid_tool;
 use crate::utils::patterns;
 
-pub use super::insight::TierClassification;
-pub use super::insight::TierClassification as ContentTier;
+use super::insight::{ContentTier, TierClassification};
 
 /// Quality metrics for generated content
+/// Note: actionable_count removed - LLM judges actionability, not pattern matching
 #[derive(Debug, Clone, Default)]
 pub struct QualityMetrics {
     pub file_refs: usize,
-    pub actionable_count: usize,
     pub tier: TierClassification,
     pub score: f32,
     pub meets_requirements: bool,
@@ -30,7 +26,6 @@ pub struct QualityMetrics {
 impl PartialEq for QualityMetrics {
     fn eq(&self, other: &Self) -> bool {
         self.file_refs == other.file_refs
-            && self.actionable_count == other.actionable_count
             && self.tier == other.tier
             && (self.score - other.score).abs() < f32::EPSILON
             && self.meets_requirements == other.meets_requirements
@@ -69,8 +64,6 @@ pub struct Skill {
     pub additional_files: Vec<SkillFile>,
     #[serde(skip)]
     pub evidence: Vec<EvidenceLocation>,
-    #[serde(skip)]
-    pub generation_context: Option<Arc<GenerationContext>>,
     #[serde(skip)]
     pub quality: QualityMetrics,
 }
@@ -137,8 +130,6 @@ fn yaml_value<T: serde::Serialize>(v: &T) -> serde_yaml::Value {
 
 /// Minimum required @file:line references for a skill to pass quality
 pub const MIN_FILE_REFS: usize = 2;
-/// Minimum required actionable statements for a skill to pass quality
-pub const MIN_ACTIONABLE_COUNT: usize = 3;
 
 impl Skill {
     pub fn new(
@@ -163,44 +154,32 @@ impl Skill {
             body: body_str,
             additional_files: Vec::new(),
             evidence: Vec::new(),
-            generation_context: None,
             quality,
         }
     }
 
     /// Calculate quality metrics from body content
+    /// Note: Tier classification is set by LLM during generation, not by static patterns
     pub fn calculate_quality(body: &str) -> QualityMetrics {
         let file_refs = patterns::count_file_line_refs(body);
-        let actionable_count = patterns::ACTIONABLE_PATTERN.find_iter(body).count();
-        let tier1_count = patterns::count_generic_patterns(body);
-        let tier3_count = patterns::count_tier3_indicators(body);
 
-        // Determine tier based on content
-        let tier = if tier1_count > 2 {
-            ContentTier::Tier1Generic
-        } else if tier3_count > 0 {
-            ContentTier::Tier3Constraint
-        } else if file_refs >= MIN_FILE_REFS {
-            ContentTier::Tier2Convention
-        } else {
-            ContentTier::Tier1Generic
-        };
-
-        // Calculate score
-        let mut score = 0.0f32;
-        score += 0.15 * (file_refs.min(5) as f32); // Max 0.75 for refs
-        score += 0.05 * (actionable_count.min(5) as f32); // Max 0.25 for actionable
-        score -= 0.1 * (tier1_count as f32); // Penalty for tier1
-        score += 0.1 * (tier3_count.min(3) as f32); // Bonus for tier3
+        // Score based on deterministic metrics only (file references)
+        // Base score 0.3, logarithmic scaling for refs (no arbitrary cap)
+        // log2(refs + 1) * 0.15 gives diminishing returns without hard cutoff
+        // 1 ref → 0.15, 3 refs → 0.30, 7 refs → 0.45, 15 refs → 0.60
+        let mut score = 0.3f32;
+        if file_refs > 0 {
+            score += ((file_refs as f32 + 1.0).log2() * 0.15).min(0.7);
+        }
         score = score.clamp(0.0, 1.0);
 
-        let meets_requirements = file_refs >= MIN_FILE_REFS
-            && actionable_count >= MIN_ACTIONABLE_COUNT
-            && tier.should_keep();
+        // Tier is set by LLM, default to Tier1 until classification
+        let tier = ContentTier::default();
+
+        let meets_requirements = file_refs >= MIN_FILE_REFS;
 
         QualityMetrics {
             file_refs,
-            actionable_count,
             tier,
             score,
             meets_requirements,
@@ -259,11 +238,6 @@ impl Skill {
 
     pub fn with_hooks(mut self, hooks: ToolHooks) -> Self {
         self.hooks = Some(hooks);
-        self
-    }
-
-    pub fn with_generation_context(mut self, ctx: Arc<GenerationContext>) -> Self {
-        self.generation_context = Some(ctx);
         self
     }
 

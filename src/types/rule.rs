@@ -1,13 +1,11 @@
 //! Claude Code Rule types - Official spec compliant
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
+use super::insight::ContentTier;
 use super::node::EvidenceLocation;
 use super::utils::is_kebab_case;
 use super::validation::ValidationIssue;
-use crate::pipeline::generation::GenerationContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
@@ -17,13 +15,17 @@ pub struct Rule {
     pub content: Vec<String>,
     #[serde(skip)]
     pub evidence: Vec<EvidenceLocation>,
+    /// Content tier classification (set by LLM during generation)
     #[serde(skip)]
-    pub generation_context: Option<Arc<GenerationContext>>,
+    pub tier: ContentTier,
 }
 
 impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.paths == other.paths && self.content == other.content
+        self.name == other.name
+            && self.paths == other.paths
+            && self.content == other.content
+            && self.tier == other.tier
     }
 }
 
@@ -36,8 +38,13 @@ impl Rule {
             paths: None,
             content,
             evidence: Vec::new(),
-            generation_context: None,
+            tier: ContentTier::default(),
         }
+    }
+
+    pub fn with_tier(mut self, tier: ContentTier) -> Self {
+        self.tier = tier;
+        self
     }
 
     pub fn with_paths(mut self, paths: Vec<String>) -> Self {
@@ -47,11 +54,6 @@ impl Rule {
 
     pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
-        self
-    }
-
-    pub fn with_generation_context(mut self, ctx: Arc<GenerationContext>) -> Self {
-        self.generation_context = Some(ctx);
         self
     }
 

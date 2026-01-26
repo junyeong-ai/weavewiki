@@ -44,8 +44,15 @@ struct FeedbackLoopState {
     target_refs: usize,
 }
 
-static SECTION_HEADER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#{1,4}\s+(.+)$").expect("section header regex"));
+/// Matches common section patterns:
+/// - Markdown headers (# to ####)
+/// - Underlined headers (===, ---)
+/// - Numbered sections (1., 1.1., etc.)
+/// - All-caps headers
+static SECTION_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(?:#{1,4}\s+(.+)|(\d+\.(?:\d+\.)*)\s+(.+)|([A-Z][A-Z\s]{2,}):?)$")
+        .expect("section header regex")
+});
 
 /// JSON schema for enhanced sections response
 static ENHANCED_SECTIONS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -209,11 +216,6 @@ impl EvidenceStrategy {
         }
     }
 
-    /// Extract evidence from source insights (reserved for future use)
-    fn get_source_evidence(&self, _context: &StrategyContext<'_>) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Build prompt with feedback context for retry attempts
     fn build_feedback_prompt(
         &self,
@@ -228,21 +230,6 @@ impl EvidenceStrategy {
         let retry = state.retry;
         let current_refs = state.current_refs;
         let target_refs = state.target_refs;
-
-        // Get evidence from source insights
-        let source_evidence = self.get_source_evidence(context);
-        let source_evidence_section = if !source_evidence.is_empty() {
-            format!(
-                "EVIDENCE FROM SOURCE INSIGHTS:\n{}\n\n",
-                source_evidence
-                    .iter()
-                    .map(|e| format!("- @{}", e))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        } else {
-            String::new()
-        };
 
         let sections_text = sections_needing_evidence
             .iter()
@@ -264,7 +251,7 @@ FEEDBACK FROM PREVIOUS ATTEMPT:
 - Ensure references point to actual code in AVAILABLE FILES
 - Use specific line numbers where key code exists
 
-{source_evidence_section}AVAILABLE FILES:
+AVAILABLE FILES:
 {file_context}
 
 CODE SAMPLES:
@@ -275,10 +262,9 @@ SECTIONS STILL NEEDING EVIDENCE:
 
 REQUIREMENTS:
 1. Add @file:line references (e.g., @src/main.rs:42)
-2. PREFER references from EVIDENCE FROM SOURCE INSIGHTS if available
-3. Reference real files from AVAILABLE FILES list
-4. Each section needs at least {min_refs} valid reference(s)
-5. Preserve original content structure
+2. Reference real files from AVAILABLE FILES list
+3. Each section needs at least {min_refs} valid reference(s)
+4. Preserve original content structure
 
 Return JSON with enhanced_sections array."##,
             retry = retry,
@@ -288,7 +274,6 @@ Return JSON with enhanced_sections array."##,
             current_refs = current_refs,
             target_refs = target_refs,
             gap = target_refs.saturating_sub(current_refs),
-            source_evidence_section = source_evidence_section,
             file_context = file_context,
             code_samples = code_samples,
             sections_text = sections_text,

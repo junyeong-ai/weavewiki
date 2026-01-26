@@ -11,7 +11,6 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Custom config file path (overrides .claudegen/config.toml)
     #[arg(long, short, global = true)]
     config: Option<PathBuf>,
 
@@ -28,14 +27,6 @@ enum Commands {
     Init {
         #[arg(long, short, help = "Overwrite existing initialization")]
         force: bool,
-    },
-
-    /// Analyze codebase and build knowledge graph
-    Analyze {
-        #[arg(long, help = "Run full analysis from scratch")]
-        full: bool,
-        #[arg(long, help = "Path to analyze")]
-        path: Option<PathBuf>,
     },
 
     /// Generate Claude Code plugin (CLAUDE.md, skills, agents, rules)
@@ -79,21 +70,6 @@ enum Commands {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
-    },
-
-    /// Query the knowledge graph
-    Query {
-        #[arg(help = "Node ID or path to query")]
-        query: String,
-        #[arg(long, short, default_value = "10", help = "Depth of traversal")]
-        depth: u32,
-        #[arg(
-            long,
-            short,
-            default_value = "text",
-            help = "Output format: text, json"
-        )]
-        format: String,
     },
 }
 
@@ -193,9 +169,6 @@ fn run_cli() -> claudegen::types::Result<()> {
         Commands::Init { force } => {
             claudegen::cli::commands::init::run(force)?;
         }
-        Commands::Analyze { full, path } => {
-            claudegen::cli::commands::analyze::run(full, path, false, cli.config.as_deref())?;
-        }
         Commands::Generate {
             output,
             resume,
@@ -214,7 +187,6 @@ fn run_cli() -> claudegen::types::Result<()> {
             rt.block_on(claudegen::cli::commands::validate::run(
                 path,
                 if strict { "error" } else { "warning" },
-                cli.config.as_deref(),
             ))?;
         }
         Commands::Status { format } => {
@@ -226,7 +198,6 @@ fn run_cli() -> claudegen::types::Result<()> {
                 all,
                 false,
                 checkpoints,
-                false,
             ))?;
         }
         Commands::Config { action } => match action {
@@ -247,13 +218,6 @@ fn run_cli() -> claudegen::types::Result<()> {
                 }
             }
         },
-        Commands::Query {
-            query,
-            depth,
-            format,
-        } => {
-            claudegen::cli::commands::query::run(&query, depth, &format)?;
-        }
     }
 
     Ok(())

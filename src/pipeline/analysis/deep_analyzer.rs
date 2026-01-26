@@ -48,15 +48,33 @@ pub struct AnalysisQuality {
 }
 
 impl DeepAnalysisResult {
-    /// Calculate the value score for this analysis result
-    /// Higher scores indicate more project-specific, actionable insights
+    /// Calculate the value score for this analysis result.
+    ///
+    /// # ADVISORY HEURISTIC - NOT AUTHORITATIVE
+    ///
+    /// This score is a programmatic ESTIMATE based on finding counts.
+    /// The multipliers (0.1, 0.15, 0.2) and caps (0.3, 0.2) are heuristics
+    /// that may not reflect actual value for all projects.
+    ///
+    /// **Limitations:**
+    /// - A crypto codebase with 2 critical constraints may be more valuable
+    ///   than a web app with 10 patterns, but this formula doesn't know that
+    /// - Caps (.min(0.3)) prevent high scores even with many findings
+    /// - Doesn't consider domain-specific value (security, performance, etc.)
+    ///
+    /// **Proper use:**
+    /// - Use for rough prioritization of analysis depth
+    /// - Pass raw finding counts to LLM for contextual value assessment
+    /// - Don't use to reject findings or make binary decisions
     pub fn value_score(&self) -> f32 {
         let mut score = 0.0f32;
 
-        // Patterns contribute to value
+        // Patterns contribute: 0.1 per pattern, max 0.3
+        // NOTE: May undervalue pattern-heavy projects
         score += (self.patterns.len() as f32 * 0.1).min(0.3);
 
-        // Constraints are high-value (especially hidden dependencies)
+        // High-value constraints: 0.15 per constraint, max 0.3
+        // NOTE: May undervalue constraint-heavy projects (security, concurrency)
         let high_value_constraints = self
             .constraints
             .iter()
@@ -69,17 +87,20 @@ impl DeepAnalysisResult {
             .count();
         score += (high_value_constraints as f32 * 0.15).min(0.3);
 
-        // Insights with gotchas are valuable
+        // Gotchas: 0.1 per gotcha, max 0.2
         let gotcha_count: usize = self.insights.iter().map(|i| i.gotchas.len()).sum();
         score += (gotcha_count as f32 * 0.1).min(0.2);
 
-        // Analysis quality contributes
+        // Analysis quality: 0.2 weight
         score += self.analysis_quality.confidence_score * 0.2;
 
         score.min(1.0)
     }
 
-    /// Check if the analysis has sufficient evidence
+    /// Check if the analysis has sufficient evidence.
+    ///
+    /// NOTE: The threshold (>= 3 evidence, validated > hallucinated) is a
+    /// heuristic. Small projects may have fewer evidence points legitimately.
     pub fn has_sufficient_evidence(&self) -> bool {
         self.analysis_quality.evidence_count >= 3
             && self.analysis_quality.validated_refs > self.analysis_quality.filtered_hallucinations
@@ -109,6 +130,15 @@ pub enum EntryPointKind {
     ApiHandler,
     CliCommand,
     Test,
+    // Extended types for diverse frameworks
+    WebServer,
+    Worker,
+    Lambda,
+    Plugin,
+    Middleware,
+    /// Catch-all for custom entry point types
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +177,14 @@ pub enum PatternCategory {
     Testing,
     Configuration,
     Logging,
+    // Extended categories
+    Performance,
+    Security,
+    Caching,
+    Validation,
+    /// Catch-all for custom pattern categories
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +237,14 @@ pub enum DependencyType {
     Composition,
     RuntimeCall,
     Configuration,
+    // Extended types
+    EventDriven,
+    DependencyInjection,
+    Plugin,
+    Async,
+    /// Catch-all for custom dependency types
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +277,16 @@ pub enum AbstractionKind {
     Interface,
     Class,
     Type,
+    // Extended types for diverse languages
+    Protocol, // Swift, Python
+    Module,
+    Namespace,
+    Component, // React, Vue
+    Service,
+    Hook, // React
+    /// Catch-all for custom abstraction types
+    #[serde(other)]
+    Other,
 }
 
 // File-level deep analysis types (consolidated from deep/ subdirectory)
@@ -586,25 +642,58 @@ impl DeepAnalyzer {
             .await
     }
 
+    /// Get source file extensions based on detected languages.
+    /// Returns extensions for ALL detected languages, not just the primary one.
+    /// Fallback includes comprehensive list of common source file extensions.
     fn get_source_extensions(&self, detection: &ProjectDetection) -> Vec<&'static str> {
-        let primary = detection
-            .languages
-            .first()
-            .map(|l| l.language.as_str())
-            .unwrap_or("rust");
+        let mut extensions = Vec::new();
 
-        match primary {
-            "rust" => vec!["rs"],
-            "typescript" => vec!["ts", "tsx"],
-            "javascript" => vec!["js", "jsx"],
-            "python" => vec!["py"],
-            "go" => vec!["go"],
-            "kotlin" => vec!["kt"],
-            "java" => vec!["java"],
-            _ => vec!["rs", "ts", "py", "go"],
+        // Add extensions for all detected languages
+        for lang_info in &detection.languages {
+            let lang_exts = match lang_info.language.to_lowercase().as_str() {
+                "rust" => vec!["rs"],
+                "typescript" => vec!["ts", "tsx", "mts", "cts"],
+                "javascript" => vec!["js", "jsx", "mjs", "cjs"],
+                "python" => vec!["py", "pyi"],
+                "go" => vec!["go"],
+                "kotlin" => vec!["kt", "kts"],
+                "java" => vec!["java"],
+                "c#" | "csharp" => vec!["cs"],
+                "c++" | "cpp" => vec!["cpp", "cc", "cxx", "hpp", "h"],
+                "c" => vec!["c", "h"],
+                "swift" => vec!["swift"],
+                "ruby" => vec!["rb"],
+                "php" => vec!["php"],
+                "scala" => vec!["scala", "sc"],
+                "elixir" => vec!["ex", "exs"],
+                "clojure" => vec!["clj", "cljs", "cljc"],
+                "haskell" => vec!["hs"],
+                "lua" => vec!["lua"],
+                "dart" => vec!["dart"],
+                "vue" => vec!["vue"],
+                "svelte" => vec!["svelte"],
+                _ => vec![],
+            };
+            for ext in lang_exts {
+                if !extensions.contains(&ext) {
+                    extensions.push(ext);
+                }
+            }
         }
+
+        // If no languages detected, use comprehensive fallback
+        if extensions.is_empty() {
+            extensions = vec![
+                "rs", "ts", "tsx", "js", "jsx", "py", "go", "kt", "java", "cs", "cpp", "c",
+                "swift", "rb", "php", "scala",
+            ];
+        }
+
+        extensions
     }
 
+    /// Collect source files using .gitignore-aware walking.
+    /// Uses `ignore` crate's WalkBuilder for proper .gitignore handling.
     async fn collect_files_recursive(
         &self,
         dir: &Path,
@@ -612,72 +701,66 @@ impl DeepAnalyzer {
         files: &mut HashMap<String, FileContent>,
         max_files: usize,
         max_chars: usize,
-        depth: usize,
+        _depth: usize, // Kept for API compatibility, WalkBuilder handles depth
     ) -> Result<()> {
-        if depth > 5 || files.len() >= max_files {
-            return Ok(());
-        }
+        use ignore::WalkBuilder;
 
-        let skip_dirs = [
-            "target",
-            "node_modules",
-            "dist",
-            "build",
-            ".git",
-            "vendor",
-            "__pycache__",
-            ".venv",
-        ];
+        // Use ignore crate for .gitignore-aware walking
+        // This automatically respects:
+        // - .gitignore patterns
+        // - .git/info/exclude
+        // - Global gitignore (~/.gitignore)
+        let walker = WalkBuilder::new(dir)
+            .hidden(true) // Skip hidden by default
+            .git_ignore(true) // Respect .gitignore
+            .git_global(true) // Respect global gitignore
+            .git_exclude(true) // Respect .git/info/exclude
+            .follow_links(false)
+            .max_depth(Some(15)) // Allow deep monorepo structures
+            .build();
 
-        if let Ok(mut entries) = fs::read_dir(dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if files.len() >= max_files {
-                    break;
-                }
-
-                let path = entry.path();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-
-                if name.starts_with('.') || skip_dirs.contains(&name) {
-                    continue;
-                }
-
-                if path.is_dir() {
-                    Box::pin(self.collect_files_recursive(
-                        &path,
-                        extensions,
-                        files,
-                        max_files,
-                        max_chars,
-                        depth + 1,
-                    ))
-                    .await?;
-                } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
-                    && extensions.contains(&ext)
-                    && let Ok(content) = fs::read_to_string(&path).await
-                    && content.len() <= self.analysis_config.max_file_size
-                {
-                    let truncated = if content.len() > max_chars {
-                        content[..max_chars].to_string()
-                    } else {
-                        content.clone()
-                    };
-                    let relative = path
-                        .strip_prefix(&self.project_root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    files.insert(
-                        relative,
-                        FileContent {
-                            content: truncated,
-                            lines: content.lines().count(),
-                        },
-                    );
-                }
+        for entry in walker.filter_map(|e| e.ok()) {
+            if files.len() >= max_files {
+                break;
             }
+
+            let path = entry.path();
+
+            // Skip directories
+            if path.is_dir() {
+                continue;
+            }
+
+            // Check extension
+            match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) if extensions.contains(&ext) => {}
+                _ => continue,
+            };
+
+            // Read file content
+            let content = match fs::read_to_string(path).await {
+                Ok(c) if c.len() <= self.analysis_config.max_file_size => c,
+                _ => continue,
+            };
+
+            let truncated = if content.len() > max_chars {
+                content[..max_chars].to_string()
+            } else {
+                content.clone()
+            };
+
+            let relative = path
+                .strip_prefix(&self.project_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            files.insert(
+                relative,
+                FileContent {
+                    content: truncated,
+                    lines: content.lines().count(),
+                },
+            );
         }
 
         Ok(())
@@ -1286,8 +1369,10 @@ ONLY include constraints with evidence from the actual code."#,
         path: &str,
         content: &str,
     ) -> Result<FileInsight> {
-        let truncated = if content.len() > 3000 {
-            &content[..3000]
+        // Use configurable max chars (default 50,000, was hardcoded 3000)
+        let max_chars = self.deep_config.max_code_context_chars;
+        let truncated = if content.len() > max_chars {
+            &content[..max_chars]
         } else {
             content
         };

@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::types::{Agent, DiagnosticLevel, Result, Rule, Skill};
 
 use super::analysis::architectural_analyzer::{ArchitecturalAnalyzer, StructuralValidationResult};
+use super::analysis::deep_analyzer::CoreModule;
 use super::context::VerifiedFileRegistry;
 use super::feedback::{AggregatedFeedback, FeedbackAggregator};
 use super::iteration_state::{BudgetExtensionTrigger, IterationRecord, IterationState};
@@ -117,6 +118,11 @@ pub enum DetectedIssue {
         module_name: String,
         coverage: f32,
     },
+    /// Custom issue detected by LLM that doesn't fit predefined categories
+    Other {
+        kind: String,
+        description: String,
+    },
 }
 
 impl DetectedIssue {
@@ -156,10 +162,9 @@ impl DetectedIssue {
                 DiagnosticLevel::Error,
                 format!("Missing sections: {actual} of {expected} required"),
             ),
-            Self::Redundant { description } => (
-                DiagnosticLevel::Info,
-                format!("Redundant: {description}"),
-            ),
+            Self::Redundant { description } => {
+                (DiagnosticLevel::Info, format!("Redundant: {description}"))
+            }
             Self::Tier1Content { violation } => (
                 DiagnosticLevel::Error,
                 format!("Tier 1 content: {violation}"),
@@ -189,6 +194,9 @@ impl DetectedIssue {
                     coverage * 100.0
                 ),
             ),
+            Self::Other { kind, description } => {
+                (DiagnosticLevel::Warning, format!("{kind}: {description}"))
+            }
         };
         StrategyIssue::new(kind, severity, message)
     }
@@ -249,7 +257,6 @@ struct RefinementLoopConfig {
     post_convergence_verification: bool,
     post_convergence_passes_required: usize,
     max_convergence_detections: usize,
-    min_quality_for_value_exit: f32,
 }
 
 impl RefinementLoopConfig {
@@ -275,7 +282,6 @@ impl RefinementLoopConfig {
             post_convergence_verification: refinement.post_convergence_verification,
             post_convergence_passes_required: refinement.post_convergence_passes,
             max_convergence_detections: refinement.max_convergence_detections,
-            min_quality_for_value_exit: target_quality * 0.9,
         }
     }
 
@@ -285,7 +291,7 @@ impl RefinementLoopConfig {
 }
 
 /// Mutable state tracked across refinement iterations
-/// Note: quality_trajectory and tier3_trajectory are tracked in IterationState
+/// Note: quality_trajectory is tracked in IterationState
 struct RefinementState {
     prev_quality: Option<f32>,
     stagnation_count: usize,
@@ -329,10 +335,15 @@ struct Validators {
 }
 
 impl Validators {
-    fn new(config: &Config, _provider: &Arc<dyn LlmProvider>, _project_root: &PathBuf) -> Self {
+    fn new(
+        config: &Config,
+        _provider: &Arc<dyn LlmProvider>,
+        _project_root: &PathBuf,
+        core_modules: &[CoreModule],
+    ) -> Self {
         let structural_config = config.structural_validation();
-        let structural = if structural_config.enabled {
-            Some(ArchitecturalAnalyzer::new(structural_config))
+        let structural = if structural_config.enabled && !core_modules.is_empty() {
+            Some(ArchitecturalAnalyzer::new(structural_config, core_modules))
         } else {
             None
         };
@@ -342,7 +353,6 @@ impl Validators {
 
     async fn run_structural(
         &self,
-        file_registry: &VerifiedFileRegistry,
         skills: &[Skill],
         agents: &[Agent],
         rules: &[Rule],
@@ -350,9 +360,7 @@ impl Validators {
     ) -> Result<Option<StructuralValidationResult>> {
         if let Some(ref analyzer) = self.structural {
             Ok(Some(
-                analyzer
-                    .validate(file_registry, skills, agents, rules, claude_md)
-                    .await?,
+                analyzer.validate(skills, agents, rules, claude_md).await?,
             ))
         } else {
             Ok(None)
@@ -369,6 +377,7 @@ pub struct RefinementEngine {
     learning_history: LearningHistory,
     feedback_aggregator: FeedbackAggregator,
     judge: LlmJudge,
+    llm_modules: Vec<CoreModule>,
 }
 
 impl RefinementEngine {
@@ -396,6 +405,7 @@ impl RefinementEngine {
             learning_history,
             feedback_aggregator,
             judge,
+            llm_modules: Vec::new(),
         }
     }
 
@@ -447,7 +457,14 @@ impl RefinementEngine {
             learning_history,
             feedback_aggregator,
             judge,
+            llm_modules: Vec::new(),
         })
+    }
+
+    /// Set modules identified by LLM for structural validation
+    pub fn with_llm_modules(mut self, modules: Vec<CoreModule>) -> Self {
+        self.llm_modules = modules;
+        self
     }
 
     pub async fn refine(
@@ -743,13 +760,18 @@ impl RefinementEngine {
         output_plan: &OutputPlan,
     ) -> Result<RefinementResult> {
         let cfg = RefinementLoopConfig::from_config(&self.config);
-        let validators = Validators::new(&self.config, &self.provider, &self.project_root);
+        let validators = Validators::new(
+            &self.config,
+            &self.provider,
+            &self.project_root,
+            &self.llm_modules,
+        );
         let file_registry = match &self.file_registry {
             Some(r) => r.clone(),
             None => VerifiedFileRegistry::build(&self.project_root).await?,
         };
         let _project_context = format!("Project root: {}", self.project_root.display());
-        let claude_md_content = claude_md.to_markdown();
+        let _claude_md_content = claude_md.to_markdown();
         let mut state = RefinementState::new();
         let mut thinking = IterationState::new(cfg.base_iterations, cfg.max_extension);
 
@@ -758,8 +780,7 @@ impl RefinementEngine {
             state.decay_strategy_failures();
 
             // Phase 1: Tier filtering (simplified - actual filtering done by LLM Judge)
-            let _tier_result =
-                TierFilterResult::check(&skills, &agents, &rules, &claude_md_content);
+            let _tier_result = TierFilterResult::check(&skills, &agents, &rules);
             // Keep all artifacts - filtering decision moved to quality validation via LLM Judge
 
             // Phase 2: Run all validations
@@ -773,7 +794,7 @@ impl RefinementEngine {
             state.last_judgment = Some(judgment.clone());
 
             let structural_result = validators
-                .run_structural(&file_registry, &skills, &agents, &rules, claude_md)
+                .run_structural(&skills, &agents, &rules, claude_md)
                 .await?;
             if structural_result.is_some() {
                 state.last_structural_result = structural_result.clone();
@@ -792,60 +813,7 @@ impl RefinementEngine {
 
             thinking.record_quality(combined_quality);
 
-            // Phase 4: Value-based termination check
-            let tier3_count = count_tier3_value(&skills, &agents, &rules, claude_md);
-            thinking.record_tier3(tier3_count);
-
-            const VALUE_PLATEAU_WINDOW: usize = 3;
-            if thinking.tier3_trajectory.len() >= VALUE_PLATEAU_WINDOW
-                && combined_quality >= cfg.min_quality_for_value_exit
-            {
-                let recent: Vec<usize> = thinking
-                    .tier3_trajectory
-                    .iter()
-                    .rev()
-                    .take(VALUE_PLATEAU_WINDOW)
-                    .copied()
-                    .collect();
-                let max_recent = recent.iter().max().copied().unwrap_or(0);
-                let min_recent = recent.iter().min().copied().unwrap_or(0);
-                if max_recent == min_recent && tier3_count > 0 {
-                    tracing::info!(
-                        iteration = iteration + 1,
-                        tier3_count,
-                        quality = format!("{:.1}%", combined_quality * 100.0),
-                        "Value-based early exit: Tier3 content plateaued"
-                    );
-
-                    let report = self.build_success_report(
-                        AssessmentPath::ValuePlateau,
-                        iteration + 1,
-                        thinking.quality_trajectory_vec(),
-                        state.critical_improvements.clone(),
-                        ValidationContext {
-                            judgment: &judgment,
-                            structural: structural_result.as_ref(),
-                        },
-                    );
-                    self.persist_learning().await;
-
-                    return Ok(RefinementResult {
-                        skills: skills.clone(),
-                        agents: agents.clone(),
-                        rules: rules.clone(),
-                        iterations: iteration + 1,
-                        converged: true,
-                        final_quality: combined_quality,
-                        judgment: Some(judgment),
-                        structural_quality: structural_result,
-                        aggregated_feedback: Some(aggregated_feedback),
-                        learning_summary: Some(self.learning_history.get_progress_summary()),
-                        convergence_report: Some(report),
-                    });
-                }
-            }
-
-            // Phase 5: Rollback logic
+            // Phase 4: Rollback logic
             if cfg.enable_rollback {
                 const SNAPSHOT_MIN_IMPROVEMENT: f32 = 0.02;
                 let should_save = match &state.best_state {
@@ -1261,9 +1229,8 @@ impl RefinementEngine {
                     thinking.maybe_extend(BudgetExtensionTrigger::HighUncertainty {
                         threshold: cfg.high_uncertainty_threshold,
                     });
-                let extended_value = thinking.maybe_extend(BudgetExtensionTrigger::ValueDiscovery);
 
-                if extended_quality || extended_uncertainty || extended_value {
+                if extended_quality || extended_uncertainty {
                     tracing::info!(
                         iteration = iteration + 1,
                         new_estimate = thinking.estimated_total,
@@ -1495,8 +1462,7 @@ impl RefinementEngine {
                 DetectedIssue::TooGeneric {
                     description: quality_issue.message.clone(),
                 }
-            } else if quality_issue.code.contains("EVIDENCE")
-                || quality_issue.code.contains("REF")
+            } else if quality_issue.code.contains("EVIDENCE") || quality_issue.code.contains("REF")
             {
                 DetectedIssue::WeakEvidence {
                     description: quality_issue.message.clone(),
@@ -1541,11 +1507,11 @@ impl RefinementEngine {
         for missing in &structural.coverage_report.missing_modules {
             issues.push(DetectedArtifactIssue {
                 item_type: ItemType::ClaudeMd,
-                item_name: format!("module:{}", missing.module.name),
+                item_name: format!("module:{}", missing.name),
                 issue: DetectedIssue::MissingModule {
-                    module_name: missing.module.name.clone(),
-                    file_count: missing.module.file_count,
-                    key_files: missing.module.key_files.clone(),
+                    module_name: missing.name.clone(),
+                    file_count: 0,         // ModuleCoverage doesn't track file count
+                    key_files: Vec::new(), // ModuleCoverage doesn't track key files
                 },
                 severity: DiagnosticLevel::Error,
             });
@@ -1556,9 +1522,9 @@ impl RefinementEngine {
             if partial.coverage_score < 0.5 {
                 issues.push(DetectedArtifactIssue {
                     item_type: ItemType::ClaudeMd,
-                    item_name: format!("module:{}", partial.module.name),
+                    item_name: format!("module:{}", partial.name),
                     issue: DetectedIssue::PartialModuleCoverage {
-                        module_name: partial.module.name.clone(),
+                        module_name: partial.name.clone(),
                         coverage: partial.coverage_score,
                     },
                     severity: DiagnosticLevel::Warning,
@@ -1567,6 +1533,8 @@ impl RefinementEngine {
         }
     }
 
+    /// Check skill quality - informational only, not blocking
+    /// LLM judge makes final quality decisions
     fn check_skill_quality(
         &self,
         skill: &Skill,
@@ -1574,25 +1542,14 @@ impl RefinementEngine {
     ) -> Vec<DetectedArtifactIssue> {
         let mut issues = Vec::new();
 
-        if skill.body.len() < cfg.min_chars {
-            issues.push(DetectedArtifactIssue {
-                item_type: ItemType::Skill,
-                item_name: skill.name.clone(),
-                issue: DetectedIssue::TooShort {
-                    actual: skill.body.len(),
-                    min: cfg.min_chars,
-                },
-                severity: DiagnosticLevel::Warning,
-            });
-        }
-
+        // File references are informational hints, not requirements
         let ref_count = count_file_references(&skill.body);
-        if ref_count < cfg.target_file_refs {
+        if ref_count == 0 && cfg.min_file_refs > 0 {
             issues.push(DetectedArtifactIssue {
                 item_type: ItemType::Skill,
                 item_name: skill.name.clone(),
                 issue: DetectedIssue::MissingReferences {
-                    expected: cfg.target_file_refs,
+                    expected: cfg.min_file_refs,
                     actual: ref_count,
                 },
                 severity: DiagnosticLevel::Info,
@@ -1602,39 +1559,16 @@ impl RefinementEngine {
         issues
     }
 
+    /// Check agent quality - informational only, not blocking
+    /// LLM judge makes final quality decisions
     fn check_agent_quality(
         &self,
-        agent: &Agent,
-        cfg: &crate::config::AgentQualityConfig,
+        _agent: &Agent,
+        _cfg: &crate::config::AgentQualityConfig,
     ) -> Vec<DetectedArtifactIssue> {
-        let mut issues = Vec::new();
-
-        if agent.prompt.len() < cfg.min_chars {
-            issues.push(DetectedArtifactIssue {
-                item_type: ItemType::Agent,
-                item_name: agent.name.clone(),
-                issue: DetectedIssue::TooShort {
-                    actual: agent.prompt.len(),
-                    min: cfg.min_chars,
-                },
-                severity: DiagnosticLevel::Warning,
-            });
-        }
-
-        let section_count = agent.prompt.matches("##").count();
-        if section_count < cfg.min_sections {
-            issues.push(DetectedArtifactIssue {
-                item_type: ItemType::Agent,
-                item_name: agent.name.clone(),
-                issue: DetectedIssue::MissingSections {
-                    expected: cfg.min_sections,
-                    actual: section_count,
-                },
-                severity: DiagnosticLevel::Warning,
-            });
-        }
-
-        issues
+        // Agent quality is evaluated by LLM judge, not programmatic checks
+        // Removed: min_chars, min_sections (format-specific assumptions)
+        Vec::new()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1844,7 +1778,7 @@ impl RefinementEngine {
                 );
 
                 // Record to learning history for cross-session pattern learning
-                self.learning_history.record_outcome(LearningOutcome {
+                self.learning_history.record_outcome(&LearningOutcome {
                     strategy_name: strategy.name().to_string(),
                     issue_kind: format!("{:?}", strategy_issue_kind),
                     item_name: issue.item_name.clone(),
@@ -2060,11 +1994,7 @@ fn build_dimensions_status(
             thresholds.evidence,
         ),
         depth: DimensionScore::new("depth", judgment.overall_score, semantic_threshold * 0.8),
-        redundancy: DimensionScore::new_inverted(
-            "redundancy",
-            1.0 - judgment.overall_score,
-            0.3,
-        ),
+        redundancy: DimensionScore::new_inverted("redundancy", 1.0 - judgment.overall_score, 0.3),
         structural_coverage: structural.map(|s| {
             DimensionScore::new(
                 "structural_coverage",
@@ -2075,39 +2005,6 @@ fn build_dimensions_status(
         cross_artifact: None,
         usability: None,
     }
-}
-
-/// Counts Tier3 (high-value) indicators across all artifacts.
-/// Tier3 content includes project-specific constraints, hidden gotchas, and domain-specific rules.
-fn count_tier3_value(
-    skills: &[Skill],
-    agents: &[Agent],
-    rules: &[Rule],
-    claude_md: &crate::types::ProjectMemory,
-) -> usize {
-    let mut count = 0;
-
-    // Count Tier3 indicators in skills
-    for skill in skills {
-        count += patterns::count_tier3_indicators(&skill.body);
-    }
-
-    // Count Tier3 indicators in agents
-    for agent in agents {
-        count += patterns::count_tier3_indicators(&agent.prompt);
-    }
-
-    // Count Tier3 indicators in rules
-    for rule in rules {
-        let content = rule.content.join("\n");
-        count += patterns::count_tier3_indicators(&content);
-    }
-
-    // Count Tier3 indicators in CLAUDE.md content
-    let claude_md_content = claude_md.to_markdown();
-    count += patterns::count_tier3_indicators(&claude_md_content);
-
-    count
 }
 
 /// Detects oscillation pattern in quality trajectory.

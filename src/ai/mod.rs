@@ -20,12 +20,13 @@ pub use model_capabilities::{
 pub use prompt::PromptBuilder;
 pub use provider::{
     ChainConfig, ChainedProvider, CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats,
-    CircuitState, ErrorCategory, ErrorClassifier, LlmError, LlmProvider, LlmResponse,
-    ProviderChain, ProviderChainBuilder, ProviderConfig, ResponseMetadata, ResponseTiming,
-    TokenUsage, create_provider_for_model,
+    CircuitState, ErrorCategory, ErrorClassifier, LlmError, LlmProvider, LlmResponse, ModelTier,
+    ProviderChain, ProviderChainBuilder, ProviderConfig, ProviderSet, ResponseMetadata,
+    ResponseTiming, TokenUsage, TrackedProvider, create_provider_for_model, create_provider_set,
+    phase_id,
 };
 
 #[cfg(feature = "claude-agent")]
 pub use provider::ClaudeAgentProvider;
 pub use timeout::{with_timeout, with_timeout_map};
-pub use validation::{JsonRepairer, ProcessedResponse, ValidationPipeline};
+pub use validation::{ProcessedResponse, ValidationPipeline, parse_structured_output};
