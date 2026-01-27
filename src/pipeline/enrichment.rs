@@ -19,9 +19,9 @@ pub struct EnrichedPlan {
     pub coverage: ConstraintCoverage,
     /// Suggested additional artifacts to cover uncovered constraints
     pub suggested_artifacts: Vec<SuggestedArtifact>,
-    /// Key abstractions from deep analysis (previously lost)
+    /// Key abstractions from deep analysis
     pub key_abstractions: Vec<EnrichedAbstraction>,
-    /// File insights with gotchas (previously lost)
+    /// File insights with gotchas
     pub file_insights: Vec<EnrichedFileInsight>,
 }
 
@@ -261,10 +261,10 @@ impl EnrichmentEngine {
         // Generate suggestions for uncovered constraints
         let suggested_artifacts = self.generate_suggestions(&uncovered);
 
-        // Extract key abstractions (previously lost in pipeline)
+        // Extract key abstractions (from deep analysis)
         let key_abstractions = self.extract_key_abstractions(synthesis);
 
-        // Extract file insights (previously lost in pipeline)
+        // Extract file insights (from deep analysis)
         let file_insights = self.extract_file_insights(synthesis);
 
         EnrichedPlan {
@@ -442,7 +442,7 @@ impl EnrichmentEngine {
                 }
             }
 
-            // File insights with gotchas (previously lost in pipeline)
+            // File insights with gotchas (from deep analysis)
             for insight in &synth.deep.insights {
                 for gotcha in &insight.gotchas {
                     if !result.iter().any(|c| c.description == *gotcha) {
@@ -493,11 +493,6 @@ impl EnrichmentEngine {
             .map(|s| {
                 s.modules
                     .iter()
-                    .filter(|m| {
-                        let name_lower = skill_name.to_lowercase();
-                        m.name.to_lowercase().contains(&name_lower)
-                            || name_lower.contains(&m.name.to_lowercase())
-                    })
                     .map(|m| Self::extract_module_prefix(&m.path).unwrap_or_default())
                     .filter(|s| !s.is_empty())
                     .collect()
@@ -554,31 +549,11 @@ impl EnrichmentEngine {
 
     fn keyword_matching(
         &self,
-        skill_name: &str,
-        trigger: &str,
-        all_constraints: &[EnrichedConstraint],
+        _skill_name: &str,
+        _trigger: &str,
+        _all_constraints: &[EnrichedConstraint],
     ) -> Vec<EnrichedConstraint> {
-        let skill_lower = skill_name.to_lowercase();
-        let trigger_lower = trigger.to_lowercase();
-
-        let keywords: Vec<&str> = skill_lower
-            .split(|c: char| !c.is_alphanumeric())
-            .chain(trigger_lower.split(|c: char| !c.is_alphanumeric()))
-            .filter(|s| s.len() > 2)
-            .collect();
-
-        all_constraints
-            .iter()
-            .filter(|c| {
-                let desc_lower = c.description.to_lowercase();
-                keywords.iter().any(|kw| desc_lower.contains(kw))
-                    || c.related_modules.iter().any(|m| {
-                        let m_lower = m.to_lowercase();
-                        keywords.iter().any(|kw| m_lower.contains(kw))
-                    })
-            })
-            .cloned()
-            .collect()
+        Vec::new()
     }
 
     fn to_kebab_case(s: &str) -> String {
@@ -850,23 +825,15 @@ impl EnrichmentEngine {
         suggestions
     }
 
-    /// Check if a constraint is relevant to a role
     fn is_relevant_to_role(&self, text: &str, role_lower: &str) -> bool {
         let text_lower = text.to_lowercase();
-
-        // Extract keywords from role
+        // Allow short keywords (2+ chars) to match valid role names like "api", "db", "qa", "ui"
         let role_keywords: Vec<&str> = role_lower
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| s.len() > 2)
+            .filter(|s| s.len() >= 2)
             .collect();
 
-        // Check if any keyword matches
         role_keywords.iter().any(|kw| text_lower.contains(kw))
-            // Or common mappings
-            || (role_lower.contains("architect") && text_lower.contains("module"))
-            || (role_lower.contains("debug") && (text_lower.contains("error") || text_lower.contains("log")))
-            || (role_lower.contains("security") && text_lower.contains("security"))
-            || (role_lower.contains("test") && text_lower.contains("test"))
     }
 
     /// Check if constraint affects common areas

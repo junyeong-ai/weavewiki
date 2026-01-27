@@ -66,8 +66,10 @@ impl ArchitecturalAnalysis {
 /// Pattern to extract module names from documentation content.
 /// Matches paths like @src/module, backend/src/..., `module_name`, etc.
 static MODULE_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"@?(?:[\w-]+/)*(?:src/)?([a-zA-Z_][a-zA-Z0-9_-]*)(?:/|\.rs|\.kt|\.ts|\.py|:|`|$)")
-        .expect("module path regex")
+    Regex::new(
+        r"@?(?:[\w-]+/)*(?:src/)?([a-zA-Z_][a-zA-Z0-9_-]*)(?:/|\.(?:rs|kt|ts|tsx|js|jsx|py|go|java|rb|php|swift|scala|cs|cpp|c)|:|`|$)"
+    )
+    .expect("module path regex")
 });
 
 static BACKTICK_MODULE_PATTERN: LazyLock<Regex> =
@@ -94,8 +96,8 @@ pub struct ModuleCoverage {
     pub path: String,
     /// Module responsibility description
     pub responsibility: String,
-    /// Coverage score (0.0 - 1.0)
-    pub coverage_score: f32,
+    /// Number of artifacts referencing this module - let LLM interpret significance
+    pub reference_count: usize,
     /// Artifacts that reference this module
     pub referenced_in: Vec<String>,
 }
@@ -201,8 +203,8 @@ impl ArchitecturalAnalyzer {
     /// Calculate coverage statistics.
     fn calculate_coverage(&self, documented: &HashMap<String, Vec<String>>) -> CoverageReport {
         let mut missing = Vec::new();
-        let mut partially_covered = Vec::new();
         let mut fully_covered = Vec::new();
+        // partially_covered kept empty - previous threshold-based categorization removed
 
         for module in &self.modules {
             // Normalize consistently with extract_module_refs()
@@ -210,35 +212,29 @@ impl ArchitecturalAnalyzer {
 
             // Check if module is referenced in documentation
             let refs = documented.get(&module_name_normalized);
-            let ref_count = refs.map(|v| v.len()).unwrap_or(0);
+            let reference_count = refs.map(|v| v.len()).unwrap_or(0);
             let referenced_in = refs.cloned().unwrap_or_default();
-
-            // Coverage score based on reference count
-            let coverage_score = match ref_count {
-                0 => 0.0,
-                1 => 0.5,
-                2 => 0.75,
-                _ => 1.0,
-            };
 
             let module_coverage = ModuleCoverage {
                 name: module.name.clone(),
                 path: module.path.clone(),
                 responsibility: module.responsibility.clone(),
-                coverage_score,
+                reference_count,
                 referenced_in,
             };
 
-            if coverage_score < 0.3 {
+            // Report raw reference counts - let downstream (LLM/human) interpret significance
+            // Previous hardcoded thresholds (0=missing, 1-2=partial, 3+=full) were arbitrary
+            if reference_count == 0 {
                 missing.push(module_coverage);
-            } else if coverage_score < 0.8 {
-                partially_covered.push(module_coverage);
             } else {
+                // Non-zero references = some coverage exists
+                // LLM determines if coverage is adequate for the module's importance
                 fully_covered.push(module_coverage);
             }
         }
 
-        let documented_count = fully_covered.len() + partially_covered.len();
+        let documented_count = fully_covered.len();
         let coverage = if self.modules.is_empty() {
             1.0
         } else {
@@ -251,7 +247,7 @@ impl ArchitecturalAnalyzer {
             documented_modules: documented_count,
             coverage,
             missing_modules: missing,
-            partially_covered,
+            partially_covered: Vec::new(), // Threshold-based categorization removed
             fully_covered,
         }
     }
@@ -287,39 +283,10 @@ impl ArchitecturalAnalyzer {
             ));
         }
 
-        for partial in &coverage_report.partially_covered {
-            if partial.coverage_score < 0.5 {
-                issues.push(StructuralIssue {
-                    severity: Severity::High,
-                    category: StructuralCategory::PartialCoverage,
-                    description: format!(
-                        "Module '{}' has only {:.0}% coverage",
-                        partial.name,
-                        partial.coverage_score * 100.0
-                    ),
-                    affected_module: Some(partial.name.clone()),
-                });
-            }
-        }
-
-        // Check for unbalanced coverage
-        let avg_refs = documented.values().map(|v| v.len()).sum::<usize>() as f32
-            / documented.len().max(1) as f32;
-
-        for (module, refs) in &documented {
-            if refs.len() as f32 > avg_refs * 3.0 && !coverage_report.missing_modules.is_empty() {
-                issues.push(StructuralIssue {
-                    severity: Severity::Medium,
-                    category: StructuralCategory::UnbalancedCoverage,
-                    description: format!(
-                        "Module '{}' is referenced {} times while other modules are missing",
-                        module,
-                        refs.len()
-                    ),
-                    affected_module: Some(module.clone()),
-                });
-            }
-        }
+        // Partial coverage and unbalanced coverage checks removed:
+        // - Hardcoded thresholds (ref_count < 2, 3x average) were arbitrary
+        // - Different modules have legitimately different coverage needs
+        // - LLM can interpret coverage_report data contextually
 
         let passed = coverage_report.coverage >= self.config.min_module_coverage;
 
@@ -372,22 +339,16 @@ fn extract_module_refs(content: &str) -> HashSet<String> {
     modules
 }
 
-/// Common words that aren't module names (O(1) lookup via HashSet)
-static COMMON_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        // 2-char common words
-        "an", "as", "at", "be", "by", "do", "go", "he", "if", "in", "is", "it", "me", "my", "no",
-        "of", "ok", "on", "or", "so", "to", "up", "us", "we", // 3+ char common words
-        "the", "and", "for", "not", "with", "this", "that", "from", "use", "get", "set", "new",
-        "add", "run",
-    ]
-    .into_iter()
-    .collect()
-});
-
-/// Filter out common words that aren't module names.
+/// Check if word is likely not a module name
+/// Only filter obvious non-module patterns, not legitimate short names
 fn is_common_word(word: &str) -> bool {
-    COMMON_WORDS.contains(word)
+    // Only filter 2-char words that are clearly not module names
+    // Kept minimal: "go" could be Go language module, "io" is common module name
+    matches!(
+        word,
+        "an" | "as" | "at" | "be" | "by" | "do" | "he" | "if" | "in" | "is" | "it" | "me" | "my"
+            | "no" | "of" | "ok" | "on" | "or" | "so" | "to" | "up" | "us" | "we"
+    )
 }
 
 #[cfg(test)]
@@ -413,8 +374,13 @@ mod tests {
 
     #[test]
     fn test_is_common_word() {
-        assert!(is_common_word("the"));
-        assert!(is_common_word("for"));
+        // Only 2-char common words are filtered now
+        // 3+ char words kept because they could be valid module names
+        assert!(is_common_word("in"));
+        assert!(is_common_word("to"));
+        assert!(!is_common_word("the")); // Not filtered anymore
+        assert!(!is_common_word("for")); // Not filtered anymore
+        assert!(!is_common_word("go")); // Valid module name (Go language)
         assert!(!is_common_word("pipeline"));
         assert!(!is_common_word("ai"));
     }

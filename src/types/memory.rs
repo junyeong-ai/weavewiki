@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use super::validation::ValidationIssue;
 
+/// Maximum recommended lines for CLAUDE.md.
+///
+/// Rationale: Claude's context window is limited. A CLAUDE.md over 500 lines
+/// consumes significant context budget, leaving less room for actual code
+/// analysis. This threshold warns (not blocks) when content is too verbose.
+/// Users can override via configuration if their use case requires more.
 const MAX_RECOMMENDED_MEMORY_LINES: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -17,6 +23,11 @@ pub struct ProjectMemory {
     pub standards: Vec<String>,
     #[serde(default)]
     pub imports: Vec<String>,
+    /// Domain-specific knowledge: policies, terminology, workflows
+    pub domain_knowledge: Option<String>,
+    /// Critical constraints and gotchas (Tier 3 insights)
+    #[serde(default)]
+    pub gotchas: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,12 +45,12 @@ impl ProjectMemory {
             commands: Vec::new(),
             standards: Vec::new(),
             imports: Vec::new(),
+            domain_knowledge: None,
+            gotchas: Vec::new(),
         }
     }
 
     pub fn to_markdown(&self) -> String {
-        // If overview already starts with a header, use it directly
-        // Otherwise, wrap it with "# Project Overview"
         let overview_section = if self.overview.trim_start().starts_with('#') {
             self.overview.clone()
         } else {
@@ -50,6 +61,20 @@ impl ProjectMemory {
 
         if let Some(arch) = &self.architecture {
             sections.push(format!("## Architecture\n\n{arch}"));
+        }
+
+        if let Some(domain) = &self.domain_knowledge {
+            sections.push(format!("## Domain Knowledge\n\n{domain}"));
+        }
+
+        if !self.gotchas.is_empty() {
+            let gotchas = self
+                .gotchas
+                .iter()
+                .map(|g| format!("- {g}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("## Critical Constraints\n\n{gotchas}"));
         }
 
         if !self.commands.is_empty() {

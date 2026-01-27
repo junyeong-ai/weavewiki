@@ -49,7 +49,7 @@ pub struct HiddenDependency {
     pub impact: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HiddenDependencyType {
     RuntimeOnly,
@@ -58,6 +58,9 @@ pub enum HiddenDependencyType {
     EventBased,
     ConfigBased,
     EnvironmentBased,
+    /// Unknown type - LLM should classify based on context
+    #[default]
+    Unknown,
 }
 
 /// Constraint that spans multiple modules
@@ -71,7 +74,7 @@ pub struct CrossModuleConstraint {
     pub evidence: Vec<EvidenceLocation>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossConstraintType {
     Ordering,
@@ -80,6 +83,9 @@ pub enum CrossConstraintType {
     Concurrency,
     ResourceSharing,
     DataFlow,
+    /// Unknown type - LLM should classify based on context
+    #[default]
+    Unknown,
 }
 
 /// Architecture pattern violation
@@ -292,22 +298,10 @@ impl CrossSynthesizer {
             .collect()
     }
 
-    fn infer_dependency_type(constraint: &DiscoveredConstraint) -> HiddenDependencyType {
-        let desc_lower = constraint.description.to_lowercase();
-
-        if desc_lower.contains("init") || desc_lower.contains("startup") {
-            HiddenDependencyType::InitializationOrder
-        } else if desc_lower.contains("state") || desc_lower.contains("shared") {
-            HiddenDependencyType::SharedState
-        } else if desc_lower.contains("event") || desc_lower.contains("emit") {
-            HiddenDependencyType::EventBased
-        } else if desc_lower.contains("config") || desc_lower.contains("setting") {
-            HiddenDependencyType::ConfigBased
-        } else if desc_lower.contains("env") || desc_lower.contains("environment") {
-            HiddenDependencyType::EnvironmentBased
-        } else {
-            HiddenDependencyType::RuntimeOnly
-        }
+    /// Returns Unknown - accurate type requires semantic analysis by LLM.
+    /// Programmatic keyword matching would be fragile across languages/frameworks.
+    fn infer_dependency_type(_constraint: &DiscoveredConstraint) -> HiddenDependencyType {
+        HiddenDependencyType::Unknown
     }
 
     fn find_cross_module_constraints(
@@ -329,22 +323,11 @@ impl CrossSynthesizer {
             .collect()
     }
 
-    fn infer_constraint_type(constraint: &DiscoveredConstraint) -> CrossConstraintType {
-        let desc_lower = constraint.description.to_lowercase();
-
-        if desc_lower.contains("order") || desc_lower.contains("sequence") {
-            CrossConstraintType::Ordering
-        } else if desc_lower.contains("transaction") || desc_lower.contains("atomic") {
-            CrossConstraintType::Transaction
-        } else if desc_lower.contains("concurrent") || desc_lower.contains("thread") {
-            CrossConstraintType::Concurrency
-        } else if desc_lower.contains("resource") || desc_lower.contains("pool") {
-            CrossConstraintType::ResourceSharing
-        } else if desc_lower.contains("flow") || desc_lower.contains("data") {
-            CrossConstraintType::DataFlow
-        } else {
-            CrossConstraintType::Consistency
-        }
+    /// Returns Unknown - accurate type requires semantic analysis by LLM.
+    /// Constraint types depend on domain context (e.g., "must call X before Y"
+    /// could be Ordering, Transaction, or Concurrency depending on context).
+    fn infer_constraint_type(_constraint: &DiscoveredConstraint) -> CrossConstraintType {
+        CrossConstraintType::Unknown
     }
 
     fn detect_architecture_violations(
@@ -613,7 +596,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn test_infer_dependency_type() {
+    fn test_infer_dependency_type_returns_unknown() {
         use super::super::deep_analyzer::ConstraintKind;
 
         let constraint = DiscoveredConstraint {
@@ -625,8 +608,9 @@ mod tests {
             evidence: Vec::new(),
         };
 
+        // Returns Unknown - accurate classification requires LLM semantic analysis
         let dep_type = CrossSynthesizer::infer_dependency_type(&constraint);
-        assert_eq!(dep_type, HiddenDependencyType::InitializationOrder);
+        assert_eq!(dep_type, HiddenDependencyType::Unknown);
     }
 
     #[test]

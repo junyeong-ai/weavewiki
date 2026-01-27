@@ -128,7 +128,11 @@ fn yaml_value<T: serde::Serialize>(v: &T) -> serde_yaml::Value {
     serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null(None))
 }
 
-/// Minimum required @file:line references for a skill to pass quality
+/// Minimum required @file:line references for a skill to pass quality.
+///
+/// Rationale: A skill with 0-1 references likely contains generic knowledge
+/// without project-specific grounding. 2+ references indicate the skill
+/// is tied to actual code locations, reducing hallucination risk.
 pub const MIN_FILE_REFS: usize = 2;
 
 impl Skill {
@@ -158,20 +162,27 @@ impl Skill {
         }
     }
 
-    /// Calculate quality metrics from body content
-    /// Note: Tier classification is set by LLM during generation, not by static patterns
+    /// Calculate quality metrics from body content.
+    ///
+    /// Note: Tier classification is set by LLM during generation, not by static patterns.
+    ///
+    /// Score thresholds based on file reference count:
+    /// - 0 refs → 0.3: No grounding, but may have implicit value
+    /// - 1-2 refs → 0.5: Some grounding, uncertain depth
+    /// - 3+ refs → 0.7: Multiple evidence points, likely well-grounded
+    ///
+    /// These scores are heuristics for early filtering. Final quality judgment
+    /// is made by LLM Judge which considers semantic value and context.
     pub fn calculate_quality(body: &str) -> QualityMetrics {
         let file_refs = patterns::count_file_line_refs(body);
 
-        // Score based on deterministic metrics only (file references)
-        // Base score 0.3, logarithmic scaling for refs (no arbitrary cap)
-        // log2(refs + 1) * 0.15 gives diminishing returns without hard cutoff
-        // 1 ref → 0.15, 3 refs → 0.30, 7 refs → 0.45, 15 refs → 0.60
-        let mut score = 0.3f32;
-        if file_refs > 0 {
-            score += ((file_refs as f32 + 1.0).log2() * 0.15).min(0.7);
-        }
-        score = score.clamp(0.0, 1.0);
+        let score = if file_refs == 0 {
+            0.3
+        } else if file_refs < 3 {
+            0.5
+        } else {
+            0.7
+        };
 
         // Tier is set by LLM, default to Tier1 until classification
         let tier = ContentTier::default();

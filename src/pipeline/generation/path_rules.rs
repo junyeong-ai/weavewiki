@@ -14,24 +14,16 @@ use crate::pipeline::phases::convention_inference::InferredConventions;
 use crate::pipeline::phases::monorepo_analyzer::MonorepoAnalysis;
 use crate::pipeline::phases::output_router::{OutputPlan, PlannedRuleGroup, RuleContentSource};
 
-/// Minimum value score threshold for generating rules.
-///
-/// NOTE: This is a default threshold, not an authoritative gate.
-/// Rules with lower scores may still have value in specific contexts.
-/// LLM should determine if a rule is worth including based on project needs,
-/// not solely based on this programmatic score.
-///
-/// The score is calculated from:
-/// - Pattern counts (logarithmic scaling)
-/// - Constraint severity
-/// - File reference count
-///
-/// These metrics may not capture domain-specific value (e.g., a single
-/// critical security constraint may be more valuable than many patterns).
-///
-/// This constant is kept as a FALLBACK default. Use `GenerationConfig::min_rule_value_score`
-/// for configurable threshold. Set to 0.0 to disable filtering.
 const DEFAULT_MIN_RULE_VALUE_SCORE: f32 = 0.3;
+
+/// Context for enriched generation containing optional analysis results
+#[derive(Default)]
+pub struct EnrichmentContext<'a> {
+    pub enriched_plan: Option<&'a EnrichedPlan>,
+    pub synthesis: Option<&'a SynthesizedAnalysis>,
+    pub domain_analysis: Option<&'a crate::types::domain::DomainAnalysisResult>,
+    pub cross_insights: Option<&'a crate::pipeline::analysis::SynthesizedInsights>,
+}
 
 pub struct PathRulesGenerator;
 
@@ -108,34 +100,7 @@ impl PathRulesGenerator {
         Ok(rules)
     }
 
-    /// Generate rules with full value score enforcement (legacy API).
-    #[deprecated(note = "Use generate_with_threshold for configurable filtering")]
-    pub fn generate_with_value_filter(
-        plan: &OutputPlan,
-        monorepo: Option<&MonorepoAnalysis>,
-        conventions: &InferredConventions,
-        constraints: &ExtractedConstraints,
-        synthesis: Option<&SynthesizedAnalysis>,
-        file_registry: Option<&VerifiedFileRegistry>,
-    ) -> Result<Vec<Rule>> {
-        Self::generate_with_threshold(
-            plan,
-            monorepo,
-            conventions,
-            constraints,
-            synthesis,
-            file_registry,
-            DEFAULT_MIN_RULE_VALUE_SCORE,
-        )
-    }
-
     /// Assess the value score of a rule group
-    ///
-    /// Value is determined by:
-    /// - Presence of unique patterns specific to the paths
-    /// - Presence of hidden dependencies
-    /// - Presence of gotchas/anti-patterns
-    /// - File references available for evidence
     fn assess_rule_value(
         group: &PlannedRuleGroup,
         conventions: &InferredConventions,
@@ -143,102 +108,75 @@ impl PathRulesGenerator {
         synthesis: Option<&SynthesizedAnalysis>,
         file_registry: Option<&VerifiedFileRegistry>,
     ) -> f32 {
-        let mut score = 0.0f32;
+        let mut signals = 0usize;
 
-        // Check for conventions patterns (base value)
         if !conventions.patterns.is_empty() {
-            score += 0.1;
+            signals += 1;
         }
 
-        // Check for anti-patterns relevant to this group's paths
-        let relevant_anti_patterns = constraints
-            .anti_patterns
-            .iter()
-            .filter(|ap| {
-                group.paths.iter().any(|path| {
-                    ap.evidence
-                        .iter()
-                        .any(|e| e.file.contains(path.trim_end_matches("**")))
-                })
+        let has_anti_patterns = constraints.anti_patterns.iter().any(|ap| {
+            group.paths.iter().any(|path| {
+                ap.evidence
+                    .iter()
+                    .any(|e| e.file.contains(path.trim_end_matches("**")))
             })
-            .count();
-
-        if relevant_anti_patterns > 0 {
-            // Logarithmic scaling - more patterns continue to add value with diminishing returns
-            score += 0.15 * (relevant_anti_patterns as f32 + 1.0).log2().min(3.0);
+        });
+        if has_anti_patterns {
+            signals += 1;
         }
 
-        // Check for hidden dependencies involving these paths
-        let relevant_deps = constraints
-            .hidden_dependencies
-            .iter()
-            .filter(|dep| {
-                group.paths.iter().any(|path| {
-                    let base = path.trim_end_matches("**").trim_end_matches('/');
-                    dep.source.contains(base) || dep.target.contains(base)
-                })
+        let has_deps = constraints.hidden_dependencies.iter().any(|dep| {
+            group.paths.iter().any(|path| {
+                let base = path.trim_end_matches("**").trim_end_matches('/');
+                dep.source.contains(base) || dep.target.contains(base)
             })
-            .count();
-
-        if relevant_deps > 0 {
-            // Logarithmic scaling for dependencies
-            score += 0.2 * (relevant_deps as f32 + 1.0).log2().min(3.0);
+        });
+        if has_deps {
+            signals += 1;
         }
 
-        // Check for gotchas
-        let relevant_gotchas = constraints
-            .gotchas
-            .iter()
-            .filter(|g| {
-                group.paths.iter().any(|path| {
-                    let base = path.trim_end_matches("**").trim_end_matches('/');
-                    g.related_files.iter().any(|f| f.contains(base)) || g.description.contains(base)
-                })
+        let has_gotchas = constraints.gotchas.iter().any(|g| {
+            group.paths.iter().any(|path| {
+                let base = path.trim_end_matches("**").trim_end_matches('/');
+                g.related_files.iter().any(|f| f.contains(base)) || g.description.contains(base)
             })
-            .count();
-
-        if relevant_gotchas > 0 {
-            // Logarithmic scaling for gotchas
-            score += 0.15 * (relevant_gotchas as f32 + 1.0).log2().min(3.0);
+        });
+        if has_gotchas {
+            signals += 1;
         }
 
-        // Check synthesis for module-specific insights
         if let Some(synth) = synthesis {
-            let relevant_modules = synth
-                .modules
-                .iter()
-                .filter(|m| {
-                    group.paths.iter().any(|path| {
-                        let base = path.trim_end_matches("**").trim_end_matches('/');
-                        m.path.contains(base)
-                    })
-                })
-                .filter(|m| !m.responsibility.is_empty() || !m.patterns.is_empty())
-                .count();
-
-            if relevant_modules > 0 {
-                score += 0.2;
+            let has_modules = synth.modules.iter().any(|m| {
+                group.paths.iter().any(|path| {
+                    let base = path.trim_end_matches("**").trim_end_matches('/');
+                    m.path.contains(base)
+                }) && (!m.responsibility.is_empty() || !m.patterns.is_empty())
+            });
+            if has_modules {
+                signals += 1;
             }
         }
 
-        // Check for file references (evidence potential)
         if let Some(registry) = file_registry {
             let has_files = group.paths.iter().any(|path| {
                 let base = path.trim_end_matches("**").trim_end_matches('/');
                 !registry.files_in_directory(base).is_empty()
             });
-
             if has_files {
-                score += 0.1;
+                signals += 1;
             }
         }
 
-        // Content sources boost - logarithmic scaling
         if !group.content_sources.is_empty() {
-            score += 0.05 * (group.content_sources.len() as f32 + 1.0).log2().min(3.0);
+            signals += 1;
         }
 
-        score.min(1.0)
+        match signals {
+            0 => 0.2,
+            1..=2 => 0.4,
+            3..=4 => 0.6,
+            _ => 0.8,
+        }
     }
 
     fn generate_rule_for_group(
@@ -387,22 +325,12 @@ impl PathRulesGenerator {
             }
         }
 
-        // Add patterns with actionable language to pass tier filter
-        // Skip patterns for path-based rules (monorepo) to avoid duplication
-        // Patterns are workspace-level and already in CLAUDE.md
+        // Add patterns for non-path-based rules
+        // Patterns are workspace-level and already in CLAUDE.md for monorepo paths
+        // Pattern descriptions are used as-is - LLM determines actionability during generation
         if !is_path_based_rule {
             for pattern in &conventions.patterns {
-                // Ensure pattern description has actionable language
-                let desc = if pattern.description.to_lowercase().contains("should")
-                    || pattern.description.to_lowercase().contains("must")
-                    || pattern.description.to_lowercase().contains("always")
-                    || pattern.description.to_lowercase().contains("never")
-                {
-                    pattern.description.clone()
-                } else {
-                    format!("Should follow: {}", pattern.description)
-                };
-                content.push(format!("- **{}**: {}", pattern.name, desc));
+                content.push(format!("- **{}**: {}", pattern.name, pattern.description));
             }
         }
 
@@ -477,20 +405,17 @@ impl ClaudeMdGenerator {
             conventions,
             constraints,
             project_name,
-            None,
-            None,
+            &EnrichmentContext::default(),
         )
     }
 
-    /// Generate with enriched plan for complete data flow (no information loss)
     pub fn generate_with_enrichment(
         plan: &OutputPlan,
         detection: &crate::pipeline::phases::project_detection::ProjectDetection,
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
         project_name: &str,
-        enriched_plan: Option<&EnrichedPlan>,
-        synthesis: Option<&SynthesizedAnalysis>,
+        ctx: &EnrichmentContext<'_>,
     ) -> Result<crate::types::ProjectMemory> {
         use crate::types::ProjectMemory;
 
@@ -500,21 +425,23 @@ impl ClaudeMdGenerator {
             Self::generate_architecture_with_enrichment(
                 conventions,
                 detection,
-                enriched_plan,
-                synthesis,
+                ctx.enriched_plan,
+                ctx.synthesis,
             )
         } else {
             None
         };
 
-        // Commands are Tier 1 content (generic knowledge) - not included
         let commands = Vec::new();
 
         let standards = if plan.claude_md_plan.include_conventions {
-            Self::generate_standards_with_evidence(conventions, constraints, synthesis)
+            Self::generate_standards_with_evidence(conventions, constraints, ctx.synthesis)
         } else {
             Vec::new()
         };
+
+        let domain_knowledge = Self::generate_domain_knowledge(ctx.domain_analysis);
+        let gotchas = Self::generate_gotchas(constraints, ctx.cross_insights);
 
         Ok(ProjectMemory {
             overview,
@@ -522,6 +449,8 @@ impl ClaudeMdGenerator {
             commands,
             standards,
             imports: Vec::new(),
+            domain_knowledge,
+            gotchas,
         })
     }
 
@@ -534,7 +463,6 @@ impl ClaudeMdGenerator {
             .languages
             .iter()
             .map(|l| l.language.as_str())
-            .take(3)
             .collect();
 
         let mut overview = format!("{} is a {} project", project_name, project_type);
@@ -603,26 +531,20 @@ impl ClaudeMdGenerator {
         }
 
         if arch.is_empty() {
-            let key_dirs: Vec<_> = conventions
-                .file_organization
-                .key_directories
-                .iter()
-                .take(5)
-                .collect();
-
-            if !key_dirs.is_empty() {
-                for dir in key_dirs {
+            // Include all key directories - LLM token budget is natural limit
+            if !conventions.file_organization.key_directories.is_empty() {
+                for dir in &conventions.file_organization.key_directories {
                     arch.push_str(&format!("- `{}` - {}\n", dir.path, dir.role));
                 }
             }
         }
 
-        // Key Abstractions from EnrichedPlan (properly consumed from enrichment layer)
+        // Key Abstractions from EnrichedPlan - include all (high-value content)
         if let Some(plan) = enriched_plan
             && !plan.key_abstractions.is_empty()
         {
             arch.push_str("\n\n## Key Abstractions\n\n");
-            for abst in plan.key_abstractions.iter().take(10) {
+            for abst in &plan.key_abstractions {
                 arch.push_str(&format!(
                     "### {} ({}) {}\n",
                     abst.name, abst.kind, abst.file_ref
@@ -635,7 +557,7 @@ impl ClaudeMdGenerator {
             }
         }
 
-        // File insights with gotchas from EnrichedPlan
+        // File insights with gotchas from EnrichedPlan - include all with gotchas
         if let Some(plan) = enriched_plan
             && !plan.file_insights.is_empty()
         {
@@ -643,7 +565,6 @@ impl ClaudeMdGenerator {
                 .file_insights
                 .iter()
                 .filter(|i| !i.gotchas.is_empty())
-                .take(5)
                 .collect();
 
             if !insights_with_gotchas.is_empty() {
@@ -704,16 +625,16 @@ impl ClaudeMdGenerator {
             }
         }
 
-        // Hidden dependencies (critical for correctness)
-        for dep in constraints.hidden_dependencies.iter().take(5) {
+        // Hidden dependencies (critical for correctness) - include all, LLM token budget is natural limit
+        for dep in &constraints.hidden_dependencies {
             standards.push(format!(
                 "⚠️ {} → {}: {}",
                 dep.source, dep.target, dep.description
             ));
         }
 
-        // Gotchas with solutions
-        for gotcha in constraints.gotchas.iter().take(5) {
+        // Gotchas with solutions - include all (high-value Tier 3 content)
+        for gotcha in &constraints.gotchas {
             if let Some(first_file) = gotcha.related_files.first() {
                 standards.push(format!(
                     "⚠️ {}: {} (affects {})",
@@ -724,9 +645,9 @@ impl ClaudeMdGenerator {
             }
         }
 
-        // Add patterns from synthesis if valuable
+        // Add patterns from synthesis if valuable - include all with evidence
         if let Some(synth) = synthesis {
-            for pattern in synth.deep.patterns.iter().take(3) {
+            for pattern in &synth.deep.patterns {
                 if !pattern.locations.is_empty() {
                     let loc = &pattern.locations[0];
                     standards.push(format!(
@@ -736,15 +657,133 @@ impl ClaudeMdGenerator {
                 }
             }
 
-            // File insights with gotchas (previously lost in pipeline)
+            // File insights with gotchas (from deep analysis) - include all gotchas
             for insight in synth.deep.insights.iter().filter(|i| !i.gotchas.is_empty()) {
-                for gotcha in insight.gotchas.iter().take(2) {
+                for gotcha in &insight.gotchas {
                     standards.push(format!("⚠️ {} ({})", gotcha, insight.file));
                 }
             }
         }
 
         standards
+    }
+
+    fn generate_domain_knowledge(
+        domain: Option<&crate::types::domain::DomainAnalysisResult>,
+    ) -> Option<String> {
+        let domain = domain?;
+        if domain.policies.is_empty()
+            && domain.glossary.terms.is_empty()
+            && domain.workflows.is_empty()
+        {
+            return None;
+        }
+
+        let mut content = String::new();
+
+        // Core Policies - include all (high-value domain knowledge)
+        if !domain.policies.is_empty() {
+            content.push_str("### Core Policies\n\n");
+            for policy in &domain.policies {
+                content.push_str(&format!(
+                    "- **{}** ({}): {}\n",
+                    policy.name,
+                    format!("{:?}", policy.policy_type).to_lowercase(),
+                    policy.description
+                ));
+                if !policy.evidence.is_empty() {
+                    let ev = &policy.evidence[0];
+                    content.push_str(&format!("  - Evidence: @{}:{}\n", ev.file, ev.start_line));
+                }
+            }
+            content.push('\n');
+        }
+
+        // Core Domain Logic - include all (critical for understanding business rules)
+        if !domain.core_logic.is_empty() {
+            content.push_str("### Core Domain Logic\n\n");
+            for logic in &domain.core_logic {
+                content.push_str(&format!("- **{}**: {}\n", logic.name, logic.description));
+                if !logic.business_impact.is_empty() {
+                    content.push_str(&format!("  - Impact: {}\n", logic.business_impact));
+                }
+            }
+            content.push('\n');
+        }
+
+        // Glossary - include all (domain terminology is essential context)
+        if !domain.glossary.terms.is_empty() {
+            content.push_str("### Glossary\n\n");
+            for term in &domain.glossary.terms {
+                content.push_str(&format!("- **{}**: {}\n", term.term, term.definition));
+            }
+            content.push('\n');
+        }
+
+        // Workflows - include all (business process understanding)
+        if !domain.workflows.is_empty() {
+            content.push_str("### Business Workflows\n\n");
+            for workflow in &domain.workflows {
+                content.push_str(&format!("**{}**\n", workflow.name));
+                content.push_str(&format!("{}\n", workflow.description));
+                for step in &workflow.steps {
+                    content.push_str(&format!("{}. {}: {}\n", step.order, step.name, step.action));
+                }
+                content.push('\n');
+            }
+        }
+
+        if content.is_empty() {
+            None
+        } else {
+            Some(content.trim().to_string())
+        }
+    }
+
+    fn generate_gotchas(
+        constraints: &ExtractedConstraints,
+        cross_insights: Option<&crate::pipeline::analysis::SynthesizedInsights>,
+    ) -> Vec<String> {
+        let mut gotchas = Vec::new();
+
+        // Tier 3 insights from cross-synthesis (highest value) - include all
+        if let Some(insights) = cross_insights {
+            for insight in &insights.tier3_insights {
+                gotchas.push(format!(
+                    "**{}**: {} → {}",
+                    insight.title, insight.description, insight.prevention_guidance
+                ));
+            }
+
+            // Hidden dependencies - include all (critical for correctness)
+            for dep in &insights.hidden_dependencies {
+                gotchas.push(format!(
+                    "**Hidden Dep**: {} → {} ({:?}): {}",
+                    dep.from_module, dep.to_module, dep.dependency_type, dep.description
+                ));
+            }
+
+            // Architecture violations - include all
+            for violation in &insights.architecture_violations {
+                gotchas.push(format!(
+                    "**Violation**: {} ({} → {}): {}",
+                    violation.description,
+                    violation.from_layer,
+                    violation.to_layer,
+                    violation.suggested_fix
+                ));
+            }
+        }
+
+        // Gotchas from constraint extraction - include all (Tier 3 content)
+        for gotcha in &constraints.gotchas {
+            let entry = format!("**{}**: {} → {}", gotcha.title, gotcha.description, gotcha.solution);
+            if !gotchas.contains(&entry) {
+                gotchas.push(entry);
+            }
+        }
+
+        gotchas
     }
 }
 

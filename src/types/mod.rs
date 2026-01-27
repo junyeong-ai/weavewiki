@@ -4,6 +4,7 @@ pub mod domain;
 pub mod edge;
 pub mod error;
 pub mod generation;
+pub mod hint;
 pub mod hook;
 pub mod insight;
 pub mod memory;
@@ -29,9 +30,12 @@ pub use error::{
 };
 pub use generation::{
     ArtifactRef, ArtifactType, ConfidenceMetrics, GenerationQualityThresholds, GenerationSynthesis,
-    InferredConventions, Language, LanguageInfo, ModuleAnalysis, ProjectDetection, ProjectType,
-    RelationshipType,
+    Language, LanguageInfo, ModuleAnalysis, ProjectType, RelationshipType,
 };
+pub use hint::{AnalysisHint, HintCategory, HintCollection, HintConfidence};
+// Re-export canonical types from pipeline modules
+pub use crate::pipeline::phases::convention_inference::InferredConventions;
+pub use crate::pipeline::phases::project_detection::ProjectDetection;
 pub use hook::{Hook, HookCommand, HooksConfig, ToolHooks};
 pub use insight::{
     ArtifactClassification, ContentTier, DomainContext, ModuleContext, TierClassification,

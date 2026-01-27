@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::config::AnalysisConfig;
 use crate::types::Result;
 
-use super::analysis::DeepAnalysisResult;
+use super::analysis::{DeepAnalysisResult, SynthesizedInsights};
 use super::phases::{
     constraint_extraction::ExtractedConstraints, convention_inference::InferredConventions,
     project_detection::ProjectDetection,
 };
+use crate::types::domain::DomainAnalysisResult;
 
 /// Extracted constraint (Tier3 - essential)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +34,12 @@ pub struct AnalysisResults {
     pub constraints: Option<ExtractedConstraints>,
     pub deep_analysis: Option<DeepAnalysisResult>,
     pub synthesis: Option<AnalysisSynthesis>,
+    /// Full coverage analysis from distributed analyzer
+    pub aggregated: Option<super::analysis::AggregatedAnalysis>,
+    /// Domain-specific knowledge (policies, logic, terminology)
+    pub domain_analysis: Option<DomainAnalysisResult>,
+    /// Cross-reference synthesis insights
+    pub cross_insights: Option<SynthesizedInsights>,
 }
 
 /// Synthesis summary for context
@@ -134,6 +141,30 @@ impl ClaudegenContext {
         });
     }
 
+    pub fn set_aggregated(&mut self, aggregated: super::analysis::AggregatedAnalysis) {
+        self.analysis_results.aggregated = Some(aggregated);
+    }
+
+    pub fn aggregated(&self) -> Option<&super::analysis::AggregatedAnalysis> {
+        self.analysis_results.aggregated.as_ref()
+    }
+
+    pub fn set_domain_analysis(&mut self, domain: DomainAnalysisResult) {
+        self.analysis_results.domain_analysis = Some(domain);
+    }
+
+    pub fn domain_analysis(&self) -> Option<&DomainAnalysisResult> {
+        self.analysis_results.domain_analysis.as_ref()
+    }
+
+    pub fn set_cross_insights(&mut self, insights: SynthesizedInsights) {
+        self.analysis_results.cross_insights = Some(insights);
+    }
+
+    pub fn cross_insights(&self) -> Option<&SynthesizedInsights> {
+        self.analysis_results.cross_insights.as_ref()
+    }
+
     pub fn merge_from(&mut self, other: &ClaudegenContext) {
         self.tier3_constraints
             .extend(other.tier3_constraints.clone());
@@ -159,6 +190,20 @@ impl ClaudegenContext {
         }
         if other.analysis_results.synthesis.is_some() && self.analysis_results.synthesis.is_none() {
             self.analysis_results.synthesis = other.analysis_results.synthesis.clone();
+        }
+        if other.analysis_results.aggregated.is_some() && self.analysis_results.aggregated.is_none()
+        {
+            self.analysis_results.aggregated = other.analysis_results.aggregated.clone();
+        }
+        if other.analysis_results.domain_analysis.is_some()
+            && self.analysis_results.domain_analysis.is_none()
+        {
+            self.analysis_results.domain_analysis = other.analysis_results.domain_analysis.clone();
+        }
+        if other.analysis_results.cross_insights.is_some()
+            && self.analysis_results.cross_insights.is_none()
+        {
+            self.analysis_results.cross_insights = other.analysis_results.cross_insights.clone();
         }
     }
 

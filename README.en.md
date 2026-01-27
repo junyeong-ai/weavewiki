@@ -118,8 +118,7 @@ Skill prompt body...
 
 `.claudegen/config.toml`:
 ```toml
-version = "2.0"
-preset = "standard"  # quick | standard | thorough | exhaustive
+version = "4.0"
 
 [project]
 name = "my-project"
@@ -128,10 +127,18 @@ type = "auto"
 [analysis]
 include = ["**/*"]
 exclude = ["node_modules/**", "dist/**", ".git/**", "target/**"]
+depth = "complete"  # always thorough analysis
+
+[convergence]
+quality_floor = 0.75
+target_quality = 0.90
+max_iterations = 100
 
 [llm]
 provider = "claude-agent"
-model = "claude-sonnet-4-5-20250929"
+default_model = "claude-sonnet-4-5-20250929"
+fast_model = "claude-haiku-4-5-20251001"
+performance_model = "claude-opus-4-5-20251101"
 ```
 
 ---

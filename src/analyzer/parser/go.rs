@@ -281,7 +281,14 @@ fn extract_methods(root: tree_sitter::Node, content: &str, path: &str, result: &
     }
 }
 
-/// Go visibility: uppercase first letter = public, lowercase = private
+/// Go visibility based on official Go language spec.
+///
+/// Per Go spec: "An identifier is exported if both:
+/// 1. the first character is an upper case letter (Unicode class Lu), and
+/// 2. the identifier is declared in the package block or it is a field/method name."
+///
+/// This is the official Go visibility rule, not a heuristic. Go has no `public`
+/// keyword; capitalization IS the visibility mechanism.
 #[inline]
 fn go_visibility(name: &str) -> Visibility {
     if name.chars().next().is_some_and(|c| c.is_uppercase()) {

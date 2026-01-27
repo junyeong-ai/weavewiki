@@ -235,23 +235,18 @@ impl Agent {
         }
     }
 
-    /// Calculate quality metrics from prompt content
-    /// Note: Tier classification is set by LLM during generation, not calculated here
     pub fn calculate_quality(prompt: &str) -> QualityMetrics {
         let file_refs = patterns::count_file_line_refs(prompt);
 
-        // Score based on deterministic metrics only
-        // Logarithmic scaling for refs (no arbitrary cap)
-        // log2(refs + 1) * 0.15 gives diminishing returns without hard cutoff
-        let mut score = 0.3f32;
-        if file_refs > 0 {
-            score += ((file_refs as f32 + 1.0).log2() * 0.15).min(0.7);
-        }
-        score = score.clamp(0.0, 1.0);
+        let score = if file_refs == 0 {
+            0.3
+        } else if file_refs < 3 {
+            0.5
+        } else {
+            0.7
+        };
 
-        // Tier is set by LLM, default to Tier1 until classification
         let tier = ContentTier::default();
-
         let meets_requirements = file_refs >= MIN_AGENT_FILE_REFS;
 
         QualityMetrics {

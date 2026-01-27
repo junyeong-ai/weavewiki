@@ -134,19 +134,9 @@ impl SynthesizedAnalysis {
                 ))
             }
             FindingCategory::Dependency => {
-                // Dependencies: code parsing is authoritative
-                if conflict.source_a.contains("code") || conflict.source_a.contains("parse") {
-                    ConflictResolution::PreferSourceA("Code parsing is authoritative".into())
-                } else if conflict.source_b.contains("code") || conflict.source_b.contains("parse")
-                {
-                    ConflictResolution::PreferSourceB("Code parsing is authoritative".into())
-                } else {
-                    // Merge as both might be valid
-                    ConflictResolution::Merge(format!(
-                        "{} + {}",
-                        conflict.claim_a, conflict.claim_b
-                    ))
-                }
+                // Dependencies: merge both claims as both might be valid
+                // Source name matching was removed as too fragile
+                ConflictResolution::Merge(format!("{} + {}", conflict.claim_a, conflict.claim_b))
             }
             FindingCategory::ModuleStructure => {
                 // Module structure: deep analysis reads actual files
@@ -168,23 +158,7 @@ impl SynthesizedAnalysis {
 
     /// Check if two claims are compatible (can be merged)
     fn claims_are_compatible(claim_a: &str, claim_b: &str) -> bool {
-        let a_lower = claim_a.to_lowercase();
-        let b_lower = claim_b.to_lowercase();
-
-        // Same base concept with different details
-        let key_terms = ["module", "pattern", "uses", "implements", "depends"];
-        for term in key_terms {
-            if a_lower.contains(term) && b_lower.contains(term) {
-                return true;
-            }
-        }
-
-        // One is a subset description of the other
-        if a_lower.contains(&b_lower) || b_lower.contains(&a_lower) {
-            return true;
-        }
-
-        false
+        claim_a.eq_ignore_ascii_case(claim_b)
     }
 
     /// Get all unresolved conflicts
@@ -274,7 +248,8 @@ pub struct MergedModule {
     pub responsibility: String,
     pub patterns: Vec<String>,
     pub constraints: Vec<String>,
-    pub coverage_score: f32,
+    /// Number of artifact references - let LLM interpret significance
+    pub reference_count: usize,
     pub public_items: Vec<String>,
     pub internal_deps: Vec<String>,
 }
@@ -609,7 +584,7 @@ impl AnalysisSynthesizer {
                     responsibility: core.responsibility.clone(),
                     patterns: Vec::new(),
                     constraints: Vec::new(),
-                    coverage_score: 0.0,
+                    reference_count: 0,
                     public_items: core.public_items.clone(),
                     internal_deps: core.internal_deps.clone(),
                 },
@@ -626,7 +601,7 @@ impl AnalysisSynthesizer {
 
             for mc in all_coverage {
                 if let Some(merged) = modules.get_mut(&mc.name) {
-                    merged.coverage_score = mc.coverage_score;
+                    merged.reference_count = mc.reference_count;
                 } else {
                     modules.insert(
                         mc.name.clone(),
@@ -636,7 +611,7 @@ impl AnalysisSynthesizer {
                             responsibility: mc.responsibility.clone(),
                             patterns: Vec::new(),
                             constraints: Vec::new(),
-                            coverage_score: mc.coverage_score,
+                            reference_count: mc.reference_count,
                             public_items: Vec::new(),
                             internal_deps: Vec::new(),
                         },
@@ -645,26 +620,33 @@ impl AnalysisSynthesizer {
             }
         }
 
+        // Match patterns to modules by exact path match or path prefix
         for pattern in &deep.patterns {
             for location in &pattern.locations {
                 for module in modules.values_mut() {
-                    if location.file.contains(&module.name) || location.file == module.path {
-                        if !module.patterns.contains(&pattern.name) {
-                            module.patterns.push(pattern.name.clone());
-                        }
+                    // Use exact path match or check if file is under module path
+                    let matches = location.file == module.path
+                        || location
+                            .file
+                            .starts_with(&format!("{}/", module.path.trim_end_matches('/')));
+                    if matches && !module.patterns.contains(&pattern.name) {
+                        module.patterns.push(pattern.name.clone());
                         break;
                     }
                 }
             }
         }
 
+        // Match constraints to modules by exact path match or path prefix
         for constraint in &deep.constraints {
             for evidence in &constraint.evidence {
                 for module in modules.values_mut() {
-                    if evidence.file.contains(&module.name) || evidence.file == module.path {
-                        if !module.constraints.contains(&constraint.title) {
-                            module.constraints.push(constraint.title.clone());
-                        }
+                    let matches = evidence.file == module.path
+                        || evidence
+                            .file
+                            .starts_with(&format!("{}/", module.path.trim_end_matches('/')));
+                    if matches && !module.constraints.contains(&constraint.title) {
+                        module.constraints.push(constraint.title.clone());
                         break;
                     }
                 }
@@ -680,98 +662,43 @@ impl AnalysisSynthesizer {
         structural: Option<&StructuralValidationResult>,
         validation: &CrossValidation,
     ) -> ConfidenceScores {
-        let confirmed_count = validation.confirmed_findings.len() as f32;
-        let conflict_count = validation.conflicts.len() as f32;
-        let gap_count = validation.gaps.len() as f32;
+        let confirmed = validation.confirmed_findings.len();
+        let conflicts = validation.conflicts.len();
 
-        // =================================================================
-        // CONFIDENCE CALCULATION - ADVISORY HEURISTICS
-        //
-        // NOTE: These confidence scores are programmatic ESTIMATES, not
-        // authoritative judgments. The multipliers and weights below are
-        // heuristics that may not fit all project types.
-        //
-        // LLM should use these as INPUT signals but can override based on:
-        // - Project domain (crypto needs fewer patterns, many constraints)
-        // - Project size (small projects may have sparse findings)
-        // - Project type (libraries vs apps vs services)
-        //
-        // These scores are used for:
-        // - Prioritizing re-analysis targets
-        // - Ordering synthesis results
-        // - Progress reporting
-        //
-        // They should NOT be used to:
-        // - Reject valid analysis findings
-        // - Override LLM quality assessments
-        // - Make binary pass/fail decisions
-        // =================================================================
-
-        // Base confidence from confirmation ratio (0.5 default when no data)
-        let base_confidence = if confirmed_count + conflict_count > 0.0 {
-            confirmed_count / (confirmed_count + conflict_count)
+        let base = if confirmed + conflicts > 0 {
+            confirmed as f32 / (confirmed + conflicts) as f32
         } else {
-            0.5 // Unknown = neutral confidence
+            0.5
         };
 
-        // Gap penalty: 0.05 per gap, max 0.3 penalty (heuristic)
-        let gap_penalty = (gap_count * 0.05).min(0.3);
+        let architecture = if deep.structure.entry_points.is_empty()
+            && deep.structure.core_modules.is_empty()
+        {
+            0.3
+        } else {
+            base
+        };
 
-        // Architecture confidence
-        // NOTE: Empty structure is NOT necessarily bad (libraries may have no entry points)
-        // The 0.2 baseline is a conservative estimate, not a penalty
-        let architecture =
-            if deep.structure.entry_points.is_empty() && deep.structure.core_modules.is_empty() {
-                0.2 // Baseline for unknown structure (not a penalty)
-            } else {
-                base_confidence - gap_penalty * 0.5
-            };
-
-        // Pattern confidence (ratio of patterns with valid locations)
         let patterns = if deep.patterns.is_empty() {
-            0.2 // Baseline when no patterns found
+            0.3
         } else {
-            let valid_patterns = deep
-                .patterns
-                .iter()
-                .filter(|p| !p.locations.is_empty())
-                .count() as f32;
-            (valid_patterns / deep.patterns.len() as f32) * base_confidence
+            base
         };
 
-        // Constraint confidence (ratio of constraints with evidence)
         let constraints = if deep.constraints.is_empty() {
-            0.3 // Baseline when no constraints found
+            0.3
         } else {
-            let with_evidence = deep
-                .constraints
-                .iter()
-                .filter(|c| !c.evidence.is_empty())
-                .count() as f32;
-            (with_evidence / deep.constraints.len() as f32) * base_confidence
+            base
         };
 
-        // Dependency confidence (code parsing is generally reliable)
-        let dependencies = if deep.dependencies.is_empty() {
-            0.5 // Unknown
-        } else {
-            0.7 // Dependencies from code parsing are reliable
-        };
+        let dependencies = if deep.dependencies.is_empty() { 0.5 } else { 0.7 };
 
-        // Coverage confidence from structural analysis
         let coverage = structural
             .map(|s| s.coverage_report.coverage)
             .unwrap_or(0.5);
 
-        // Overall weighted average
-        // NOTE: These weights (0.2, 0.25, 0.25, 0.1, 0.2) are heuristics.
-        // Different projects may warrant different weightings.
-        let overall = (architecture * 0.2
-            + patterns * 0.25
-            + constraints * 0.25
-            + dependencies * 0.1
-            + coverage * 0.2)
-            .clamp(0.0, 1.0);
+        let scores = [architecture, patterns, constraints, dependencies, coverage];
+        let overall = scores.iter().sum::<f32>() / scores.len() as f32;
 
         ConfidenceScores {
             architecture,
@@ -1034,7 +961,7 @@ mod tests {
     fn test_claims_are_compatible() {
         assert!(SynthesizedAnalysis::claims_are_compatible(
             "Module uses async/await",
-            "Module uses tokio runtime"
+            "module uses async/await"
         ));
         assert!(!SynthesizedAnalysis::claims_are_compatible(
             "Uses synchronous IO",

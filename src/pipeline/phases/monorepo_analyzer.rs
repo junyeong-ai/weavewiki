@@ -192,7 +192,8 @@ impl MonorepoAnalyzer {
         let name = path.split('/').next_back().unwrap_or(path).to_string();
         let (project_type, language) = self.detect_subproject_type(&full_path, workspace).await;
         let is_app = self.is_application(&full_path, &project_type).await;
-        let dependencies = self.find_local_dependencies(&full_path, workspace).await;
+        // Local dependency detection removed - use proper manifest parsing or LLM analysis
+        let dependencies = Vec::new();
         let entry_points = self.find_entry_points(&full_path, &language).await;
 
         Ok(Some(SubprojectInfo {
@@ -250,79 +251,25 @@ impl MonorepoAnalyzer {
     }
 
     async fn detect_rust_subproject_type(&self, path: &Path) -> (ProjectType, String) {
-        let cargo_path = path.join("Cargo.toml");
-        if let Ok(content) = fs::read_to_string(&cargo_path).await {
-            if content.contains("clap") || content.contains("structopt") || content.contains("argh")
-            {
-                return (ProjectType::Cli, "rust".to_string());
-            }
-            if content.contains("actix")
-                || content.contains("axum")
-                || content.contains("rocket")
-                || content.contains("warp")
-            {
-                return (ProjectType::Backend, "rust".to_string());
-            }
-            if path.join("src/main.rs").exists() && !path.join("src/lib.rs").exists() {
-                return (ProjectType::Cli, "rust".to_string());
-            }
+        if path.join("src/main.rs").exists() && !path.join("src/lib.rs").exists() {
+            return (ProjectType::Cli, "rust".to_string());
         }
         (ProjectType::Library, "rust".to_string())
     }
 
     async fn detect_js_subproject_type(&self, path: &Path) -> (ProjectType, String) {
-        let pkg_path = path.join("package.json");
         let has_ts = path.join("tsconfig.json").exists();
         let lang = if has_ts { "typescript" } else { "javascript" }.to_string();
-
-        if let Ok(content) = fs::read_to_string(&pkg_path).await {
-            if content.contains("\"react\"")
-                || content.contains("\"vue\"")
-                || content.contains("\"next\"")
-                || content.contains("\"nuxt\"")
-                || content.contains("\"svelte\"")
-            {
-                return (ProjectType::Frontend, lang);
-            }
-            if content.contains("\"express\"")
-                || content.contains("\"fastify\"")
-                || content.contains("\"koa\"")
-                || content.contains("\"hono\"")
-            {
-                return (ProjectType::Backend, lang);
-            }
-        }
-
-        let has_components = path.join("src/components").exists()
-            || path.join("components").exists()
-            || path.join("app/components").exists();
-        if has_components {
-            return (ProjectType::Frontend, lang);
-        }
-
         (ProjectType::Library, lang)
     }
 
     async fn detect_jvm_subproject_type(&self, path: &Path) -> (ProjectType, String) {
-        let build_gradle = path.join("build.gradle.kts");
-        let lang = if build_gradle.exists() || path.join("build.gradle").exists() {
-            if path.join("src/main/kotlin").exists() {
-                "kotlin"
-            } else {
-                "java"
-            }
+        let lang = if path.join("src/main/kotlin").exists() {
+            "kotlin"
         } else {
             "java"
         }
         .to_string();
-
-        if let Ok(content) = fs::read_to_string(&build_gradle).await
-            && (content.contains("spring-boot")
-                || content.contains("ktor")
-                || content.contains("micronaut"))
-        {
-            return (ProjectType::Backend, lang);
-        }
 
         if path.join("src/main").exists() {
             let main_exists =
@@ -345,42 +292,6 @@ impl MonorepoAnalyzer {
             }
             _ => false,
         }
-    }
-
-    async fn find_local_dependencies(
-        &self,
-        path: &Path,
-        workspace: &WorkspaceConfig,
-    ) -> Vec<String> {
-        let mut deps = Vec::new();
-
-        match workspace.workspace_type {
-            WorkspaceType::CargoWorkspace => {
-                if let Ok(content) = fs::read_to_string(path.join("Cargo.toml")).await {
-                    for member in &workspace.members {
-                        let member_name = member.name.as_deref().unwrap_or(&member.path);
-                        if content.contains(&format!("{member_name} = {{ path")) {
-                            deps.push(member_name.to_string());
-                        }
-                    }
-                }
-            }
-            WorkspaceType::PnpmWorkspace
-            | WorkspaceType::NpmWorkspace
-            | WorkspaceType::YarnWorkspace => {
-                if let Ok(content) = fs::read_to_string(path.join("package.json")).await {
-                    for member in &workspace.members {
-                        let member_name = member.name.as_deref().unwrap_or(&member.path);
-                        if content.contains(&"\"@".to_string()) && content.contains(member_name) {
-                            deps.push(member_name.to_string());
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        deps
     }
 
     async fn find_entry_points(&self, path: &Path, language: &str) -> Vec<String> {

@@ -2,6 +2,19 @@
 //!
 //! Automatically detects project type by analyzing file structure and dependencies.
 //! Supports: CLI, Library, Backend, Frontend, Monorepo, Agent, Hybrid
+//!
+//! # Detection Thresholds
+//!
+//! The following thresholds are used for project type classification.
+//! These are empirical values; LLM should validate final classification.
+//!
+//! - `HYBRID_SIGNAL_THRESHOLD` (0.7): Minimum signal weight to consider "strong"
+//!   for hybrid detection. Multiple strong signals of different types → hybrid project.
+//!
+//! - `CONFIDENCE_NORMALIZATION_DIVISOR` (2.0): Normalizes cumulative signal scores
+//!   to 0-1 confidence range. Based on typical max score of 2 strong signals.
+//!
+//! - `DEFAULT_CONFIDENCE` (0.5): Fallback confidence when no signals detected.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,7 +24,27 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::config::{AnalysisConfig, ProjectType};
+use crate::types::hint::{AnalysisHint, HintCategory, HintCollection};
 use crate::types::Result;
+
+/// Minimum signal weight to consider "strong" for hybrid detection.
+///
+/// Rationale: Signals with weight >= 0.7 are considered definitive indicators.
+/// Multiple strong signals of different types suggest a hybrid project.
+const HYBRID_SIGNAL_THRESHOLD: f32 = 0.7;
+
+/// Divisor for normalizing cumulative signal scores to 0-1 confidence range.
+///
+/// Rationale: Typical maximum is 2 strong signals (e.g., backend + CLI).
+/// Each signal contributes up to ~0.9 weight, so max ~1.8.
+/// Dividing by 2.0 normalizes to approximately 0-1 range.
+const CONFIDENCE_NORMALIZATION_DIVISOR: f32 = 2.0;
+
+/// Default confidence when no signals are detected.
+///
+/// Falls back to Library type with 50% confidence - a conservative default.
+/// LLM should verify actual project type from code purpose.
+const DEFAULT_CONFIDENCE: f32 = 0.5;
 
 /// Detected member type with language information
 #[derive(Debug, Clone)]
@@ -40,6 +73,77 @@ impl Default for ProjectDetection {
             is_monorepo: false,
             workspace_config: None,
         }
+    }
+}
+
+impl ProjectDetection {
+    /// Convert detection signals to analysis hints for LLM validation.
+    ///
+    /// Signals from programmatic detection are advisory - LLM should verify
+    /// them against actual code structure and usage patterns.
+    pub fn to_hints(&self) -> HintCollection {
+        let mut hints = HintCollection::new();
+
+        // Language detection is high confidence (based on file extensions)
+        // No arbitrary threshold - LLM interprets percentage significance
+        for lang in &self.languages {
+            hints.push(
+                AnalysisHint::high_confidence(
+                    HintCategory::ProjectType,
+                    format!("{}: {:.1}% of codebase", lang.language, lang.percentage),
+                )
+                .with_evidence([format!("{} files", lang.file_count)]),
+            );
+        }
+
+        // Framework signals need LLM verification
+        for signal in &self.signals {
+            let confidence = match signal.signal_type {
+                // File existence is definitive
+                SignalType::EntryPoint | SignalType::ManifestFile => {
+                    AnalysisHint::definitive(
+                        HintCategory::ProjectType,
+                        format!("{:?} suggested by {}", signal.suggests, signal.source),
+                    )
+                }
+                // Dependency presence is high confidence, but usage needs verification
+                SignalType::Dependency | SignalType::FrameworkMarker => {
+                    AnalysisHint::high_confidence(
+                        HintCategory::ProjectType,
+                        format!("{:?} suggested by {}", signal.suggests, signal.source),
+                    )
+                    .with_evidence(["Dependency detected in manifest, usage not verified"])
+                }
+                // Directory structure is medium confidence (naming != purpose)
+                SignalType::DirectoryStructure => {
+                    AnalysisHint::medium_confidence(
+                        HintCategory::DirectoryRole,
+                        format!("{:?} pattern suggested by {}", signal.suggests, signal.source),
+                    )
+                    .with_evidence(["Directory exists, actual purpose needs verification"])
+                }
+                // Tool config is high confidence
+                SignalType::ToolConfig => AnalysisHint::high_confidence(
+                    HintCategory::ProjectType,
+                    format!("{:?} suggested by {}", signal.suggests, signal.source),
+                ),
+            };
+            hints.push(confidence);
+        }
+
+        // Monorepo detection is definitive (based on workspace manifest)
+        if self.is_monorepo
+            && let Some(ref ws) = self.workspace_config {
+                hints.push(
+                    AnalysisHint::definitive(
+                        HintCategory::ProjectType,
+                        format!("{:?} with {} members", ws.workspace_type, ws.members.len()),
+                    )
+                    .with_evidence(ws.members.iter().map(|m| m.path.clone())),
+                );
+            }
+
+        hints
     }
 }
 
@@ -169,24 +273,51 @@ impl ProjectDetector {
     async fn detect_languages(&self) -> Result<Vec<LanguageInfo>> {
         let mut counts: HashMap<String, (usize, Option<String>)> = HashMap::new();
 
-        let manifest_languages = [
+        // IMPORTANT: Language detection is based ONLY on file extensions, NOT manifests.
+        //
+        // Manifests indicate build tool/ecosystem, not language:
+        // - package.json → Node.js ecosystem (JS or TS - can't tell from manifest)
+        // - build.gradle → Gradle (Java, Kotlin, or Groovy)
+        // - pom.xml → Maven (Java, Kotlin, or Scala)
+        //
+        // Only these manifests have 1:1 language mapping:
+        // - Cargo.toml → Rust (always)
+        // - go.mod → Go (always)
+        // - pyproject.toml/setup.py → Python (always)
+        // - Gemfile → Ruby (always)
+        // - Package.swift → Swift (always)
+        //
+        // For ambiguous ecosystems (Node.js, JVM), we count actual source files.
+        // The manifest is stored for reference but doesn't determine language.
+
+        // Record manifests for ecosystem context (not language determination)
+        let manifest_to_ecosystem = [
             ("Cargo.toml", "rust"),
-            ("package.json", "typescript"),
+            ("go.mod", "go"),
             ("pyproject.toml", "python"),
             ("setup.py", "python"),
-            ("go.mod", "go"),
-            ("build.gradle", "kotlin"),
-            ("build.gradle.kts", "kotlin"),
-            ("pom.xml", "java"),
             ("Gemfile", "ruby"),
-            ("composer.json", "php"),
             ("Package.swift", "swift"),
+            // Ambiguous ecosystems - recorded but language determined by file count
+            ("package.json", "node"), // Could be JS or TS
+            ("build.gradle", "jvm"),  // Could be Java, Kotlin, or Groovy
+            ("build.gradle.kts", "jvm"),
+            ("pom.xml", "jvm"),
+            ("composer.json", "php"),
         ];
 
-        for (manifest, lang) in manifest_languages {
+        // Only set manifest hint for unambiguous ecosystems
+        for (manifest, ecosystem) in manifest_to_ecosystem {
             if self.project_root.join(manifest).exists() {
-                let entry = counts.entry(lang.to_string()).or_insert((0, None));
-                entry.1 = Some(manifest.to_string());
+                // Only pre-populate count for unambiguous language mappings
+                match ecosystem {
+                    "rust" | "go" | "python" | "ruby" | "swift" | "php" => {
+                        let entry = counts.entry(ecosystem.to_string()).or_insert((0, None));
+                        entry.1 = Some(manifest.to_string());
+                    }
+                    // For "node" and "jvm", don't pre-populate - let file counting decide
+                    _ => {}
+                }
             }
         }
 
@@ -287,11 +418,6 @@ impl ProjectDetector {
                 continue;
             }
 
-            // Skip plugin output directories
-            if relative_path.contains("-plugin/") || relative_path.ends_with("-plugin") {
-                continue;
-            }
-
             if let Some(ext) = path.extension().and_then(|e| e.to_str())
                 && let Some(lang) = extensions.get(ext)
             {
@@ -333,7 +459,7 @@ impl ProjectDetector {
                         signal_type: SignalType::FrameworkMarker,
                         source: format!("{dep} dependency"),
                         suggests: ProjectType::Backend,
-                        weight: 0.9,
+                        weight: 0.7,
                     });
                 }
             }
@@ -357,11 +483,11 @@ impl ProjectDetector {
                 signal_type: SignalType::EntryPoint,
                 source: "src/lib.rs (no main.rs)".to_string(),
                 suggests: ProjectType::Library,
-                weight: 0.9,
+                weight: 0.7,
             });
         }
 
-        // Backend directory markers
+        // Backend directory markers (low confidence - directory naming != purpose)
         let backend_markers = [
             ("src/routes", "routes directory"),
             ("src/api", "api directory"),
@@ -375,7 +501,7 @@ impl ProjectDetector {
                     signal_type: SignalType::DirectoryStructure,
                     source: desc.to_string(),
                     suggests: ProjectType::Backend,
-                    weight: 0.6,
+                    weight: 0.4,
                 });
             }
         }
@@ -397,31 +523,10 @@ impl ProjectDetector {
                             signal_type: SignalType::FrameworkMarker,
                             source: format!("{dep} dependency"),
                             suggests: ProjectType::Backend,
-                            weight: 0.9,
+                            weight: 0.7,
                         });
                     }
                 }
-            }
-        }
-
-        // Hexagonal/Clean Architecture patterns
-        let hexagonal_dirs = [
-            ("adapter", 0.7),
-            ("port", 0.7),
-            ("domain", 0.5),
-            ("src/main/kotlin", 0.4),
-            ("src/main/java", 0.4),
-        ];
-        for (dir, weight) in hexagonal_dirs {
-            if self.project_root.join(dir).exists()
-                || self.project_root.join(format!("src/{dir}")).exists()
-            {
-                signals.push(DetectionSignal {
-                    signal_type: SignalType::DirectoryStructure,
-                    source: format!("{dir}/ directory (architecture pattern)"),
-                    suggests: ProjectType::Backend,
-                    weight,
-                });
             }
         }
 
@@ -434,7 +539,7 @@ impl ProjectDetector {
                         signal_type: SignalType::FrameworkMarker,
                         source: format!("{dep} dependency"),
                         suggests: ProjectType::Backend,
-                        weight: 0.9,
+                        weight: 0.7,
                     });
                 }
             }
@@ -450,7 +555,7 @@ impl ProjectDetector {
                         signal_type: SignalType::FrameworkMarker,
                         source: format!("{dep} dependency"),
                         suggests: ProjectType::Backend,
-                        weight: 0.9,
+                        weight: 0.7,
                     });
                 }
             }
@@ -463,7 +568,7 @@ impl ProjectDetector {
                         signal_type: SignalType::FrameworkMarker,
                         source: format!("{dep} dependency"),
                         suggests: ProjectType::Frontend,
-                        weight: 0.9,
+                        weight: 0.7,
                     });
                 }
             }
@@ -485,7 +590,7 @@ impl ProjectDetector {
                         signal_type: SignalType::FrameworkMarker,
                         source: format!("{} dependency", dep.split('/').next_back().unwrap_or(dep)),
                         suggests: ProjectType::Backend,
-                        weight: 0.9,
+                        weight: 0.7,
                     });
                 }
             }
@@ -1067,15 +1172,8 @@ impl ProjectDetector {
             project_type = ProjectType::Backend;
         }
 
-        // Fallback: infer from directory name
-        if project_type == ProjectType::Library {
-            let name = member_path.split('/').next_back().unwrap_or(member_path);
-            if name == "app" || name.contains("android") || name.contains("mobile") {
-                project_type = ProjectType::Frontend;
-            } else if name.contains("api") || name.contains("server") || name.contains("backend") {
-                project_type = ProjectType::Backend;
-            }
-        }
+        // Directory name fallback removed: name != purpose
+        // If no strong signals detected, keep as Library (LLM can refine)
 
         MemberTypeInfo {
             project_type,
@@ -1198,7 +1296,12 @@ impl ProjectDetector {
     }
 
     fn compute_type(&self, detection: &ProjectDetection) -> (ProjectType, f32) {
-        if detection.is_monorepo {
+        // Only classify as Monorepo if workspace has 2+ actual members
+        // Single-member workspaces are treated as regular projects with workspace metadata
+        if detection.is_monorepo
+            && let Some(ref ws) = detection.workspace_config
+            && ws.members.len() >= 2
+        {
             return (ProjectType::Monorepo, 0.95);
         }
 
@@ -1208,51 +1311,26 @@ impl ProjectDetector {
             *type_scores.entry(signal.suggests).or_default() += signal.weight;
         }
 
-        // REMOVED: Language-specific bonuses
-        //
-        // Previously, Rust projects with lib.rs got +0.3 toward Library, and
-        // TypeScript/JavaScript got +0.2 toward Frontend. These were removed because:
-        //
-        // 1. ARBITRARY WEIGHTS: 0.3 vs 0.2 had no theoretical basis
-        // 2. ASYMMETRIC: Python, Go, Java got no bonus (unfair treatment)
-        // 3. MISLEADING: TypeScript can be backend (Node.js), Rust can be CLI
-        // 4. REDUNDANT: File-based signals already capture these patterns
-        //
-        // Signals from actual file analysis (Cargo.toml, package.json, etc.) are
-        // sufficient and more accurate. Language-based assumptions are unnecessary.
-        //
-        // If a language-based hint is needed, LLM can apply domain knowledge
-        // during analysis, where it has full context about the project.
-
-        // FALLBACK: If no signals detected, defaults to Library with 0.5 confidence.
-        // This may be incorrect for CLI tools or other project types without clear markers.
-        // LLM should verify project type from actual code purpose, not rely on this default.
         let (best_type, best_score) = type_scores
             .into_iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap_or((ProjectType::Library, 0.5));
+            .unwrap_or((ProjectType::Library, DEFAULT_CONFIDENCE));
 
-        let confidence = (best_score / 2.0).min(1.0);
+        let confidence = (best_score / CONFIDENCE_NORMALIZATION_DIVISOR).min(1.0);
 
-        // HYBRID DETECTION - ARBITRARY THRESHOLD
-        //
-        // Uses weight >= 0.7 to identify "strong signals" for hybrid detection.
-        // This threshold is arbitrary:
-        // - Project with 0.8 backend + 0.65 frontend will NOT be detected as hybrid
-        // - Project with 0.71 backend + 0.71 frontend WILL be detected as hybrid
-        // - The 0.7 cutoff has no theoretical basis
-        //
-        // LLM should validate multi-purpose projects independently.
+        // Hybrid detection: multiple strong signals of different types
+        // LLM validates multi-purpose projects independently; no confidence penalty.
+        // Multiple strong signals means MORE information, not less confidence.
         let strong_signals: Vec<_> = detection
             .signals
             .iter()
-            .filter(|s| s.weight >= 0.7)
+            .filter(|s| s.weight >= HYBRID_SIGNAL_THRESHOLD)
             .collect();
         let unique_types: std::collections::HashSet<_> =
             strong_signals.iter().map(|s| s.suggests).collect();
 
         if unique_types.len() > 1 {
-            return (ProjectType::Hybrid, confidence * 0.8);
+            return (ProjectType::Hybrid, confidence);
         }
 
         (best_type, confidence)

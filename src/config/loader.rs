@@ -33,24 +33,15 @@ impl ConfigLoader {
     /// Load configuration with optional custom config path
     /// If path is provided, it replaces project config in the resolution chain
     ///
-    /// Resolution order: defaults → preset → global → project → env vars
-    /// This ensures user settings override preset defaults.
+    /// Resolution order: defaults → global → project → env vars
     pub fn load_with_path(custom_path: Option<&Path>) -> Result<Config> {
-        // Step 1: Detect which preset is requested (from any config source)
-        let preset = Self::detect_preset(custom_path);
+        // Step 1: Start with defaults (single high-quality configuration)
+        let base_config = Config::default();
 
-        // Step 2: Start with defaults, then apply preset
-        let mut base_config = Config::default();
-        if let Some(p) = preset {
-            debug!("Applying preset: {:?}", p);
-            p.apply(&mut base_config);
-            base_config.preset = Some(p);
-        }
-
-        // Step 3: Build Figment with preset-applied defaults as base
+        // Step 2: Build Figment with defaults as base
         let mut figment = Figment::new().merge(Serialized::defaults(base_config));
 
-        // Step 4: Merge global config (overrides preset)
+        // Step 3: Merge global config (overrides defaults)
         if let Some(global_path) = Self::global_config_path()
             && global_path.exists()
         {
@@ -58,7 +49,7 @@ impl ConfigLoader {
             figment = figment.merge(Toml::file(&global_path));
         }
 
-        // Step 5: Merge project/custom config (overrides global)
+        // Step 4: Merge project/custom config (overrides global)
         match custom_path {
             Some(explicit_path) => {
                 if !explicit_path.exists() {
@@ -79,7 +70,7 @@ impl ConfigLoader {
             }
         }
 
-        // Step 6: Merge environment variables (overrides everything)
+        // Step 5: Merge environment variables (overrides everything)
         figment = figment.merge(Env::prefixed("CLAUDEGEN_").split('_').lowercase(true));
 
         let config: Config = figment
@@ -93,7 +84,6 @@ impl ConfigLoader {
             quality_loop_timeout = config.timeout.quality_loop_timeout_secs,
             checkpoint_interval = config.timeout.effective_checkpoint_interval_secs(),
             session_timeout = config.timeout.session_timeout_secs,
-            preset = ?config.preset,
             "Configuration loaded"
         );
 
@@ -102,7 +92,7 @@ impl ConfigLoader {
 
     /// Load configuration for a specific project
     ///
-    /// Resolution: defaults → preset → global → target_project → env vars
+    /// Resolution: defaults → global → target_project → env vars
     ///
     /// This method ensures config is loaded from the correct project when
     /// operating on a different project than CWD (e.g., `claudegen validate --path /other/project`)
@@ -131,14 +121,7 @@ impl ConfigLoader {
 
     /// Load configuration without project config (defaults + global + env only)
     pub fn load_global_only() -> Result<Config> {
-        let preset = Self::detect_preset_from_global();
-
-        let mut base_config = Config::default();
-        if let Some(p) = preset {
-            p.apply(&mut base_config);
-            base_config.preset = Some(p);
-        }
-
+        let base_config = Config::default();
         let mut figment = Figment::new().merge(Serialized::defaults(base_config));
 
         if let Some(global_path) = Self::global_config_path()
@@ -160,13 +143,7 @@ impl ConfigLoader {
 
     /// Load configuration from a specific file only
     pub fn load_from_file(path: &Path) -> Result<Config> {
-        let preset = Self::detect_preset_from_file(path);
-
-        let mut base_config = Config::default();
-        if let Some(p) = preset {
-            p.apply(&mut base_config);
-            base_config.preset = Some(p);
-        }
+        let base_config = Config::default();
 
         let config: Config = Figment::new()
             .merge(Serialized::defaults(base_config))
@@ -177,57 +154,6 @@ impl ConfigLoader {
         config.validate()?;
 
         Ok(config)
-    }
-
-    /// Detect preset from config sources (lightweight extraction)
-    fn detect_preset(custom_path: Option<&Path>) -> Option<super::ConfigPreset> {
-        // Check env var first (highest priority for preset selection)
-        if let Ok(preset_str) = env::var("CLAUDEGEN_PRESET")
-            && let Ok(preset) = preset_str.parse()
-        {
-            return Some(preset);
-        }
-
-        // Check project/custom config
-        let project_path = custom_path
-            .map(PathBuf::from)
-            .unwrap_or_else(Self::project_config_path);
-
-        if project_path.exists()
-            && let Some(preset) = Self::detect_preset_from_file(&project_path)
-        {
-            return Some(preset);
-        }
-
-        // Check global config
-        Self::detect_preset_from_global()
-    }
-
-    fn detect_preset_from_global() -> Option<super::ConfigPreset> {
-        // Check env var first (consistent with detect_preset)
-        if let Ok(preset_str) = env::var("CLAUDEGEN_PRESET")
-            && let Ok(preset) = preset_str.parse()
-        {
-            return Some(preset);
-        }
-
-        if let Some(global_path) = Self::global_config_path()
-            && global_path.exists()
-        {
-            return Self::detect_preset_from_file(&global_path);
-        }
-        None
-    }
-
-    fn detect_preset_from_file(path: &Path) -> Option<super::ConfigPreset> {
-        #[derive(serde::Deserialize)]
-        struct PresetOnly {
-            preset: Option<super::ConfigPreset>,
-        }
-
-        let content = fs::read_to_string(path).ok()?;
-        let parsed: PresetOnly = toml::from_str(&content).ok()?;
-        parsed.preset
     }
 
     // =========================================================================
@@ -515,11 +441,11 @@ mod tests {
         // Use global_only to avoid dependency on project config
         let config = ConfigLoader::load_global_only().unwrap();
 
-        // Verify TimeoutConfig default values
-        assert_eq!(config.timeout.quality_loop_timeout_secs, 1800);
-        assert_eq!(config.timeout.session_timeout_secs, 3600);
-        assert_eq!(config.timeout.analysis_phase_timeout_secs, 600);
-        assert_eq!(config.timeout.specialist_timeout_secs, 120);
+        // Verify TimeoutConfig default values (high-quality configuration)
+        assert_eq!(config.timeout.quality_loop_timeout_secs, 3600);   // 1 hour
+        assert_eq!(config.timeout.session_timeout_secs, 7200);        // 2 hours
+        assert_eq!(config.timeout.analysis_phase_timeout_secs, 1800); // 30 minutes
+        assert_eq!(config.timeout.specialist_timeout_secs, 300);      // 5 minutes
     }
 
     #[test]
@@ -533,8 +459,8 @@ mod tests {
             expected
         );
 
-        // Default: 1800 / 4 = 450 seconds
-        assert_eq!(config.timeout.effective_checkpoint_interval_secs(), 450);
+        // Default: 3600 / 4 = 900 seconds
+        assert_eq!(config.timeout.effective_checkpoint_interval_secs(), 900);
     }
 
     #[test]
@@ -620,7 +546,7 @@ quality_loop_timeout_secs = 3600
         assert_eq!(config.timeout.quality_loop_timeout_secs, 3600);
 
         // Other fields should retain defaults (#[serde(default)] behavior)
-        assert_eq!(config.timeout.session_timeout_secs, 3600); // default
-        assert_eq!(config.timeout.analysis_phase_timeout_secs, 600); // default
+        assert_eq!(config.timeout.session_timeout_secs, 7200); // default
+        assert_eq!(config.timeout.analysis_phase_timeout_secs, 1800); // default
     }
 }

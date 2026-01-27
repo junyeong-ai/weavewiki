@@ -21,7 +21,7 @@ pub mod llm {
 
 pub mod provider {
     pub const DEFAULT_MAX_TOKENS: usize = 4096;
-    pub const CLAUDE_AGENT_MAX_TOKENS: usize = 8192;
+    pub const CLAUDE_AGENT_MAX_TOKENS: usize = 16384;
     pub const HEALTH_CHECK_MAX_TOKENS: u32 = 10;
     pub const RATE_LIMIT_MAX_DELAY_SECS: u64 = 300;
 }

@@ -3,7 +3,7 @@
 //! Core principle: "What mistakes would AI make without this information?"
 //!
 //! Design:
-//! - Presets for common use cases (quick/standard/thorough/exhaustive)
+//! - Single high-quality configuration (always thorough analysis)
 //! - Value-based quality metrics (mistake_prevention, discoverability, artifact_fitness)
 //! - Multi-dimensional convergence (not single quality_score)
 //! - Domain-aware generation (business rules, compliance)
@@ -15,130 +15,6 @@ use std::collections::HashMap;
 use crate::types::Severity;
 
 // =============================================================================
-// PRESETS
-// =============================================================================
-
-/// Configuration presets for common use cases
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ConfigPreset {
-    /// Fast iteration: ~15 LLM calls, basic quality
-    Quick,
-    /// Balanced quality and cost: ~50 LLM calls
-    #[default]
-    Standard,
-    /// High quality output: ~100 LLM calls
-    Thorough,
-    /// Maximum quality, long-running: unlimited calls
-    Exhaustive,
-}
-
-impl ConfigPreset {
-    pub fn apply(&self, config: &mut Config) {
-        // Apply adaptive iteration config for all presets
-        config.refinement.adaptive_iteration = AdaptiveIterationConfig::for_preset(*self);
-
-        match self {
-            Self::Quick => {
-                // All Haiku for fast iteration
-                config.llm.default_model = "claude-haiku-4-5-20251001".into();
-                config.llm.fast_model = None; // Same as default
-                config.llm.performance_model = None; // Same as default
-                config.value.min_overall = 0.5;
-                config.convergence.max_iterations = 10;
-                config.convergence.consecutive_passes = 1;
-                config.convergence.quality_floor = 0.45;
-                config.convergence.target_quality = 0.60;
-                config.analysis.depth = AnalysisDepth::Fast;
-                config.quality.min_score = 0.5;
-                config.quality.target_score = 0.6;
-                config.deep_review.required_passes = 1;
-                config.multi_agent.enabled = false;
-                config.multi_agent.specialist_timeout_secs = 60;
-                config.learning.enabled = false;
-                config.quality_loop.max_iterations = 5;
-                config.timeout.specialist_timeout_secs = 60;
-            }
-            Self::Standard => {
-                // Tiered: Haiku for fast, Sonnet for default/performance
-                config.llm.default_model = "claude-sonnet-4-5-20250929".into();
-                config.llm.fast_model = Some("claude-haiku-4-5-20251001".into());
-                config.llm.performance_model = None; // Same as default (Sonnet)
-                config.value.min_overall = 0.6;
-                config.convergence.max_iterations = 30;
-                config.convergence.consecutive_passes = 2;
-                config.convergence.quality_floor = 0.55;
-                config.convergence.target_quality = 0.80;
-                config.analysis.depth = AnalysisDepth::Standard;
-                config.quality.min_score = 0.6;
-                config.quality.target_score = 0.8;
-                config.deep_review.required_passes = 2;
-                config.multi_agent.enabled = true;
-                config.multi_agent.specialist_timeout_secs = 120;
-                config.learning.enabled = true;
-                config.quality_loop.max_iterations = 10;
-                config.timeout.specialist_timeout_secs = 120;
-            }
-            Self::Thorough => {
-                // Full tiering: Haiku/Sonnet/Opus
-                config.llm.default_model = "claude-sonnet-4-5-20250929".into();
-                config.llm.fast_model = Some("claude-haiku-4-5-20251001".into());
-                config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
-                config.value.min_overall = 0.7;
-                config.convergence.max_iterations = 50;
-                config.convergence.consecutive_passes = 2;
-                config.convergence.quality_floor = 0.65;
-                config.convergence.target_quality = 0.90;
-                config.analysis.depth = AnalysisDepth::Complete;
-                config.quality.min_score = 0.7;
-                config.quality.target_score = 0.9;
-                config.deep_review.required_passes = 2;
-                config.multi_agent.enabled = true;
-                config.multi_agent.specialist_timeout_secs = 180;
-                config.learning.enabled = true;
-                config.quality_loop.max_iterations = 20;
-                config.timeout.specialist_timeout_secs = 180;
-            }
-            Self::Exhaustive => {
-                // All Opus for maximum quality
-                config.llm.default_model = "claude-opus-4-5-20251101".into();
-                config.llm.fast_model = Some("claude-sonnet-4-5-20250929".into()); // Sonnet for fast tasks
-                config.llm.performance_model = Some("claude-opus-4-5-20251101".into());
-                config.value.min_overall = 0.8;
-                config.convergence.max_iterations = 100;
-                config.convergence.consecutive_passes = 3;
-                config.convergence.quality_floor = 0.75;
-                config.convergence.target_quality = 0.95;
-                config.analysis.depth = AnalysisDepth::Complete;
-                config.performance.max_runtime_hours = 336;
-                config.quality.min_score = 0.8;
-                config.quality.target_score = 0.95;
-                config.deep_review.required_passes = 3;
-                config.multi_agent.enabled = true;
-                config.multi_agent.specialist_timeout_secs = 300;
-                config.learning.enabled = true;
-                config.quality_loop.max_iterations = 50;
-                config.timeout.specialist_timeout_secs = 300;
-            }
-        }
-    }
-}
-
-impl std::str::FromStr for ConfigPreset {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "quick" => Ok(Self::Quick),
-            "standard" => Ok(Self::Standard),
-            "thorough" => Ok(Self::Thorough),
-            "exhaustive" => Ok(Self::Exhaustive),
-            _ => Err(format!("Unknown preset: {s}")),
-        }
-    }
-}
-
-// =============================================================================
 // ROOT CONFIG
 // =============================================================================
 
@@ -146,7 +22,6 @@ impl std::str::FromStr for ConfigPreset {
 #[serde(default)]
 pub struct Config {
     pub version: String,
-    pub preset: Option<ConfigPreset>,
     pub generation: GenerationConfig,
     pub value: ValueConfig,
     pub convergence: ConvergenceConfig,
@@ -181,7 +56,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: "4.0".into(),
-            preset: Some(ConfigPreset::Standard),
             generation: GenerationConfig::default(),
             value: ValueConfig::default(),
             convergence: ConvergenceConfig::default(),
@@ -550,17 +424,17 @@ pub struct ConvergenceConfig {
 impl Default for ConvergenceConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 30,
+            max_iterations: 100,          // High quality: allow thorough iteration
             consecutive_passes: 2,
-            max_oscillations: 3,
-            early_exit_threshold: 0.9,
-            stagnation_patience: 5,
-            min_improvement: 0.01,
+            max_oscillations: 5,          // More patience for complex projects
+            early_exit_threshold: 0.95,   // Only early exit at very high quality
+            stagnation_patience: 10,      // More patience before giving up
+            min_improvement: 0.005,       // Detect smaller improvements
             require_formal_pass: true,
             require_cross_artifact_pass: true,
-            quality_floor: 0.55,
-            target_quality: 0.80,
-            early_exit_bypasses_dimensions: true,
+            quality_floor: 0.75,          // High quality floor
+            target_quality: 0.90,         // High quality target
+            early_exit_bypasses_dimensions: false,
         }
     }
 }
@@ -721,11 +595,11 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             default_model: "claude-sonnet-4-5-20250929".into(),
-            performance_model: None,
-            fast_model: None,
-            timeout_secs: 300,
+            performance_model: Some("claude-opus-4-5-20251101".into()), // Opus for complex tasks
+            fast_model: Some("claude-haiku-4-5-20251001".into()),       // Haiku for simple tasks
+            timeout_secs: 600,            // Generous timeout for complex responses
             temperature: 0.0,
-            max_tokens: 4096,
+            max_tokens: 8192,             // Allow longer responses
             provider: "claude-agent".into(),
             context: ContextWindowConfig::default(),
         }
@@ -860,7 +734,7 @@ pub struct AnalysisConfig {
 impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
-            depth: AnalysisDepth::Standard,
+            depth: AnalysisDepth::Complete, // Always complete analysis
             include: vec!["**/*".into()],
             exclude: vec![
                 ".git/**".into(),
@@ -873,9 +747,9 @@ impl Default for AnalysisConfig {
                 ".venv/**".into(),
                 ".claudegen/**".into(),
             ],
-            max_file_size: 5 * 1024 * 1024,
-            max_file_samples: 100,
-            max_key_paths: 10, // Increased from hardcoded 6
+            max_file_size: 10 * 1024 * 1024, // 10MB for larger files
+            max_file_samples: 200,            // More samples for thorough analysis
+            max_key_paths: 20,                // More key paths
         }
     }
 }
@@ -1283,7 +1157,7 @@ pub struct BudgetConfig {
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            total_tokens: 2_000_000,
+            total_tokens: 10_000_000,  // Generous budget for thorough analysis
             allocation: BudgetAllocation::default(),
         }
     }
@@ -1622,45 +1496,6 @@ impl AdaptiveIterationConfig {
     pub fn max_total(&self) -> usize {
         self.base_iterations + self.max_extension
     }
-
-    pub fn for_preset(preset: ConfigPreset) -> Self {
-        match preset {
-            ConfigPreset::Quick => Self {
-                base_iterations: 5,
-                max_extension: 2,
-                extension_triggers: vec![ExtensionTriggerConfig::QualityImproving],
-                allow_early_exit: true,
-                min_iterations_for_exit: 2,
-                quality_improving_delta: 0.03,
-                high_uncertainty_threshold: 0.4,
-            },
-            ConfigPreset::Standard => Self::default(),
-            ConfigPreset::Thorough => Self {
-                base_iterations: 15,
-                max_extension: 10,
-                extension_triggers: vec![
-                    ExtensionTriggerConfig::QualityImproving,
-                    ExtensionTriggerConfig::HighUncertainty,
-                ],
-                allow_early_exit: true,
-                min_iterations_for_exit: 5,
-                quality_improving_delta: 0.015,
-                high_uncertainty_threshold: 0.25,
-            },
-            ConfigPreset::Exhaustive => Self {
-                base_iterations: 30,
-                max_extension: 20,
-                extension_triggers: vec![
-                    ExtensionTriggerConfig::QualityImproving,
-                    ExtensionTriggerConfig::HighUncertainty,
-                ],
-                allow_early_exit: true,
-                min_iterations_for_exit: 10,
-                quality_improving_delta: 0.01,
-                high_uncertainty_threshold: 0.2,
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1783,31 +1618,31 @@ impl Default for RefinementConfig {
     fn default() -> Self {
         Self {
             enabled_strategies: RefinementStrategyType::all(),
-            max_attempts_per_strategy: 3,
+            max_attempts_per_strategy: 5,    // More attempts for thorough refinement
             strategy_rotation_enabled: true,
-            timeout_secs: 600,
+            timeout_secs: 1800,              // 30 minutes per refinement phase
             adaptive_iteration: AdaptiveIterationConfig::default(),
-            stagnation_patience: 5,
-            stagnation_threshold: 0.01,
-            require_all_dimensions: false,
-            issues_per_iteration: 5,
-            strategy_retry_limit: 3,
+            stagnation_patience: 10,         // More patience before giving up
+            stagnation_threshold: 0.005,     // Detect smaller improvements
+            require_all_dimensions: true,    // Require all quality dimensions
+            issues_per_iteration: 10,        // Address more issues per iteration
+            strategy_retry_limit: 5,         // More retries per strategy
             oscillation_strict_passes: 3,
             oscillation_lenient_passes: 2,
-            oscillation_stability_variance: 0.03,
-            oscillation_variance_window: 3,
+            oscillation_stability_variance: 0.02,  // Tighter stability
+            oscillation_variance_window: 5,        // Larger window for detection
             enable_rollback: true,
-            rollback_threshold: 0.1,
-            max_rollbacks: 3,
+            rollback_threshold: 0.15,        // More tolerance before rollback
+            max_rollbacks: 5,                // More rollback opportunities
             post_convergence_verification: true,
-            post_convergence_passes: 2,
-            max_convergence_detections: 3,
+            post_convergence_passes: 3,      // More verification passes
+            max_convergence_detections: 5,
             dimension_thresholds: DimensionThresholds::default(),
-            min_improvement_per_iteration: 0.01,
+            min_improvement_per_iteration: 0.005,  // Detect smaller improvements
             detect_oscillation: true,
-            oscillation_window: 3,
-            oscillation_min_amplitude: 0.03,
-            quality_acceptance_delta: 0.05,
+            oscillation_window: 5,
+            oscillation_min_amplitude: 0.02,
+            quality_acceptance_delta: 0.03,  // Tighter acceptance
             self_critique: SelfCritiqueConfig::default(),
             evidence_feedback: EvidenceFeedbackConfig::default(),
         }
@@ -1898,17 +1733,14 @@ impl LearningQualityThresholds {
 #[serde(default)]
 pub struct QualityConfig {
     pub enabled: bool,
-    pub min_score: f32,
-    pub min_value_score: f32,
-    pub target_score: f32,
-    pub minimum_quality: f32,
+    pub min_quality: f32,
+    pub target_quality: f32,
     pub min_file_refs: usize,
     pub max_tier1_ratio: f32,
     pub reference_only_mode: bool,
     pub scoring: TierScoringWeights,
     pub skill: SkillQualityConfig,
     pub agent: AgentQualityConfig,
-    pub min_overall_score: f32,
     pub semantic: SemanticQualityThresholds,
 }
 
@@ -1916,17 +1748,14 @@ impl Default for QualityConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_score: 0.5,
-            min_value_score: 0.5,
-            target_score: 0.8,
-            minimum_quality: 0.5,
-            min_file_refs: 2,
-            max_tier1_ratio: 0.2,
+            min_quality: 0.7,
+            target_quality: 0.9,
+            min_file_refs: 3,
+            max_tier1_ratio: 0.1,
             reference_only_mode: false,
             scoring: TierScoringWeights::default(),
             skill: SkillQualityConfig::default(),
             agent: AgentQualityConfig::default(),
-            min_overall_score: 0.6,
             semantic: SemanticQualityThresholds::default(),
         }
     }
@@ -1967,6 +1796,12 @@ pub struct DeepReviewConfig {
     pub review_timeout_secs: u64,
     pub check_regression: bool,
     pub reject_tier1: bool,
+    /// Minimum ratio of valid file references to total references.
+    ///
+    /// Rationale: Generated content references files that should exist in the codebase.
+    /// A ratio of 0.5 (50%) means at least half of @file:line references must point to
+    /// actual files. Lower values tolerate more hallucination or future/planned paths.
+    /// Higher values (0.8+) are stricter, suitable for mature codebases.
     pub min_evidence_ratio: f32,
     /// Maximum characters of CLAUDE.md to include in semantic quality review
     pub claude_md_preview_chars: usize,
@@ -2430,9 +2265,8 @@ pub struct QualityLoopConfig {
     pub enabled: bool,
     pub max_iterations: usize,
     pub max_outer_iterations: usize,
-    pub target_score: f32,
+    pub target_quality: f32,
     pub min_improvement: f32,
-    // multi_agent and insight_driven moved to root Config
     pub analysis_confidence_threshold: f32,
     pub synthesis_confidence_threshold: f32,
     pub max_invalid_reference_ratio: f32,
@@ -2443,14 +2277,14 @@ impl Default for QualityLoopConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_iterations: 10,
-            max_outer_iterations: 5,
-            target_score: 0.8,
-            min_improvement: 0.02,
-            analysis_confidence_threshold: 0.7,
-            synthesis_confidence_threshold: 0.8,
-            max_invalid_reference_ratio: 0.2,
-            reanalysis_gap_threshold: 0.3,
+            max_iterations: 50,
+            max_outer_iterations: 20,
+            target_quality: 0.90,
+            min_improvement: 0.005,
+            analysis_confidence_threshold: 0.75,
+            synthesis_confidence_threshold: 0.85,
+            max_invalid_reference_ratio: 0.1,
+            reanalysis_gap_threshold: 0.2,
         }
     }
 }
@@ -2558,12 +2392,12 @@ impl Default for DeepAnalysisConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_depth: 3,
-            max_iterations: 10,
+            max_depth: 5,                    // Deeper analysis for complex projects
+            max_iterations: 30,              // More iterations for thorough analysis
             follow_imports: true,
             analyze_dependencies: true,
-            min_confidence: 0.7,
-            max_code_context_chars: 50_000,
+            min_confidence: 0.75,            // Higher confidence threshold
+            max_code_context_chars: 100_000, // More context for better understanding
             targeted_reanalysis: true,
         }
     }
@@ -2865,12 +2699,12 @@ pub struct TimeoutConfig {
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
-            session_timeout_secs: 3600,
-            quality_loop_timeout_secs: 1800,
-            analysis_phase_timeout_secs: 600,
-            generation_phase_timeout_secs: 300,
-            specialist_timeout_secs: 120,
-            llm_call_timeout_secs: 300,
+            session_timeout_secs: 7200,           // 2 hours - generous for large projects
+            quality_loop_timeout_secs: 3600,      // 1 hour - allow thorough quality iteration
+            analysis_phase_timeout_secs: 1800,    // 30 minutes - large monorepos need time
+            generation_phase_timeout_secs: 900,   // 15 minutes - complex generation
+            specialist_timeout_secs: 300,         // 5 minutes - specialist tasks
+            llm_call_timeout_secs: 600,           // 10 minutes - long LLM responses
         }
     }
 }
@@ -2913,14 +2747,14 @@ impl Default for DistributedAnalysisConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_parallel_agents: 5,
-            max_tokens_per_chunk: 50_000,
-            chunk_overlap_lines: 50,
-            min_files_for_distributed: 50,
-            max_file_content_chars: 10_000,
-            max_common_import_patterns: 10,
-            max_dependency_display: 20,
-            file_read_timeout_secs: 30,
+            max_parallel_agents: 8,          // More parallelism for large projects
+            max_tokens_per_chunk: 80_000,    // Larger chunks for better context
+            chunk_overlap_lines: 100,        // More overlap for continuity
+            min_files_for_distributed: 30,   // Start distributed earlier
+            max_file_content_chars: 20_000,  // More content per file
+            max_common_import_patterns: 20,  // Track more patterns
+            max_dependency_display: 50,      // Show more dependencies
+            file_read_timeout_secs: 60,      // More time for large files
         }
     }
 }
@@ -2943,25 +2777,6 @@ mod tests {
     fn test_default_config_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_preset_application() {
-        let mut config = Config::default();
-
-        ConfigPreset::Quick.apply(&mut config);
-        assert_eq!(config.value.min_overall, 0.5);
-        assert_eq!(config.convergence.max_iterations, 10);
-        assert_eq!(config.analysis.depth, AnalysisDepth::Fast);
-
-        ConfigPreset::Thorough.apply(&mut config);
-        assert_eq!(config.value.min_overall, 0.7);
-        assert_eq!(config.convergence.max_iterations, 50);
-        assert!(config.llm.performance_model.is_some());
-
-        ConfigPreset::Exhaustive.apply(&mut config);
-        assert_eq!(config.value.min_overall, 0.8);
-        assert_eq!(config.performance.max_runtime_hours, 336);
     }
 
     #[test]

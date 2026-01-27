@@ -6,11 +6,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::ai::LlmProvider;
-use crate::config::ProjectType;
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
 use crate::types::Result;
 use crate::types::severity::Severity;
 
@@ -18,7 +20,7 @@ use super::convention_inference::InferredConventions;
 use super::project_detection::ProjectDetection;
 use crate::pipeline::analysis::SynthesizedAnalysis;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct ExtractedConstraints {
     pub anti_patterns: Vec<AntiPattern>,
     pub hidden_dependencies: Vec<HiddenDependency>,
@@ -27,7 +29,7 @@ pub struct ExtractedConstraints {
     pub gotchas: Vec<Gotcha>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AntiPattern {
     pub name: String,
     pub description: String,
@@ -37,7 +39,7 @@ pub struct AntiPattern {
     pub severity: Severity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence {
     pub file: String,
     pub line: Option<u32>,
@@ -45,7 +47,7 @@ pub struct Evidence {
     pub context: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HiddenDependency {
     pub source: String,
     pub target: String,
@@ -55,7 +57,7 @@ pub struct HiddenDependency {
     pub impact: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HiddenDepType {
     ImplicitOrdering,
@@ -66,7 +68,7 @@ pub enum HiddenDepType {
     DataFormat,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComplexWorkflow {
     pub name: String,
     pub description: String,
@@ -76,7 +78,7 @@ pub struct ComplexWorkflow {
     pub automation_potential: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowStep {
     pub order: u32,
     pub action: String,
@@ -85,7 +87,7 @@ pub struct WorkflowStep {
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ImplicitRule {
     pub name: String,
     pub description: String,
@@ -94,7 +96,7 @@ pub struct ImplicitRule {
     pub evidence: Vec<Evidence>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleEnforcement {
     Linter,
@@ -103,7 +105,7 @@ pub enum RuleEnforcement {
     Manual,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Gotcha {
     pub title: String,
     pub description: String,
@@ -134,7 +136,6 @@ impl ConstraintExtractor {
             .await
     }
 
-    /// Extract constraints with optional synthesis data for enhanced analysis
     pub async fn extract_with_synthesis(
         &self,
         detection: &ProjectDetection,
@@ -143,43 +144,28 @@ impl ConstraintExtractor {
     ) -> Result<ExtractedConstraints> {
         let mut constraints = ExtractedConstraints::default();
 
-        let static_constraints = self.extract_static(detection).await?;
-        constraints
-            .anti_patterns
-            .extend(static_constraints.anti_patterns);
-        constraints
-            .hidden_dependencies
-            .extend(static_constraints.hidden_dependencies);
-        constraints.gotchas.extend(static_constraints.gotchas);
-
-        // Use synthesis data to enhance constraint extraction
         if let Some(synth) = synthesis {
             self.extract_from_synthesis(synth, &mut constraints);
         }
 
-        let llm_constraints = self
-            .extract_with_llm(detection, conventions)
-            .await
-            .unwrap_or_default();
-        constraints
-            .anti_patterns
-            .extend(llm_constraints.anti_patterns);
-        constraints
-            .hidden_dependencies
-            .extend(llm_constraints.hidden_dependencies);
-        constraints
-            .complex_workflows
-            .extend(llm_constraints.complex_workflows);
-        constraints
-            .implicit_rules
-            .extend(llm_constraints.implicit_rules);
-        constraints.gotchas.extend(llm_constraints.gotchas);
-
-        constraints.anti_patterns.dedup_by(|a, b| a.name == b.name);
-        constraints
-            .complex_workflows
-            .dedup_by(|a, b| a.name == b.name);
-        constraints.gotchas.dedup_by(|a, b| a.title == b.title);
+        match self.extract_with_llm(detection, conventions).await {
+            Ok(llm_constraints) => {
+                // Merge LLM constraints with synthesis constraints (append, don't replace)
+                constraints.anti_patterns.extend(llm_constraints.anti_patterns);
+                constraints.hidden_dependencies.extend(llm_constraints.hidden_dependencies);
+                constraints.complex_workflows.extend(llm_constraints.complex_workflows);
+                constraints.implicit_rules.extend(llm_constraints.implicit_rules);
+                constraints.gotchas.extend(llm_constraints.gotchas);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    has_synthesis = synthesis.is_some(),
+                    "LLM constraint extraction failed, using synthesis-only constraints"
+                );
+                // Keep synthesis-extracted constraints if available
+            }
+        }
 
         tracing::info!(
             anti_patterns = constraints.anti_patterns.len(),
@@ -199,24 +185,7 @@ impl ConstraintExtractor {
         synthesis: &SynthesizedAnalysis,
         constraints: &mut ExtractedConstraints,
     ) {
-        // Extract constraints from synthesis module responsibilities
         for module in &synthesis.modules {
-            // Add gotchas for modules with shared state concerns
-            if module.responsibility.to_lowercase().contains("shared")
-                || module.responsibility.to_lowercase().contains("global")
-            {
-                constraints.gotchas.push(Gotcha {
-                    title: format!("{} module state management", module.name),
-                    description: format!(
-                        "The {} module handles shared state and requires careful handling",
-                        module.name
-                    ),
-                    when: format!("Modifying {} or components that depend on it", module.path),
-                    solution: "Ensure thread-safety and consider race conditions".to_string(),
-                    related_files: vec![module.path.clone()],
-                });
-            }
-
             for constraint_desc in &module.constraints {
                 if !constraint_desc.is_empty() {
                     constraints.gotchas.push(Gotcha {
@@ -230,12 +199,12 @@ impl ConstraintExtractor {
             }
         }
 
-        // Extract patterns from deep analysis
         for pattern in &synthesis.deep.patterns {
-            // Only flag patterns that appear in few locations (potential inconsistency)
-            if pattern.locations.len() < 2 {
+            // Check if pattern is only used in test files
+            // More precise test file detection to avoid false positives (e.g., "contest", "attestation")
+            if pattern.locations.len() == 1 && is_test_file(&pattern.locations[0].file) {
                 constraints.anti_patterns.push(AntiPattern {
-                    name: format!("Limited {} pattern usage", pattern.name),
+                    name: format!("Test-only {} pattern", pattern.name),
                     description: format!(
                         "Pattern '{}' is used in only {} location(s)",
                         pattern.name,
@@ -249,7 +218,6 @@ impl ConstraintExtractor {
                     evidence: pattern
                         .locations
                         .iter()
-                        .take(3)
                         .map(|loc| Evidence {
                             file: loc.file.clone(),
                             line: Some(loc.line),
@@ -291,367 +259,6 @@ impl ConstraintExtractor {
         }
     }
 
-    async fn extract_static(&self, detection: &ProjectDetection) -> Result<ExtractedConstraints> {
-        let mut constraints = ExtractedConstraints::default();
-
-        match detection.primary_type {
-            ProjectType::Cli => {
-                self.extract_cli_constraints(&mut constraints).await?;
-            }
-            ProjectType::Backend => {
-                self.extract_backend_constraints(&mut constraints).await?;
-            }
-            ProjectType::Frontend => {
-                self.extract_frontend_constraints(&mut constraints).await?;
-            }
-            ProjectType::Library => {
-                self.extract_library_constraints(&mut constraints).await?;
-            }
-            ProjectType::Monorepo => {
-                self.extract_monorepo_constraints(&mut constraints).await?;
-            }
-            _ => {}
-        }
-
-        self.extract_common_constraints(&mut constraints, detection)
-            .await?;
-
-        Ok(constraints)
-    }
-
-    async fn extract_cli_constraints(&self, constraints: &mut ExtractedConstraints) -> Result<()> {
-        if self.project_root.join("Cargo.toml").exists()
-            && let Ok(content) = fs::read_to_string(self.project_root.join("Cargo.toml")).await
-            && content.contains("clap")
-        {
-            constraints.gotchas.push(Gotcha {
-                title: "CLI argument changes require version bump consideration".to_string(),
-                description: "Changing CLI arguments can break scripts that depend on the tool"
-                    .to_string(),
-                when: "Adding, removing, or renaming CLI flags/arguments".to_string(),
-                solution: "Use deprecation warnings before removing flags. Add --help examples."
-                    .to_string(),
-                related_files: vec!["src/cli/".to_string(), "Cargo.toml".to_string()],
-            });
-        }
-
-        if self.project_root.join("src/main.rs").exists() {
-            constraints.anti_patterns.push(AntiPattern {
-                name: "Direct stdout in library code".to_string(),
-                description: "Using println! or print! in non-CLI modules".to_string(),
-                why_bad: "Makes library code unusable as a dependency, breaks --quiet flags"
-                    .to_string(),
-                correct_approach:
-                    "Use logging (tracing/log) or return data for CLI layer to format".to_string(),
-                evidence: Vec::new(),
-                severity: Severity::Medium,
-            });
-        }
-
-        Ok(())
-    }
-
-    async fn extract_backend_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-    ) -> Result<()> {
-        if self.project_root.join("src/domain").exists()
-            || self.project_root.join("domain").exists()
-        {
-            constraints.anti_patterns.push(AntiPattern {
-                name: "Infrastructure in domain layer".to_string(),
-                description: "Database/HTTP/external service code in domain modules".to_string(),
-                why_bad: "Violates hexagonal architecture, makes testing difficult".to_string(),
-                correct_approach: "Use port interfaces in domain, implement in adapter layer"
-                    .to_string(),
-                evidence: Vec::new(),
-                severity: Severity::High,
-            });
-        }
-
-        if self.has_file_pattern("**/*Controller*").await
-            || self.has_file_pattern("**/*controller*").await
-        {
-            constraints.gotchas.push(Gotcha {
-                title: "Controller should not contain business logic".to_string(),
-                description: "Controllers are for request handling, not business rules".to_string(),
-                when: "Adding new endpoints or modifying request handling".to_string(),
-                solution: "Delegate to service/use-case layer for business logic".to_string(),
-                related_files: vec!["**/controller*".to_string(), "**/Controller*".to_string()],
-            });
-        }
-
-        Ok(())
-    }
-
-    async fn extract_frontend_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-    ) -> Result<()> {
-        if self.project_root.join("package.json").exists()
-            && let Ok(content) = fs::read_to_string(self.project_root.join("package.json")).await
-        {
-            if content.contains("orval") || content.contains("openapi-typescript") {
-                constraints.anti_patterns.push(AntiPattern {
-                    name: "Manual API client modifications".to_string(),
-                    description: "Editing auto-generated API client files".to_string(),
-                    why_bad: "Changes will be lost on next generation".to_string(),
-                    correct_approach: "Modify OpenAPI spec or orval config instead".to_string(),
-                    evidence: Vec::new(),
-                    severity: Severity::High,
-                });
-
-                constraints.complex_workflows.push(ComplexWorkflow {
-                    name: "API Client Regeneration".to_string(),
-                    description: "Regenerate TypeScript API clients from OpenAPI spec".to_string(),
-                    trigger: "Backend API changes".to_string(),
-                    steps: vec![
-                        WorkflowStep {
-                            order: 1,
-                            action: "Ensure backend OpenAPI spec is updated".to_string(),
-                            files_involved: vec!["openapi.yaml".to_string()],
-                            commands: Vec::new(),
-                            notes: Vec::new(),
-                        },
-                        WorkflowStep {
-                            order: 2,
-                            action: "Run orval to regenerate clients".to_string(),
-                            files_involved: Vec::new(),
-                            commands: vec!["pnpm orval".to_string()],
-                            notes: vec!["Check for breaking type changes".to_string()],
-                        },
-                        WorkflowStep {
-                            order: 3,
-                            action: "Update affected components".to_string(),
-                            files_involved: vec!["src/**/*.tsx".to_string()],
-                            commands: Vec::new(),
-                            notes: vec![
-                                "TypeScript will show errors for breaking changes".to_string(),
-                            ],
-                        },
-                    ],
-                    gotchas: vec!["Never manually edit generated files".to_string()],
-                    automation_potential: 0.7,
-                });
-            }
-
-            if content.contains("\"react\"") {
-                constraints.gotchas.push(Gotcha {
-                    title: "State management boundaries".to_string(),
-                    description: "Server state vs client state handling".to_string(),
-                    when: "Adding new data fetching or state".to_string(),
-                    solution:
-                        "Use TanStack Query for server state, Context/useState for client state"
-                            .to_string(),
-                    related_files: vec!["src/hooks/".to_string(), "src/context/".to_string()],
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn extract_library_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-    ) -> Result<()> {
-        if self.project_root.join("src/lib.rs").exists() {
-            constraints.complex_workflows.push(ComplexWorkflow {
-                name: "Public API Change".to_string(),
-                description: "Process for modifying public API".to_string(),
-                trigger: "Need to change public function/type signatures".to_string(),
-                steps: vec![
-                    WorkflowStep {
-                        order: 1,
-                        action: "Check if change is breaking".to_string(),
-                        files_involved: vec!["src/lib.rs".to_string()],
-                        commands: Vec::new(),
-                        notes: vec!["Removing/renaming public items is breaking".to_string()],
-                    },
-                    WorkflowStep {
-                        order: 2,
-                        action: "Update CHANGELOG.md".to_string(),
-                        files_involved: vec!["CHANGELOG.md".to_string()],
-                        commands: Vec::new(),
-                        notes: vec!["Document what changed and why".to_string()],
-                    },
-                    WorkflowStep {
-                        order: 3,
-                        action: "Bump version appropriately".to_string(),
-                        files_involved: vec!["Cargo.toml".to_string()],
-                        commands: Vec::new(),
-                        notes: vec!["Breaking = major, Feature = minor, Fix = patch".to_string()],
-                    },
-                ],
-                gotchas: vec![
-                    "Consider deprecation before removal".to_string(),
-                    "Document migration path for breaking changes".to_string(),
-                ],
-                automation_potential: 0.4,
-            });
-
-            constraints.anti_patterns.push(AntiPattern {
-                name: "Leaking internal types".to_string(),
-                description: "Exposing internal implementation details in public API".to_string(),
-                why_bad: "Couples users to implementation, prevents refactoring".to_string(),
-                correct_approach: "Only expose necessary types, use pub(crate) for internals"
-                    .to_string(),
-                evidence: Vec::new(),
-                severity: Severity::Medium,
-            });
-        }
-
-        Ok(())
-    }
-
-    async fn extract_monorepo_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-    ) -> Result<()> {
-        constraints.hidden_dependencies.push(HiddenDependency {
-            source: "shared packages".to_string(),
-            target: "consumer apps".to_string(),
-            dependency_type: HiddenDepType::SharedState,
-            description: "Changes to shared packages affect all consumers".to_string(),
-            evidence: Vec::new(),
-            impact: "Test all consumers when changing shared code".to_string(),
-        });
-
-        constraints.complex_workflows.push(ComplexWorkflow {
-            name: "Cross-Project Update".to_string(),
-            description: "Coordinated update across multiple projects".to_string(),
-            trigger: "Shared type or interface changes".to_string(),
-            steps: vec![
-                WorkflowStep {
-                    order: 1,
-                    action: "Identify all affected projects".to_string(),
-                    files_involved: Vec::new(),
-                    commands: vec!["pnpm why <package>".to_string()],
-                    notes: Vec::new(),
-                },
-                WorkflowStep {
-                    order: 2,
-                    action: "Update shared package first".to_string(),
-                    files_involved: vec!["packages/*/".to_string()],
-                    commands: Vec::new(),
-                    notes: Vec::new(),
-                },
-                WorkflowStep {
-                    order: 3,
-                    action: "Update consumers in dependency order".to_string(),
-                    files_involved: vec!["apps/*/".to_string(), "services/*/".to_string()],
-                    commands: Vec::new(),
-                    notes: Vec::new(),
-                },
-                WorkflowStep {
-                    order: 4,
-                    action: "Run integration tests".to_string(),
-                    files_involved: Vec::new(),
-                    commands: vec!["pnpm test".to_string()],
-                    notes: Vec::new(),
-                },
-            ],
-            gotchas: vec![
-                "May require coordinated deployment".to_string(),
-                "Breaking changes need careful versioning".to_string(),
-            ],
-            automation_potential: 0.5,
-        });
-
-        Ok(())
-    }
-
-    async fn extract_common_constraints(
-        &self,
-        constraints: &mut ExtractedConstraints,
-        detection: &ProjectDetection,
-    ) -> Result<()> {
-        if self.project_root.join(".env.example").exists()
-            || self.project_root.join(".env.sample").exists()
-        {
-            constraints.gotchas.push(Gotcha {
-                title: "Environment variable management".to_string(),
-                description: "New env vars need documentation".to_string(),
-                when: "Adding new configuration via environment variables".to_string(),
-                solution: "Update .env.example with new variables and documentation".to_string(),
-                related_files: vec![".env.example".to_string(), ".env.sample".to_string()],
-            });
-        }
-
-        if self.project_root.join(".github/workflows").exists() {
-            constraints.hidden_dependencies.push(HiddenDependency {
-                source: "CI workflows".to_string(),
-                target: "Project structure".to_string(),
-                dependency_type: HiddenDepType::BuildTimeDependency,
-                description: "CI may assume certain paths/commands exist".to_string(),
-                evidence: Vec::new(),
-                impact: "Changes to project structure may break CI".to_string(),
-            });
-        }
-
-        let primary_lang = detection
-            .languages
-            .first()
-            .map(|l| l.language.as_str())
-            .unwrap_or("unknown");
-
-        match primary_lang {
-            "rust" => {
-                constraints.gotchas.push(Gotcha {
-                    title: "Feature flag interactions".to_string(),
-                    description: "Features may have unexpected interactions".to_string(),
-                    when: "Adding new feature flags or enabling combinations".to_string(),
-                    solution: "Test with various feature combinations, document dependencies"
-                        .to_string(),
-                    related_files: vec!["Cargo.toml".to_string()],
-                });
-            }
-            "typescript" | "javascript" => {
-                constraints.anti_patterns.push(AntiPattern {
-                    name: "Type assertions abuse".to_string(),
-                    description: "Using `as any` or `as unknown as T` to bypass type checking"
-                        .to_string(),
-                    why_bad: "Defeats purpose of TypeScript, hides bugs".to_string(),
-                    correct_approach: "Fix the underlying type issue or use proper type guards"
-                        .to_string(),
-                    evidence: Vec::new(),
-                    severity: Severity::Medium,
-                });
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-
-    async fn has_file_pattern(&self, pattern: &str) -> bool {
-        let clean_pattern = pattern.replace("**/*", "").replace("*", "");
-        self.check_pattern_exists(&self.project_root, &clean_pattern, 0)
-            .await
-    }
-
-    async fn check_pattern_exists(&self, dir: &Path, pattern: &str, depth: usize) -> bool {
-        if depth > 3 {
-            return false;
-        }
-
-        if let Ok(mut entries) = fs::read_dir(dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.contains(pattern) {
-                    return true;
-                }
-                if entry.path().is_dir()
-                    && !name.starts_with('.')
-                    && Box::pin(self.check_pattern_exists(&entry.path(), pattern, depth + 1)).await
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     async fn extract_with_llm(
         &self,
         detection: &ProjectDetection,
@@ -659,87 +266,93 @@ impl ConstraintExtractor {
     ) -> Result<ExtractedConstraints> {
         let prompt = self.build_extraction_prompt(detection, conventions).await?;
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "required": ["anti_patterns", "gotchas", "complex_workflows"],
-            "properties": {
-                "anti_patterns": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Name of the anti-pattern"},
-                            "description": {"type": "string", "description": "What the anti-pattern is"},
-                            "why_bad": {"type": "string", "description": "Why this is problematic"},
-                            "correct_approach": {"type": "string", "description": "What to do instead"},
-                            "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]}
-                        },
-                        "required": ["name", "description", "why_bad", "correct_approach"]
-                    }
-                },
-                "gotchas": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "Short title for the gotcha"},
-                            "description": {"type": "string", "description": "Detailed description"},
-                            "when": {"type": "string", "description": "When this gotcha applies"},
-                            "solution": {"type": "string", "description": "How to handle it"},
-                            "related_files": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["title", "description", "solution"]
-                    }
-                },
-                "complex_workflows": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string", "description": "Workflow name"},
-                            "description": {"type": "string", "description": "What the workflow does"},
-                            "trigger": {"type": "string", "description": "When to use this workflow"},
-                            "steps": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "order": {"type": "integer"},
-                                        "action": {"type": "string"},
-                                        "files_involved": {"type": "array", "items": {"type": "string"}},
-                                        "commands": {"type": "array", "items": {"type": "string"}}
-                                    }
-                                }
-                            },
-                            "gotchas": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["name", "trigger", "steps"]
-                    }
-                },
-                "hidden_dependencies": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "source": {"type": "string"},
-                            "target": {"type": "string"},
-                            "description": {"type": "string"},
-                            "impact": {"type": "string"}
-                        }
-                    }
-                }
-            }
-        });
+        let schema = generate_schema::<ConstraintExtractionOutput>();
 
         let response = self.provider.generate(&prompt, &schema).await?;
+        let output: ConstraintExtractionOutput =
+            deserialize_llm_response(&response.content, "constraint_extraction")?;
 
-        let content_str = response
-            .content
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| serde_json::to_string(&response.content).unwrap_or_default());
+        Ok(self.convert_output(output))
+    }
 
-        self.parse_llm_response(&content_str)
+    fn convert_output(&self, output: ConstraintExtractionOutput) -> ExtractedConstraints {
+        let anti_patterns = output
+            .anti_patterns
+            .into_iter()
+            .filter(|ap| !ap.name.is_empty())
+            .map(|ap| AntiPattern {
+                name: ap.name,
+                description: ap.description,
+                why_bad: ap.why_bad,
+                correct_approach: ap.correct_approach,
+                evidence: Vec::new(),
+                severity: match ap.severity.as_str() {
+                    "critical" => Severity::Critical,
+                    "high" => Severity::High,
+                    "low" => Severity::Low,
+                    _ => Severity::Medium,
+                },
+            })
+            .collect();
+
+        let gotchas = output
+            .gotchas
+            .into_iter()
+            .filter(|g| !g.title.is_empty())
+            .map(|g| Gotcha {
+                title: g.title,
+                description: g.description,
+                when: g.when,
+                solution: g.solution,
+                related_files: g.related_files,
+            })
+            .collect();
+
+        let complex_workflows = output
+            .complex_workflows
+            .into_iter()
+            .filter(|wf| !wf.name.is_empty())
+            .map(|wf| ComplexWorkflow {
+                name: wf.name,
+                description: wf.description,
+                trigger: wf.trigger,
+                steps: wf
+                    .steps
+                    .into_iter()
+                    .map(|s| WorkflowStep {
+                        order: s.order,
+                        action: s.action,
+                        files_involved: s.files_involved,
+                        commands: s.commands,
+                        notes: Vec::new(),
+                    })
+                    .collect(),
+                gotchas: wf.gotchas,
+                automation_potential: 0.7,
+            })
+            .collect();
+
+        let hidden_dependencies = output
+            .hidden_dependencies
+            .into_iter()
+            .filter(|hd| !hd.source.is_empty() && !hd.target.is_empty())
+            .map(|hd| HiddenDependency {
+                source: hd.source,
+                target: hd.target,
+                dependency_type: HiddenDepType::RuntimeDependency,
+                description: hd.description,
+                evidence: Vec::new(),
+                impact: hd.impact,
+            })
+            .collect();
+
+        ExtractedConstraints {
+            anti_patterns,
+            hidden_dependencies,
+            complex_workflows,
+            implicit_rules: Vec::new(),
+            gotchas,
+        }
     }
 
     async fn build_extraction_prompt(
@@ -914,277 +527,6 @@ IMPORTANT:
         Ok(())
     }
 
-    fn parse_llm_response(&self, content: &str) -> Result<ExtractedConstraints> {
-        let mut constraints = ExtractedConstraints::default();
-
-        // Try JSON parsing first
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
-            // Parse anti-patterns
-            if let Some(anti_patterns) = json.get("anti_patterns").and_then(|v| v.as_array()) {
-                for ap in anti_patterns {
-                    let name = ap.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                    if !name.is_empty() {
-                        constraints.anti_patterns.push(AntiPattern {
-                            name: name.to_string(),
-                            description: ap
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            why_bad: ap
-                                .get("why_bad")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            correct_approach: ap
-                                .get("correct_approach")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            evidence: Vec::new(),
-                            severity: match ap
-                                .get("severity")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("medium")
-                            {
-                                "critical" => Severity::Critical,
-                                "high" => Severity::High,
-                                "low" => Severity::Low,
-                                _ => Severity::Medium,
-                            },
-                        });
-                    }
-                }
-            }
-
-            // Parse gotchas
-            if let Some(gotchas) = json.get("gotchas").and_then(|v| v.as_array()) {
-                for g in gotchas {
-                    let title = g.get("title").and_then(|v| v.as_str()).unwrap_or_default();
-                    if !title.is_empty() {
-                        constraints.gotchas.push(Gotcha {
-                            title: title.to_string(),
-                            description: g
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            when: g
-                                .get("when")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            solution: g
-                                .get("solution")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            related_files: g
-                                .get("related_files")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        });
-                    }
-                }
-            }
-
-            // Parse complex workflows
-            if let Some(workflows) = json.get("complex_workflows").and_then(|v| v.as_array()) {
-                for wf in workflows {
-                    let name = wf.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                    if !name.is_empty() {
-                        let steps: Vec<WorkflowStep> = wf
-                            .get("steps")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .map(|s| WorkflowStep {
-                                        order: s.get("order").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32,
-                                        action: s
-                                            .get("action")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string(),
-                                        files_involved: s
-                                            .get("files_involved")
-                                            .and_then(|v| v.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|v| v.as_str().map(String::from))
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        commands: s
-                                            .get("commands")
-                                            .and_then(|v| v.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|v| v.as_str().map(String::from))
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        notes: Vec::new(),
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        constraints.complex_workflows.push(ComplexWorkflow {
-                            name: name.to_string(),
-                            description: wf
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            trigger: wf
-                                .get("trigger")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            steps,
-                            gotchas: wf
-                                .get("gotchas")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                            automation_potential: 0.7,
-                        });
-                    }
-                }
-            }
-
-            // Parse hidden dependencies
-            if let Some(deps) = json.get("hidden_dependencies").and_then(|v| v.as_array()) {
-                for dep in deps {
-                    let source = dep
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let target = dep
-                        .get("target")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    if !source.is_empty() && !target.is_empty() {
-                        constraints.hidden_dependencies.push(HiddenDependency {
-                            source: source.to_string(),
-                            target: target.to_string(),
-                            dependency_type: HiddenDepType::RuntimeDependency,
-                            description: dep
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            evidence: Vec::new(),
-                            impact: dep
-                                .get("impact")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                        });
-                    }
-                }
-            }
-
-            return Ok(constraints);
-        }
-
-        // Fallback: try to extract JSON from markdown code blocks
-        if let Some(json_start) = content.find("```json") {
-            let after_marker = &content[json_start + 7..];
-            if let Some(json_end) = after_marker.find("```") {
-                let json_content = after_marker[..json_end].trim();
-                if let Ok(parsed) = self.parse_llm_response(json_content) {
-                    return Ok(parsed);
-                }
-            }
-        }
-
-        // Fallback: section-based extraction for non-JSON responses
-        if let Some(section) = Self::extract_section(content, "Anti-patterns") {
-            for block in section.split("\n- ").skip(1) {
-                if let Some(name) = block.lines().next() {
-                    let name = name.trim_start_matches("- ").trim();
-                    if !name.is_empty() {
-                        constraints.anti_patterns.push(AntiPattern {
-                            name: name.split(':').next().unwrap_or(name).to_string(),
-                            description: name.to_string(),
-                            why_bad: Self::extract_field(block, "Why bad").unwrap_or_default(),
-                            correct_approach: Self::extract_field(block, "Instead")
-                                .unwrap_or_default(),
-                            evidence: Vec::new(),
-                            severity: Severity::Medium,
-                        });
-                    }
-                }
-            }
-        }
-
-        if let Some(section) = Self::extract_section(content, "Gotchas") {
-            for block in section.split("\n- ").skip(1) {
-                if let Some(title) = block.lines().next() {
-                    let title = title.trim_start_matches("- ").trim();
-                    if !title.is_empty() {
-                        constraints.gotchas.push(Gotcha {
-                            title: title.split(':').next().unwrap_or(title).to_string(),
-                            description: title.to_string(),
-                            when: Self::extract_field(block, "when").unwrap_or_default(),
-                            solution: Self::extract_field(block, "Solution").unwrap_or_default(),
-                            related_files: Vec::new(),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(constraints)
-    }
-
-    fn extract_section(content: &str, section: &str) -> Option<String> {
-        let patterns = [
-            format!("### {section}"),
-            format!("## {section}"),
-            format!("**{section}**"),
-        ];
-
-        for pattern in patterns {
-            if let Some(start) = content.find(&pattern) {
-                let after = &content[start + pattern.len()..];
-                let end = after
-                    .find("\n### ")
-                    .or_else(|| after.find("\n## "))
-                    .unwrap_or(after.len());
-                return Some(after[..end].trim().to_string());
-            }
-        }
-        None
-    }
-
-    fn extract_field(block: &str, field: &str) -> Option<String> {
-        for line in block.lines() {
-            let lower = line.to_lowercase();
-            if lower.contains(&field.to_lowercase()) {
-                return Some(
-                    line.split(':')
-                        .skip(1)
-                        .collect::<Vec<_>>()
-                        .join(":")
-                        .trim()
-                        .to_string(),
-                );
-            }
-        }
-        None
-    }
 }
 
 pub async fn run(
@@ -1206,6 +548,126 @@ pub async fn extract(
     run(project_root, provider, detection, &conventions).await
 }
 
+/// Check if a file path indicates a test file.
+/// Uses common test file patterns across languages to avoid false positives.
+fn is_test_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+
+    // Directory-based patterns (tests/, test/, __tests__/, spec/)
+    // Check both path starts and contains to handle various formats
+    if lower.starts_with("tests/")
+        || lower.starts_with("test/")
+        || lower.starts_with("__tests__/")
+        || lower.starts_with("spec/")
+        || lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.contains("/__tests__/")
+        || lower.contains("/spec/")
+    {
+        return true;
+    }
+
+    // File naming patterns (more precise than just "contains test")
+    // _test.rs, .test.ts, _spec.rb, etc.
+    lower.ends_with("_test.rs")
+        || lower.ends_with("_test.go")
+        || lower.ends_with("_test.py")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".test.js")
+        || lower.ends_with(".test.jsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.tsx")
+        || lower.ends_with(".spec.js")
+        || lower.ends_with(".spec.rb")
+        || lower.ends_with("_spec.rb")
+        || lower.contains("/test_")  // Python test files
+        || lower.ends_with("test.java")  // Java test files
+        || lower.ends_with("test.kt")    // Kotlin test files
+}
+
+// =============================================================================
+// LLM OUTPUT TYPES (for schema generation)
+// =============================================================================
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct ConstraintExtractionOutput {
+    #[serde(default)]
+    anti_patterns: Vec<AntiPatternOutput>,
+    #[serde(default)]
+    gotchas: Vec<GotchaOutput>,
+    #[serde(default)]
+    complex_workflows: Vec<WorkflowOutput>,
+    #[serde(default)]
+    hidden_dependencies: Vec<HiddenDepOutput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AntiPatternOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    why_bad: String,
+    #[serde(default)]
+    correct_approach: String,
+    #[serde(default)]
+    severity: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct GotchaOutput {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    when: String,
+    #[serde(default)]
+    solution: String,
+    #[serde(default)]
+    related_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct WorkflowOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    trigger: String,
+    #[serde(default)]
+    steps: Vec<StepOutput>,
+    #[serde(default)]
+    gotchas: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct StepOutput {
+    #[serde(default)]
+    order: u32,
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    files_involved: Vec<String>,
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct HiddenDepOutput {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    impact: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,5 +680,21 @@ mod tests {
     #[test]
     fn test_hidden_dep_type() {
         assert_eq!(HiddenDepType::SharedState, HiddenDepType::SharedState);
+    }
+
+    #[test]
+    fn test_is_test_file() {
+        // Positive cases
+        assert!(is_test_file("src/tests/unit.rs"));
+        assert!(is_test_file("tests/integration.rs"));
+        assert!(is_test_file("src/__tests__/component.test.ts"));
+        assert!(is_test_file("src/utils_test.go"));
+        assert!(is_test_file("spec/models/user_spec.rb"));
+
+        // Negative cases - avoid false positives
+        assert!(!is_test_file("src/contest/main.rs"));
+        assert!(!is_test_file("src/attestation.rs"));
+        assert!(!is_test_file("src/testimony/service.ts"));
+        assert!(!is_test_file("src/latest_version.rs"));
     }
 }

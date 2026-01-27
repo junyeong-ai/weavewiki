@@ -96,32 +96,6 @@ impl QualityRange {
         )
     }
 
-    /// Classify quality score using custom thresholds
-    ///
-    /// # ADVISORY HEURISTIC - ARTIFICIAL BOUNDARIES
-    ///
-    /// This classification creates DISCRETE buckets from CONTINUOUS quality scores.
-    /// The thresholds create artificial boundaries that may not reflect meaningful
-    /// quality differences:
-    ///
-    /// - A score of 0.59 → "Medium" and 0.61 → "High" are nearly identical
-    /// - Strategy recommendations based on buckets may treat them very differently
-    /// - Cross-session learning groups patterns by bucket, potentially missing nuances
-    ///
-    /// These thresholds are configurable via `LearningConfig::quality_thresholds`,
-    /// but the fundamental boundary problem remains regardless of threshold values.
-    ///
-    /// ## When buckets are useful:
-    /// - Grouping similar patterns for strategy recommendation
-    /// - Reducing noise in cross-session learning
-    /// - Coarse-grained progress tracking
-    ///
-    /// ## When buckets mislead:
-    /// - Fine-grained quality comparisons (0.79 vs 0.81)
-    /// - Determining if refinement succeeded (check raw score delta instead)
-    /// - Deciding whether to continue iteration (use continuous score + trend)
-    ///
-    /// LLM-based decisions should use raw scores when precision matters.
     pub fn from_score_with_thresholds(score: f32, thresholds: &[f32; 4]) -> Self {
         match score {
             s if s < thresholds[0] => Self::VeryLow,
@@ -294,10 +268,16 @@ impl LearningHistory {
 
         if let Some(record) = self.failing_patterns.get(&pattern) {
             // Skip if strategy has failed 3+ times for this pattern
+            // Threshold rationale: 3 failures indicates fundamental incompatibility
+            // between strategy and issue pattern. Fewer retries may miss transient
+            // failures (LLM variance), more wastes tokens on hopeless cases.
+            // This is an empirically-tuned default; consider making configurable
+            // if different domains show different optimal thresholds.
+            const MAX_STRATEGY_FAILURES: usize = 3;
             if record
                 .failed_strategies
                 .contains(&strategy_name.to_string())
-                && record.failure_count >= 3
+                && record.failure_count >= MAX_STRATEGY_FAILURES
             {
                 tracing::debug!(
                     strategy = %strategy_name,

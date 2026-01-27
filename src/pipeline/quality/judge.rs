@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::Result;
 use crate::ai::LlmProvider;
-use crate::types::{Agent, ContentTier, Rule, Severity, Skill};
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
+use crate::types::{Agent, ClaudegenError, ContentTier, Rule, Severity, Skill};
 
 #[derive(Debug, Clone)]
 pub struct JudgeConfig {
@@ -178,117 +180,53 @@ impl LlmJudge {
     }
 
     fn schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "tier": { "type": "integer", "minimum": 1, "maximum": 3 },
-                "quality_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-                "issues": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "code": { "type": "string" },
-                            "message": { "type": "string" },
-                            "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
-                            "evidence": { "type": "array", "items": { "type": "string" } }
-                        }
-                    }
-                },
-                "suggestions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "action": { "type": "string" },
-                            "rationale": { "type": "string" },
-                            "priority": { "type": "string", "enum": ["low", "medium", "high"] }
-                        }
-                    }
-                }
-            },
-            "required": ["tier", "quality_score", "issues", "suggestions"]
-        })
+        generate_schema::<JudgmentOutput>()
     }
 
     fn parse_response(&self, content: &str) -> Result<JudgmentResult> {
-        let parsed: serde_json::Value = serde_json::from_str(content).unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                content_preview = %content.chars().take(200).collect::<String>(),
-                "Failed to parse LLM response as JSON, using defaults"
-            );
-            json!({
-                "tier": 1,
-                "quality_score": 0.0,
-                "issues": [],
-                "suggestions": []
-            })
-        });
+        let value: serde_json::Value = serde_json::from_str(content)
+            .map_err(|e| ClaudegenError::LlmApi(format!("[judge] JSON parse failed: {e}")))?;
+        let output: JudgmentOutput = deserialize_llm_response(&value, "judge")?;
 
-        let tier_num = parsed.get("tier").and_then(|v| v.as_i64()).unwrap_or(1) as u8;
-        let tier = match tier_num {
+        let tier = match output.tier {
             1 => ContentTier::Tier1Generic,
             2 => ContentTier::Tier2Convention,
             _ => ContentTier::Tier3Constraint,
         };
 
-        let quality_score = parsed
-            .get("quality_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as f32;
-
-        let issues: Vec<QualityIssue> = parsed
-            .get("issues")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|i| {
-                        Some(QualityIssue {
-                            code: i.get("code")?.as_str()?.to_string(),
-                            message: i.get("message")?.as_str()?.to_string(),
-                            severity: match i.get("severity")?.as_str()? {
-                                "critical" => IssueSeverity::Critical,
-                                "major" => IssueSeverity::Major,
-                                _ => IssueSeverity::Minor,
-                            },
-                            evidence: i
-                                .get("evidence")
-                                .and_then(|e| e.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        })
-                    })
-                    .collect()
+        let issues = output
+            .issues
+            .into_iter()
+            .filter(|i| !i.code.is_empty())
+            .map(|i| QualityIssue {
+                code: i.code,
+                message: i.message,
+                severity: match i.severity.as_str() {
+                    "critical" => IssueSeverity::Critical,
+                    "major" => IssueSeverity::Major,
+                    _ => IssueSeverity::Minor,
+                },
+                evidence: i.evidence,
             })
-            .unwrap_or_default();
+            .collect();
 
-        let suggestions: Vec<Suggestion> = parsed
-            .get("suggestions")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|i| {
-                        Some(Suggestion {
-                            action: i.get("action")?.as_str()?.to_string(),
-                            rationale: i.get("rationale")?.as_str()?.to_string(),
-                            priority: match i.get("priority")?.as_str()? {
-                                "high" => Severity::High,
-                                "medium" => Severity::Medium,
-                                _ => Severity::Low,
-                            },
-                        })
-                    })
-                    .collect()
+        let suggestions = output
+            .suggestions
+            .into_iter()
+            .filter(|s| !s.action.is_empty())
+            .map(|s| Suggestion {
+                action: s.action,
+                rationale: s.rationale,
+                priority: match s.priority.as_str() {
+                    "high" => Severity::High,
+                    "medium" => Severity::Medium,
+                    _ => Severity::Low,
+                },
             })
-            .unwrap_or_default();
+            .collect();
 
         Ok(JudgmentResult {
-            overall_score: quality_score,
+            overall_score: output.quality_score,
             tier,
             issues,
             suggestions,
@@ -329,20 +267,11 @@ OUTPUT: Single integer 1, 2, or 3"#,
                 .collect::<String>()
         );
 
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "tier": { "type": "integer", "minimum": 1, "maximum": 3 }
-            },
-            "required": ["tier"]
-        });
+        let schema = generate_schema::<TierOutput>();
 
         let response = self.provider.generate(&prompt, &schema).await?;
-        let tier_num = response
-            .content
-            .get("tier")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(2) as u8;
+        let output: TierOutput = deserialize_llm_response(&response.content, "tier_validation")?;
+        let tier_num = output.tier;
 
         let tier = match tier_num {
             1 => ContentTier::Tier1Generic,
@@ -364,7 +293,7 @@ pub struct Artifacts {
     pub rules: Vec<Rule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct JudgmentResult {
     pub overall_score: f32,
     pub tier: ContentTier,
@@ -392,7 +321,7 @@ impl JudgmentResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct QualityIssue {
     pub code: String,
     pub message: String,
@@ -400,7 +329,7 @@ pub struct QualityIssue {
     pub evidence: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueSeverity {
     Critical,
@@ -408,11 +337,51 @@ pub enum IssueSeverity {
     Minor,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Suggestion {
     pub action: String,
     pub rationale: String,
     pub priority: Severity,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct JudgmentOutput {
+    #[serde(default)]
+    tier: u8,
+    #[serde(default)]
+    quality_score: f32,
+    #[serde(default)]
+    issues: Vec<IssueOutput>,
+    #[serde(default)]
+    suggestions: Vec<SuggestionOutput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct IssueOutput {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct SuggestionOutput {
+    #[serde(default)]
+    action: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    priority: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct TierOutput {
+    #[serde(default)]
+    tier: u8,
 }
 
 #[cfg(test)]

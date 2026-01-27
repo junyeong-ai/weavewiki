@@ -11,11 +11,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::ai::LlmProvider;
+use crate::ai::response::generate_schema;
 use crate::config::DeepReviewConfig;
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::pipeline::file_reference;
@@ -198,18 +200,25 @@ pub struct ReviewArtifacts {
     pub rules: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 struct LlmReviewResponse {
+    #[serde(default)]
     passed: bool,
+    #[serde(default)]
     score: f32,
+    #[serde(default)]
     issues: Vec<LlmIssue>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 struct LlmIssue {
+    #[serde(default)]
     artifact: String,
+    #[serde(default)]
     severity: String,
+    #[serde(default)]
     message: String,
+    #[serde(default)]
     suggestion: Option<String>,
 }
 
@@ -324,13 +333,6 @@ impl DeepReviewEngine {
         let evidence = self.validate_evidence(artifacts);
         all_issues.extend(evidence.issues.clone());
 
-        let tier1 = if self.config.reject_tier1 {
-            self.check_tier1(artifacts)
-        } else {
-            CheckResult::pass()
-        };
-        all_issues.extend(tier1.issues.clone());
-
         let format = self.validate_format(artifacts);
         all_issues.extend(format.issues.clone());
 
@@ -344,7 +346,7 @@ impl DeepReviewEngine {
         let checks = DeepReviewChecks {
             semantic_quality: semantic,
             evidence_valid: evidence,
-            tier1_free: tier1,
+            tier1_free: CheckResult::pass(),
             cross_artifact_consistent: cross,
             format_compliant: format,
         };
@@ -439,12 +441,16 @@ impl DeepReviewEngine {
         }
     }
 
-    fn check_tier1(&self, _artifacts: &ReviewArtifacts) -> CheckResult {
-        // Tier classification is handled by LLM in SemanticQuality check
-        // This check is kept for backward compatibility but always passes
-        CheckResult::pass()
-    }
-
+    /// Validate artifact format using simple heuristics.
+    ///
+    /// Note: This is a quick syntactic check, not full YAML parsing.
+    /// Limitations:
+    /// - `starts_with("---")` may match non-YAML content (e.g., markdown horizontal rules)
+    /// - `contains("name:")` doesn't verify field is in frontmatter section
+    /// - Doesn't validate YAML syntax or required field completeness
+    ///
+    /// For strict validation, use the actual YAML parser in artifact serialization.
+    /// This check catches obvious formatting errors before LLM semantic review.
     fn validate_format(&self, artifacts: &ReviewArtifacts) -> CheckResult {
         let mut issues = Vec::new();
 
@@ -726,26 +732,7 @@ Determine if artifacts are logically consistent based on your analysis of the re
     }
 
     fn review_response_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "passed": { "type": "boolean" },
-                "score": { "type": "number" },
-                "issues": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "artifact": { "type": "string" },
-                            "severity": { "type": "string" },
-                            "message": { "type": "string" },
-                            "suggestion": { "type": "string" }
-                        }
-                    }
-                }
-            },
-            "required": ["passed", "score", "issues"]
-        })
+        generate_schema::<LlmReviewResponse>()
     }
 
     fn parse_llm_review_response(

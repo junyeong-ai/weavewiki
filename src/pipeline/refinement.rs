@@ -9,6 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
 use crate::ai::{LlmProvider, with_timeout};
 use crate::config::Config;
 use crate::types::{Agent, DiagnosticLevel, Result, Rule, Skill};
@@ -31,6 +36,26 @@ use super::strategy::{
     StrategyRotator,
 };
 use super::validation::{CrossValidationResult, TierFilterResult};
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct SkillRegenerationOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AgentRegenerationOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    prompt: String,
+}
 
 /// Artifact item type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +141,7 @@ pub enum DetectedIssue {
     },
     PartialModuleCoverage {
         module_name: String,
-        coverage: f32,
+        reference_count: usize,
     },
     /// Custom issue detected by LLM that doesn't fit predefined categories
     Other {
@@ -186,13 +211,10 @@ impl DetectedIssue {
             ),
             Self::PartialModuleCoverage {
                 module_name,
-                coverage,
+                reference_count,
             } => (
                 DiagnosticLevel::Warning,
-                format!(
-                    "Partial coverage: '{module_name}' at {:.0}%",
-                    coverage * 100.0
-                ),
+                format!("Partial coverage: '{module_name}' has {reference_count} reference(s)"),
             ),
             Self::Other { kind, description } => {
                 (DiagnosticLevel::Warning, format!("{kind}: {description}"))
@@ -246,6 +268,7 @@ struct RefinementLoopConfig {
     quality_improving_delta: f32,
     high_uncertainty_threshold: f32,
     target_quality: f32,
+    quality_floor: f32,
     stagnation_patience: usize,
     stagnation_threshold: f32,
     require_all_dimensions: bool,
@@ -263,14 +286,14 @@ impl RefinementLoopConfig {
     fn from_config(config: &Config) -> Self {
         let refinement = config.refinement();
         let adaptive = &refinement.adaptive_iteration;
-        let target_quality = config.quality().target_score;
         Self {
             base_iterations: adaptive.base_iterations,
             max_extension: adaptive.max_extension,
             min_iterations_for_exit: adaptive.min_iterations_for_exit,
             quality_improving_delta: adaptive.quality_improving_delta,
             high_uncertainty_threshold: adaptive.high_uncertainty_threshold,
-            target_quality,
+            target_quality: config.quality().target_quality,
+            quality_floor: config.convergence.quality_floor,
             stagnation_patience: refinement.stagnation_patience,
             stagnation_threshold: refinement.stagnation_threshold,
             require_all_dimensions: refinement.require_all_dimensions,
@@ -392,7 +415,7 @@ impl RefinementEngine {
             &config.refinement().enabled_strategies,
         );
         let learning_history = LearningHistory::new();
-        let target_quality = config.quality().target_score;
+        let target_quality = config.quality().target_quality;
         let feedback_aggregator = FeedbackAggregator::new(target_quality);
         let judge = LlmJudge::new(Arc::clone(&provider));
 
@@ -419,7 +442,7 @@ impl RefinementEngine {
             Arc::clone(&provider),
             &config.refinement().enabled_strategies,
         );
-        let target_quality = config.quality().target_score;
+        let target_quality = config.quality().target_quality;
         let feedback_aggregator = FeedbackAggregator::new(target_quality);
         let judge = LlmJudge::new(Arc::clone(&provider));
 
@@ -813,12 +836,10 @@ impl RefinementEngine {
 
             thinking.record_quality(combined_quality);
 
-            // Phase 4: Rollback logic
             if cfg.enable_rollback {
-                const SNAPSHOT_MIN_IMPROVEMENT: f32 = 0.02;
                 let should_save = match &state.best_state {
                     None => true,
-                    Some(s) => combined_quality >= s.quality + SNAPSHOT_MIN_IMPROVEMENT,
+                    Some(s) => combined_quality >= s.quality + cfg.quality_improving_delta,
                 };
 
                 if should_save {
@@ -904,7 +925,8 @@ impl RefinementEngine {
             );
 
             let convergence_checker =
-                QualityAssessor::new(cfg.target_quality, cfg.require_all_dimensions);
+                QualityAssessor::new(cfg.target_quality, cfg.require_all_dimensions)
+                    .with_quality_floor(cfg.quality_floor);
             let termination_decision = convergence_checker.check_with_thinking(
                 combined_quality,
                 &dimensions_for_check,
@@ -1456,30 +1478,9 @@ impl RefinementEngine {
                 IssueSeverity::Minor => DiagnosticLevel::Info,
             };
 
-            let issue_kind = if quality_issue.code.contains("GENERIC")
-                || quality_issue.code.contains("TIER1")
-            {
-                DetectedIssue::TooGeneric {
-                    description: quality_issue.message.clone(),
-                }
-            } else if quality_issue.code.contains("EVIDENCE") || quality_issue.code.contains("REF")
-            {
-                DetectedIssue::WeakEvidence {
-                    description: quality_issue.message.clone(),
-                }
-            } else if quality_issue.code.contains("REDUNDANT") {
-                DetectedIssue::Redundant {
-                    description: quality_issue.message.clone(),
-                }
-            } else if quality_issue.code.contains("SHALLOW") || quality_issue.code.contains("SHORT")
-            {
-                DetectedIssue::Shallow {
-                    description: quality_issue.message.clone(),
-                }
-            } else {
-                DetectedIssue::TooGeneric {
-                    description: quality_issue.message.clone(),
-                }
+            let issue_kind = DetectedIssue::Other {
+                kind: quality_issue.code.clone(),
+                description: quality_issue.message.clone(),
             };
 
             issues.push(DetectedArtifactIssue {
@@ -1519,13 +1520,13 @@ impl RefinementEngine {
 
         // Add issues for partially covered modules
         for partial in &structural.coverage_report.partially_covered {
-            if partial.coverage_score < 0.5 {
+            if partial.reference_count < 2 {
                 issues.push(DetectedArtifactIssue {
                     item_type: ItemType::ClaudeMd,
                     item_name: format!("module:{}", partial.name),
                     issue: DetectedIssue::PartialModuleCoverage {
                         module_name: partial.name.clone(),
-                        coverage: partial.coverage_score,
+                        reference_count: partial.reference_count,
                     },
                     severity: DiagnosticLevel::Warning,
                 });
@@ -1836,40 +1837,34 @@ Return JSON: {{"name": "...", "description": "...", "body": "..."}}"###,
             file_context = file_context,
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "description": {"type": "string"},
-                "body": {"type": "string"}
-            },
-            "required": ["name", "description", "body"]
-        });
+        let schema = generate_schema::<SkillRegenerationOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                let skill_name = response
-                    .content
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(name);
-                let desc = response
-                    .content
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let body = response
-                    .content
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let output: SkillRegenerationOutput =
+                    match deserialize_llm_response(&response.content, "skill_regeneration") {
+                        Ok(o) => o,
+                        Err(e) => {
+                            tracing::error!(skill = name, error = %e, "Parse failed");
+                            return None;
+                        }
+                    };
 
-                if body.len() >= 100 {
-                    Some(Skill::new(skill_name, desc, body.to_string()).with_user_invocable(true))
+                let skill_name = if output.name.is_empty() {
+                    name
+                } else {
+                    &output.name
+                };
+
+                if output.body.len() >= 100 {
+                    Some(
+                        Skill::new(skill_name, &output.description, output.body)
+                            .with_user_invocable(true),
+                    )
                 } else {
                     tracing::warn!(
                         skill = name,
-                        body_len = body.len(),
+                        body_len = output.body.len(),
                         "Generated skill too short"
                     );
                     None
@@ -1905,40 +1900,36 @@ Return JSON: {{"name": "...", "description": "...", "prompt": "..."}}"###,
             file_context = file_context,
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "description": {"type": "string"},
-                "prompt": {"type": "string"}
-            },
-            "required": ["name", "description", "prompt"]
-        });
+        let schema = generate_schema::<AgentRegenerationOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                let agent_name = response
-                    .content
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(name);
-                let description = response
-                    .content
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(name);
-                let prompt_text = response
-                    .content
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let output: AgentRegenerationOutput =
+                    match deserialize_llm_response(&response.content, "agent_regeneration") {
+                        Ok(o) => o,
+                        Err(e) => {
+                            tracing::error!(agent = name, error = %e, "Parse failed");
+                            return None;
+                        }
+                    };
 
-                if prompt_text.len() >= 100 {
-                    Some(Agent::new(agent_name, description, prompt_text.to_string()))
+                let agent_name = if output.name.is_empty() {
+                    name
+                } else {
+                    &output.name
+                };
+                let description = if output.description.is_empty() {
+                    name
+                } else {
+                    &output.description
+                };
+
+                if output.prompt.len() >= 100 {
+                    Some(Agent::new(agent_name, description, output.prompt))
                 } else {
                     tracing::warn!(
                         agent = name,
-                        prompt_len = prompt_text.len(),
+                        prompt_len = output.prompt.len(),
                         "Generated agent too short"
                     );
                     None

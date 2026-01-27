@@ -173,60 +173,8 @@ impl Default for GenerationQualityThresholds {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct InferredConventions {
-    pub naming: NamingConventions,
-    pub architecture: ArchitectureConventions,
-    pub testing: TestingConventions,
-    pub documentation: DocumentationConventions,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct NamingConventions {
-    pub file_naming: String,
-    pub function_naming: String,
-    pub type_naming: String,
-    pub module_naming: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ArchitectureConventions {
-    pub pattern_name: String,
-    pub layer_structure: Vec<String>,
-    pub module_boundaries: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct TestingConventions {
-    pub test_location: String,
-    pub naming_pattern: String,
-    pub framework: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DocumentationConventions {
-    pub style: String,
-    pub required_sections: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ProjectDetection {
-    pub primary_type: ProjectType,
-    pub languages: Vec<LanguageInfo>,
-    pub frameworks: Vec<String>,
-    pub build_tools: Vec<String>,
-}
-
-impl ProjectDetection {
-    pub fn new(primary_type: ProjectType) -> Self {
-        Self {
-            primary_type,
-            languages: Vec::new(),
-            frameworks: Vec::new(),
-            build_tools: Vec::new(),
-        }
-    }
-}
+// NOTE: Convention types are defined in pipeline::phases::convention_inference
+// NOTE: ProjectDetection is defined in pipeline::phases::project_detection
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProjectType {

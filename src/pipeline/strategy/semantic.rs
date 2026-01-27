@@ -3,27 +3,26 @@
 //! Refines artifacts using semantic understanding and source insights.
 //! Uses full GenerationContext to preserve original intent while improving quality.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::ai::LlmProvider;
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
 use crate::types::{Agent, Result, Skill};
 
 use super::{
     IssueKind, RefinementStrategy, StrategyContext, StrategyResult, calculate_validated_quality,
 };
 
-/// JSON schema for enhanced body response
-static ENHANCED_BODY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "enhanced_body": {"type": "string"}
-        },
-        "required": ["enhanced_body"]
-    })
-});
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct EnhancedBodyOutput {
+    #[serde(default)]
+    enhanced_body: String,
+}
 
 pub struct SemanticStrategy {
     provider: Arc<dyn LlmProvider>,
@@ -125,21 +124,19 @@ impl RefinementStrategy for SemanticStrategy {
             context,
         );
 
-        let schema = &*ENHANCED_BODY_SCHEMA;
+        let schema = generate_schema::<EnhancedBodyOutput>();
 
-        match self.provider.generate(&prompt, schema).await {
+        match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                if let Some(body) = response
-                    .content
-                    .get("enhanced_body")
-                    .and_then(|v| v.as_str())
-                {
-                    let new_score = calculate_validated_quality(body, context.file_registry);
+                let output: EnhancedBodyOutput =
+                    deserialize_llm_response(&response.content, "skill_enhancement")?;
+
+                if !output.enhanced_body.is_empty() {
+                    let new_score = calculate_validated_quality(&output.enhanced_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if quality improves by meaningful amount
                     if new_score > old_score + acceptance_delta {
-                        skill.body = body.to_string();
+                        skill.body = output.enhanced_body;
                         return Ok(StrategyResult {
                             success: true,
                             quality_delta: new_score - old_score,
@@ -175,21 +172,19 @@ impl RefinementStrategy for SemanticStrategy {
             context,
         );
 
-        let schema = &*ENHANCED_BODY_SCHEMA;
+        let schema = generate_schema::<EnhancedBodyOutput>();
 
-        match self.provider.generate(&prompt, schema).await {
+        match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                if let Some(body) = response
-                    .content
-                    .get("enhanced_body")
-                    .and_then(|v| v.as_str())
-                {
-                    let new_score = calculate_validated_quality(body, context.file_registry);
+                let output: EnhancedBodyOutput =
+                    deserialize_llm_response(&response.content, "agent_enhancement")?;
+
+                if !output.enhanced_body.is_empty() {
+                    let new_score = calculate_validated_quality(&output.enhanced_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if quality improves by meaningful amount
                     if new_score > old_score + acceptance_delta {
-                        agent.prompt = body.to_string();
+                        agent.prompt = output.enhanced_body;
                         return Ok(StrategyResult {
                             success: true,
                             quality_delta: new_score - old_score,

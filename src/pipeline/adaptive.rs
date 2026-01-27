@@ -4,16 +4,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use schemars::JsonSchema;
+use serde::Deserialize;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::ai::{LlmProvider, ProviderSet, phase_id, with_timeout};
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
+use crate::ai::{ProviderSet, phase_id, with_timeout};
 use crate::config::Config;
 use crate::types::{Agent, AgentModel, Plugin, PluginManifest, ProjectMemory, Result, Rule, Skill};
 
 use super::analysis::{
-    AnalysisSynthesizer, AstEnricher, DeepAnalysisResult, DeepAnalyzer, SynthesizedAnalysis,
-    multi_agent::{AnalysisContext, MultiAgentAnalyzer},
+    AggregatedAnalysis, AnalysisAggregator, AnalysisSynthesizer, AstEnricher, ChunkingStrategy,
+    CrossSynthesizer, DeepAnalysisResult, DeepAnalyzer, DistributedAnalyzer, DomainAnalyzer,
+    SynthesizedAnalysis, SynthesizedInsights,
 };
 use super::context::VerifiedFileRegistry;
 
@@ -30,6 +35,12 @@ use super::phases::{
 use super::reference_extractor::ReferenceExtractor;
 use super::refinement::RefinementEngine;
 use super::validation::{ConsistencyResult, CrossValidationResult, TierFilterResult};
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AgentPromptOutput {
+    #[serde(default)]
+    prompt: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct AdaptivePipelineOutput {
@@ -66,15 +77,6 @@ impl AdaptivePipeline {
             config,
             file_registry: OnceCell::new(),
         }
-    }
-
-    /// Create with a single provider (testing only, no circuit breaker)
-    pub fn with_single_provider(
-        project_root: PathBuf,
-        provider: Arc<dyn LlmProvider>,
-        config: Config,
-    ) -> Self {
-        Self::new(project_root, ProviderSet::single(provider), config)
     }
 
     async fn get_file_registry(&self) -> Result<VerifiedFileRegistry> {
@@ -160,23 +162,34 @@ impl AdaptivePipeline {
         // Phase 2.5: Deep Analysis (if enabled) with graceful timeout handling
         let analysis_timeout =
             Duration::from_secs(self.config.timeout().analysis_phase_timeout_secs);
-        let deep_analysis = match with_timeout(
+        let (deep_analysis, aggregated_analysis) = match with_timeout(
             analysis_timeout,
             self.run_deep_analysis(&detection),
             "deep_analysis",
         )
         .await
         {
-            Ok(result) => result,
+            Ok((deep, agg)) => (deep, agg),
             Err(crate::types::ClaudegenError::Timeout { .. }) => {
                 tracing::warn!(
                     timeout_secs = self.config.timeout().analysis_phase_timeout_secs,
                     "Deep analysis timed out - proceeding with partial results"
                 );
-                None
+                (None, None)
             }
             Err(e) => return Err(e),
         };
+
+        // Store aggregated analysis in context for convention inference
+        if let Some(ref aggregated) = aggregated_analysis {
+            ctx.set_aggregated(aggregated.clone());
+            tracing::debug!(
+                patterns = aggregated.patterns.len(),
+                coverage = %format!("{:.1}%", aggregated.coverage.coverage_ratio * 100.0),
+                "Aggregated analysis stored in context"
+            );
+        }
+
         if let Some(ref analysis) = deep_analysis {
             tracing::info!(
                 patterns = analysis.patterns.len(),
@@ -311,8 +324,64 @@ impl AdaptivePipeline {
             );
         }
 
-        // Phase 3: Convention Inference
-        let conventions = self.infer_conventions(&detection).await?;
+        // Phase 2.7: Domain Analysis (extract domain policies, logic, terminology)
+        let domain_analysis = if let Some(ref aggregated) = aggregated_analysis {
+            match self.run_domain_analysis(aggregated).await {
+                Ok(domain) => {
+                    tracing::info!(
+                        policies = domain.policies.len(),
+                        core_logic = domain.core_logic.len(),
+                        terms = domain.glossary.terms.len(),
+                        workflows = domain.workflows.len(),
+                        "Domain analysis complete"
+                    );
+                    Some(domain)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Domain analysis failed, proceeding without");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Phase 2.8: Cross-Reference Synthesis (discover hidden dependencies, violations)
+        let cross_insights = if let (Some(aggregated), Some(domain)) =
+            (aggregated_analysis.as_ref(), domain_analysis.as_ref())
+        {
+            match self.run_cross_synthesis(aggregated, domain, &file_registry).await {
+                Ok(insights) => {
+                    tracing::info!(
+                        hidden_deps = insights.hidden_dependencies.len(),
+                        cross_constraints = insights.cross_constraints.len(),
+                        tier3 = insights.tier3_insights.len(),
+                        tier2 = insights.tier2_insights.len(),
+                        "Cross-reference synthesis complete"
+                    );
+                    Some(insights)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Cross-synthesis failed, proceeding without");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Store domain and cross-synthesis results in context
+        if let Some(ref domain) = domain_analysis {
+            ctx.set_domain_analysis(domain.clone());
+        }
+        if let Some(ref insights) = cross_insights {
+            ctx.set_cross_insights(insights.clone());
+        }
+
+        // Phase 3: Convention Inference (uses aggregated data when available)
+        let conventions = self
+            .infer_conventions(&detection, aggregated_analysis.as_ref())
+            .await?;
         ctx.set_conventions(conventions.clone());
         tracing::info!(
             architecture = %conventions.architecture.pattern_name,
@@ -333,13 +402,15 @@ impl AdaptivePipeline {
             "Constraints extracted"
         );
 
-        // Phase 5: Output Planning (enhanced with synthesis data)
-        let output_plan = output_router::OutputRouter::plan_with_synthesis(
+        // Phase 5: Output Planning (enhanced with all analysis data)
+        let output_plan = output_router::OutputRouter::plan_full(
             &detection,
             monorepo.as_ref(),
             &conventions,
             &constraints,
             synthesis.as_ref(),
+            domain_analysis.as_ref(),
+            cross_insights.as_ref(),
         )?;
         tracing::info!(
             strategy = ?output_plan.strategy,
@@ -350,7 +421,7 @@ impl AdaptivePipeline {
         );
 
         // Phase 5.5: Enrichment - Bridge synthesis findings to generation
-        let enrichment_engine = EnrichmentEngine::new(self.config.quality().minimum_quality);
+        let enrichment_engine = EnrichmentEngine::new(self.config.quality().min_quality);
         let enriched_plan =
             enrichment_engine.enrich(output_plan.clone(), synthesis.as_ref(), &constraints);
         tracing::info!(
@@ -378,14 +449,19 @@ impl AdaptivePipeline {
             .unwrap_or("project")
             .to_string();
 
+        let enrichment_ctx = crate::pipeline::generation::path_rules::EnrichmentContext {
+            enriched_plan: Some(&enriched_plan),
+            synthesis: synthesis.as_ref(),
+            domain_analysis: domain_analysis.as_ref(),
+            cross_insights: cross_insights.as_ref(),
+        };
         let claude_md = ClaudeMdGenerator::generate_with_enrichment(
             &output_plan,
             &detection,
             &conventions,
             &constraints,
             &project_name,
-            Some(&enriched_plan),
-            synthesis.as_ref(),
+            &enrichment_ctx,
         )?;
 
         let rules = PathRulesGenerator::generate_with_threshold(
@@ -403,8 +479,9 @@ impl AdaptivePipeline {
                 &enriched_plan,
                 &constraints,
                 &file_registry,
-                &conventions,
                 synthesis.as_ref(),
+                domain_analysis.as_ref(),
+                cross_insights.as_ref(),
             )
             .await?;
         let agents = self
@@ -523,9 +600,23 @@ impl AdaptivePipeline {
         monorepo_analyzer::analyze(&self.project_root, detection).await
     }
 
-    async fn infer_conventions(&self, detection: &ProjectDetection) -> Result<InferredConventions> {
-        let max_samples = self.config.few_shot.max_examples;
-        // Use fast tier for convention inference (quick classification task)
+    async fn infer_conventions(
+        &self,
+        detection: &ProjectDetection,
+        aggregated: Option<&AggregatedAnalysis>,
+    ) -> Result<InferredConventions> {
+        // Prefer conventions from aggregated 100% coverage analysis when available
+        if let Some(agg) = aggregated {
+            tracing::info!(
+                coverage = %format!("{:.1}%", agg.coverage.coverage_ratio * 100.0),
+                "Using conventions from aggregated analysis (100% coverage)"
+            );
+            return Ok(InferredConventions::from_aggregated(agg));
+        }
+
+        // Fallback to sampling-based inference for smaller projects or when distributed analysis is disabled
+        tracing::debug!("Using sampling-based convention inference (fallback)");
+        let max_samples = self.config.analysis.max_file_samples;
         convention_inference::infer(
             &self.project_root,
             detection,
@@ -557,17 +648,37 @@ impl AdaptivePipeline {
             .await
     }
 
+    async fn run_domain_analysis(
+        &self,
+        aggregated: &AggregatedAnalysis,
+    ) -> Result<crate::types::domain::DomainAnalysisResult> {
+        let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
+        let analyzer = DomainAnalyzer::new(provider);
+        analyzer.analyze(aggregated).await
+    }
+
+    async fn run_cross_synthesis(
+        &self,
+        aggregated: &AggregatedAnalysis,
+        domain: &crate::types::domain::DomainAnalysisResult,
+        registry: &VerifiedFileRegistry,
+    ) -> Result<SynthesizedInsights> {
+        let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
+        let synthesizer = CrossSynthesizer::new(provider);
+        synthesizer.synthesize(aggregated, domain, registry).await
+    }
+
     async fn run_deep_analysis(
         &self,
         detection: &ProjectDetection,
-    ) -> Result<Option<DeepAnalysisResult>> {
+    ) -> Result<(Option<DeepAnalysisResult>, Option<AggregatedAnalysis>)> {
         if !self.config.deep_analysis().enabled {
-            return Ok(None);
+            return Ok((None, None));
         }
 
-        // Use MultiAgentAnalyzer if enabled
-        if self.config.multi_agent().enabled {
-            return self.run_multi_agent_analysis(detection).await;
+        // Use distributed analysis for 100% file coverage
+        if self.config.distributed_analysis().enabled {
+            return self.run_distributed_analysis(detection).await;
         }
 
         // Use performance tier for deep analysis (high-intelligence task)
@@ -582,87 +693,42 @@ impl AdaptivePipeline {
 
         if result.patterns.is_empty() && result.constraints.is_empty() && result.insights.is_empty()
         {
-            return Ok(None);
+            return Ok((None, None));
         }
 
-        Ok(Some(result))
+        Ok((Some(result), None))
     }
 
-    /// Run targeted reanalysis focusing on weak areas identified by synthesis
+    /// Run targeted reanalysis focusing on weak areas identified by synthesis.
+    ///
+    /// With the distributed analysis architecture, targeted reanalysis simply
+    /// runs a fresh distributed analysis since all files are already covered.
+    /// The synthesis phase will merge the results.
     async fn run_targeted_reanalysis(
         &self,
         detection: &ProjectDetection,
         targets: &super::analysis::synthesis::ReanalysisTargets,
     ) -> Result<Option<DeepAnalysisResult>> {
-        use crate::config::AnalysisSpecialty;
-
-        // Build a focused multi-agent config based on reanalysis targets
-        let mut focused_config = self.config.multi_agent().clone();
-
-        let mut enabled_specialists = Vec::new();
-        if targets.reanalyze_structure {
-            enabled_specialists.push(AnalysisSpecialty::Structure);
-        }
-        if targets.reanalyze_patterns {
-            enabled_specialists.push(AnalysisSpecialty::Pattern);
-        }
-        if targets.reanalyze_constraints {
-            enabled_specialists.push(AnalysisSpecialty::Constraint);
-        }
-
-        if enabled_specialists.is_empty() {
-            return Ok(None);
-        }
-
-        focused_config.enabled_specialists = enabled_specialists;
-
-        let file_registry = self.get_file_registry().await?;
-
-        let file_list: Vec<String> = file_registry.all_files()
-            .take(self.config.analysis.depth.max_files().min(200)) // Read more files for reanalysis
-            .cloned()
-            .collect();
-
-        let mut file_contents = std::collections::HashMap::new();
-        for file in file_list.iter().take(100) {
-            // Read more files
-            let path = self.project_root.join(file.as_str());
-            if let Ok(content) = tokio::fs::read_to_string(&path).await
-                && content.len() < 50000
-            {
-                file_contents.insert(file.clone(), content);
-            }
-        }
-
-        let context = AnalysisContext {
-            project_root: self.project_root.to_string_lossy().to_string(),
-            file_list,
-            file_contents,
-            project_type: detection.primary_type.as_str().to_string(),
-            languages: detection
-                .languages
-                .iter()
-                .map(|l| l.language.clone())
-                .collect(),
-        };
-
-        // Use performance tier for multi-agent deep analysis (high-intelligence task)
-        let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
-        let multi_analyzer = MultiAgentAnalyzer::new(provider)
-            .with_timeout(self.config.multi_agent.specialist_timeout_secs);
-
-        let result = multi_analyzer.analyze(context).await?;
-        let deep_result = multi_analyzer.to_deep_analysis_result(result);
-
-        if deep_result.patterns.is_empty()
-            && deep_result.constraints.is_empty()
-            && deep_result.insights.is_empty()
-            && deep_result.structure.core_modules.is_empty()
+        // Skip if no reanalysis targets
+        if !targets.reanalyze_structure
+            && !targets.reanalyze_patterns
+            && !targets.reanalyze_constraints
         {
             return Ok(None);
         }
 
-        Ok(Some(deep_result))
+        tracing::debug!(
+            structure = targets.reanalyze_structure,
+            patterns = targets.reanalyze_patterns,
+            constraints = targets.reanalyze_constraints,
+            "Running targeted reanalysis"
+        );
+
+        // With 100% coverage distributed analysis, we simply re-run the analysis.
+        // The distributed analyzer already covers all files, so targeted reanalysis
+        // is effectively a full re-scan with fresh LLM analysis.
+        let (deep_result, _aggregated) = self.run_distributed_analysis(detection).await?;
+        Ok(deep_result)
     }
 
     /// Merge two analysis results, preferring new findings where they exist
@@ -777,70 +843,78 @@ impl AdaptivePipeline {
         }
     }
 
-    async fn run_multi_agent_analysis(
+    /// Run distributed analysis for 100% file coverage
+    async fn run_distributed_analysis(
         &self,
-        detection: &ProjectDetection,
-    ) -> Result<Option<DeepAnalysisResult>> {
+        _detection: &ProjectDetection,
+    ) -> Result<(Option<DeepAnalysisResult>, Option<AggregatedAnalysis>)> {
         let file_registry = self.get_file_registry().await?;
+        let config = self.config.distributed_analysis();
 
-        // Build analysis context
-        let file_list: Vec<String> = file_registry
-            .all_files()
-            .take(self.config.analysis.depth.max_files().min(100))
-            .cloned()
-            .collect();
-
-        let mut file_contents = std::collections::HashMap::new();
-        for file in file_list.iter().take(50) {
-            let path = self.project_root.join(file.as_str());
-            if let Ok(content) = tokio::fs::read_to_string(&path).await
-                && content.len() < 50000
-            {
-                // Skip very large files
-                file_contents.insert(file.clone(), content);
-            }
+        // Check if distributed analysis is worthwhile
+        if file_registry.file_count() < config.min_files_for_distributed {
+            tracing::debug!(
+                files = file_registry.file_count(),
+                min = config.min_files_for_distributed,
+                "Skipping distributed analysis for small project"
+            );
+            return Ok((None, None));
         }
 
-        let context = AnalysisContext {
-            project_root: self.project_root.to_string_lossy().to_string(),
-            file_list,
-            file_contents,
-            project_type: detection.primary_type.as_str().to_string(),
-            languages: detection
-                .languages
-                .iter()
-                .map(|l| l.language.clone())
-                .collect(),
-        };
+        // Create chunks using the chunking strategy
+        let chunks = ChunkingStrategy::create_chunks(&file_registry, config);
+        if chunks.is_empty() {
+            return Ok((None, None));
+        }
 
-        // Use performance tier for multi-agent deep analysis (high-intelligence task)
+        tracing::info!(
+            chunks = chunks.len(),
+            total_files = file_registry.file_count(),
+            "Starting distributed analysis"
+        );
+
+        // Run distributed analysis
         let provider = Arc::clone(self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS));
-        let multi_analyzer = MultiAgentAnalyzer::new(provider)
-            .with_timeout(self.config.multi_agent.specialist_timeout_secs);
+        let analyzer = DistributedAnalyzer::new(provider, config.clone());
+        let chunk_results = analyzer
+            .analyze_all_chunks(chunks, &self.project_root)
+            .await?;
 
-        let result = multi_analyzer.analyze(context).await?;
+        // Aggregate results using Map-Reduce
+        let aggregated = AnalysisAggregator::aggregate(
+            chunk_results,
+            file_registry.file_count(),
+            file_registry.total_lines(),
+        );
 
-        // Convert to DeepAnalysisResult
-        let deep_result = multi_analyzer.to_deep_analysis_result(result);
+        tracing::info!(
+            patterns = aggregated.patterns.len(),
+            constraints = aggregated.constraints.len(),
+            coverage = %format!("{:.1}%", aggregated.coverage.coverage_ratio * 100.0),
+            "Distributed analysis complete"
+        );
+
+        // Convert to DeepAnalysisResult for pipeline compatibility
+        let deep_result = aggregated.to_deep_analysis_result();
 
         if deep_result.patterns.is_empty()
             && deep_result.constraints.is_empty()
             && deep_result.insights.is_empty()
         {
-            return Ok(None);
+            return Ok((None, Some(aggregated)));
         }
 
-        Ok(Some(deep_result))
+        Ok((Some(deep_result), Some(aggregated)))
     }
 
-    /// Generate skills with enriched constraints from synthesis
     async fn generate_skills_with_enrichment(
         &self,
         enriched_plan: &EnrichedPlan,
         constraints: &ExtractedConstraints,
         file_registry: &VerifiedFileRegistry,
-        _conventions: &InferredConventions,
         synthesis: Option<&SynthesizedAnalysis>,
+        domain_analysis: Option<&crate::types::domain::DomainAnalysisResult>,
+        cross_insights: Option<&SynthesizedInsights>,
     ) -> Result<Vec<Skill>> {
         let mut skills = Vec::new();
 
@@ -897,25 +971,49 @@ impl AdaptivePipeline {
             }
 
             // Add module context from synthesis if available
-            if let Some(synth) = synthesis {
-                let relevant_modules: Vec<_> = synth
-                    .modules
-                    .iter()
-                    .filter(|m| {
-                        let name_lower = planned.name.to_lowercase();
-                        m.name.to_lowercase().contains(&name_lower)
-                            || name_lower.contains(&m.name.to_lowercase())
-                    })
-                    .take(2)
-                    .collect();
-
-                if !relevant_modules.is_empty() {
-                    body.push_str("\n### Related Modules\n");
-                    for module in relevant_modules {
+            // No truncation - LLM token budget is the natural limit
+            if let Some(synth) = synthesis
+                && !synth.modules.is_empty() {
+                    body.push_str("\n### Project Modules\n");
+                    for module in &synth.modules {
                         body.push_str(&format!("- @{}: {}\n", module.path, module.responsibility));
                     }
                 }
+
+            // Add domain context - no arbitrary truncation
+            if let Some(domain) = domain_analysis {
+                if !domain.policies.is_empty() {
+                    body.push_str("\n### Domain Policies\n");
+                    for policy in &domain.policies {
+                        body.push_str(&format!(
+                            "- **{}** ({:?}): {}\n",
+                            policy.name, policy.policy_type, policy.description
+                        ));
+                    }
+                }
+
+                if !domain.workflows.is_empty() {
+                    body.push_str("\n### Business Workflows\n");
+                    for workflow in &domain.workflows {
+                        body.push_str(&format!("#### {}\n{}\n", workflow.name, workflow.description));
+                        for step in &workflow.steps {
+                            body.push_str(&format!("{}. {}\n", step.order, step.action));
+                        }
+                    }
+                }
             }
+
+            // Add Tier 3 insights from cross-synthesis - no truncation
+            if let Some(insights) = cross_insights
+                && !insights.tier3_insights.is_empty() {
+                    body.push_str("\n### Critical Gotchas\n");
+                    for insight in &insights.tier3_insights {
+                        body.push_str(&format!(
+                            "- **{}**: {} → {}\n",
+                            insight.title, insight.description, insight.prevention_guidance
+                        ));
+                    }
+                }
 
             let skill = Skill::new(&planned.name, &planned.trigger, body).with_user_invocable(true);
 
@@ -1028,7 +1126,7 @@ impl AdaptivePipeline {
             let tools = override_cfg
                 .tools
                 .clone()
-                .unwrap_or_else(|| self.get_tools_for_role(&role.to_lowercase(), agent_config));
+                .unwrap_or_else(|| agent_config.tools.default.clone());
 
             return (model, tools);
         }
@@ -1036,10 +1134,10 @@ impl AdaptivePipeline {
         let role_lower = role.to_lowercase();
 
         // Check configurable role mappings
+        // Note: uses substring matching - pattern "code" matches "code-reviewer" and "encode"
         for mapping in &agent_config.role_mappings {
             if mapping.patterns.iter().any(|p| role_lower.contains(p)) {
-                let tools = self.get_tools_for_role(&role_lower, agent_config);
-                return (mapping.model.to_agent_model(), tools);
+                return (mapping.model.to_agent_model(), agent_config.tools.default.clone());
             }
         }
 
@@ -1048,22 +1146,6 @@ impl AdaptivePipeline {
             agent_config.default_model.to_agent_model(),
             agent_config.tools.default.clone(),
         )
-    }
-
-    fn get_tools_for_role(
-        &self,
-        role_lower: &str,
-        agent_config: &crate::config::OutputAgentConfig,
-    ) -> Vec<String> {
-        if role_lower.contains("debug") || role_lower.contains("troubleshoot") {
-            agent_config.tools.debug.clone()
-        } else if role_lower.contains("architect") || role_lower.contains("design") {
-            agent_config.tools.architect.clone()
-        } else if role_lower.contains("coordinator") || role_lower.contains("cross") {
-            agent_config.tools.coordinator.clone()
-        } else {
-            agent_config.tools.default.clone()
-        }
     }
 
     async fn generate_agent_prompt_with_llm(
@@ -1079,7 +1161,7 @@ impl AdaptivePipeline {
             .map(|l| l.language.as_str())
             .collect();
 
-        let key_paths = self.get_key_paths(detection).await;
+        let key_paths = self.get_key_paths().await;
 
         let prompt = format!(
             "Generate a domain-expert agent prompt for a \"{role}\" specialist.\n\n\
@@ -1113,16 +1195,7 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             }
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "The generated agent prompt"
-                }
-            },
-            "required": ["prompt"]
-        });
+        let schema = generate_schema::<AgentPromptOutput>();
 
         match self
             .providers
@@ -1131,12 +1204,11 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             .await
         {
             Ok(response) => {
-                if let Some(prompt_text) = response
-                    .content
-                    .get("prompt")
-                    .and_then(|v: &serde_json::Value| v.as_str())
-                {
-                    Ok(prompt_text.trim().to_string())
+                let output: AgentPromptOutput =
+                    deserialize_llm_response(&response.content, "agent_prompt")?;
+
+                if !output.prompt.is_empty() {
+                    Ok(output.prompt.trim().to_string())
                 } else {
                     tracing::debug!(role = %role, "LLM response missing prompt field, using template");
                     Ok(Self::fallback_agent_prompt(role, detection, &key_paths))
@@ -1149,55 +1221,23 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
         }
     }
 
-    async fn get_key_paths(&self, detection: &ProjectDetection) -> Vec<String> {
-        let mut paths = Vec::new();
+    async fn get_key_paths(&self) -> Vec<String> {
+        // Use ReferenceExtractor which checks file existence for common patterns
+        // Project-type-specific fallback removed - patterns are already comprehensive
+        if let Ok(refs) = ReferenceExtractor::extract_key_references(&self.project_root).await {
+            let paths: Vec<String> = refs
+                .into_iter()
+                .take(self.config.analysis.max_key_paths)
+                .map(|r| r.to_string_ref())
+                .collect();
 
-        if let Ok(refs) =
-            ReferenceExtractor::extract_key_references(&self.project_root, detection.primary_type)
-                .await
-        {
-            for r in refs.into_iter().take(self.config.analysis.max_key_paths) {
-                paths.push(r.to_string_ref());
+            if !paths.is_empty() {
+                return paths;
             }
         }
 
-        if paths.is_empty() {
-            let candidates = match detection.primary_type {
-                crate::config::ProjectType::Cli => {
-                    vec!["src/main.rs", "src/cli/", "src/commands/"]
-                }
-                crate::config::ProjectType::Library => vec!["src/lib.rs", "src/"],
-                crate::config::ProjectType::Backend => {
-                    vec!["src/api/", "src/domain/", "services/"]
-                }
-                crate::config::ProjectType::Frontend => {
-                    vec!["src/components/", "src/pages/", "app/"]
-                }
-                crate::config::ProjectType::Monorepo => {
-                    vec!["packages/", "apps/", "services/"]
-                }
-                crate::config::ProjectType::Agent => {
-                    vec!["src/tools/", "src/prompts/", "src/agents/"]
-                }
-                _ => vec!["src/"],
-            };
-
-            for candidate in candidates {
-                let path = self.project_root.join(candidate);
-                if path.exists() {
-                    paths.push(format!("@{}", candidate));
-                }
-            }
-        }
-
-        if paths.is_empty() {
-            paths.push("@src/".to_string());
-        }
-
-        paths
-            .into_iter()
-            .take(self.config.analysis.max_key_paths)
-            .collect()
+        // Generic fallback only
+        vec!["@src/".to_string()]
     }
 
     fn fallback_agent_prompt(

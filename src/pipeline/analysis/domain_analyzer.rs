@@ -1,11 +1,11 @@
 //! Domain Analyzer Module
-//!
-//! Extracts domain-specific knowledge from codebase using LLM semantic analysis.
-//! All pattern data is passed to LLM without pre-filtering - LLM decides relevance.
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde_json::Value;
+
+use crate::ai::response::generate_schema;
 
 use crate::ai::LlmProvider;
 use crate::ai::validation::deserialize_llm_response;
@@ -16,6 +16,9 @@ use crate::types::domain::{
 };
 
 use super::aggregator::AggregatedAnalysis;
+
+// MAX_ITEMS_FOR_PROMPT removed - LLM token budget is the natural limit
+// Arbitrary truncation (30) was losing analysis context silently
 
 pub struct DomainAnalyzer {
     provider: Arc<dyn LlmProvider>,
@@ -64,7 +67,6 @@ impl DomainAnalyzer {
         aggregated
             .patterns
             .iter()
-            .take(50)
             .map(|p| {
                 format!(
                     "- {} [{:?}]: {} (modules: {})",
@@ -82,7 +84,6 @@ impl DomainAnalyzer {
         aggregated
             .constraints
             .iter()
-            .take(30)
             .map(|c| {
                 format!(
                     "- {} [{:?}]: {} (modules: {})",
@@ -101,7 +102,6 @@ impl DomainAnalyzer {
             .dependency_graph
             .edges
             .iter()
-            .take(30)
             .map(|e| format!("{} -> {} ({})", e.from, e.to, e.edge_type))
             .collect::<Vec<_>>()
             .join("\n")
@@ -113,20 +113,14 @@ impl DomainAnalyzer {
         glossary: &DomainGlossary,
         workflows: &[BusinessWorkflow],
     ) -> f32 {
-        let mut score = 0.0f32;
-        if !policies.is_empty() {
-            score += 0.25;
-        }
-        if !core_logic.is_empty() {
-            score += 0.25;
-        }
-        if !glossary.terms.is_empty() {
-            score += 0.25;
-        }
-        if !workflows.is_empty() {
-            score += 0.25;
-        }
-        score
+        let categories = [
+            !policies.is_empty(),
+            !core_logic.is_empty(),
+            !glossary.terms.is_empty(),
+            !workflows.is_empty(),
+        ];
+        let count = categories.iter().filter(|&&x| x).count();
+        count as f32 / categories.len() as f32
     }
 
     async fn extract_policies(
@@ -165,7 +159,7 @@ Focus on project-specific policies. Ignore generic language features."#
             .provider
             .generate(&prompt, &Self::policies_schema())
             .await?;
-        let parsed: PoliciesOutput = deserialize_llm_response(&response.content, "policies");
+        let parsed: PoliciesOutput = deserialize_llm_response(&response.content, "policies")?;
         Ok(parsed.policies)
     }
 
@@ -205,7 +199,7 @@ Focus on business-critical logic, not infrastructure."#
             .provider
             .generate(&prompt, &Self::core_logic_schema())
             .await?;
-        let parsed: CoreLogicOutput = deserialize_llm_response(&response.content, "core_logic");
+        let parsed: CoreLogicOutput = deserialize_llm_response(&response.content, "core_logic")?;
         Ok(parsed.core_logic)
     }
 
@@ -244,7 +238,7 @@ Focus on business domain terms, not technical jargon."#
             .provider
             .generate(&prompt, &Self::terminology_schema())
             .await?;
-        let parsed: TerminologyOutput = deserialize_llm_response(&response.content, "terminology");
+        let parsed: TerminologyOutput = deserialize_llm_response(&response.content, "terminology")?;
 
         let mut glossary = DomainGlossary::new();
         for term in parsed.terms {
@@ -295,182 +289,40 @@ Focus on business processes, not technical implementation."#
             .provider
             .generate(&prompt, &Self::workflows_schema())
             .await?;
-        let parsed: WorkflowsOutput = deserialize_llm_response(&response.content, "workflows");
+        let parsed: WorkflowsOutput = deserialize_llm_response(&response.content, "workflows")?;
         Ok(parsed.workflows)
     }
 
     fn policies_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "policies": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                            "policy_type": {"type": "string", "enum": ["validation", "authorization", "business_rule", "invariant", "state_transition", "data_integrity", "rate_limiting", "audit"]},
-                            "enforcement": {"type": "string", "enum": ["strict", "warning", "advisory"]},
-                            "evidence": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "start_line": {"type": "integer"},
-                                        "end_line": {"type": "integer"}
-                                    }
-                                }
-                            },
-                            "related_modules": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["name", "description", "policy_type"]
-                    }
-                }
-            },
-            "required": ["policies"]
-        })
+        generate_schema::<PoliciesOutput>()
     }
 
     fn core_logic_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "core_logic": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                            "logic_type": {"type": "string", "enum": ["calculation", "transformation", "aggregation", "decision", "orchestration", "integration", "sanitization", "event_handling"]},
-                            "location": {
-                                "type": "object",
-                                "properties": {
-                                    "file": {"type": "string"},
-                                    "start_line": {"type": "integer"},
-                                    "end_line": {"type": "integer"}
-                                }
-                            },
-                            "dependencies": {"type": "array", "items": {"type": "string"}},
-                            "business_impact": {"type": "string"}
-                        },
-                        "required": ["name", "description", "logic_type"]
-                    }
-                }
-            },
-            "required": ["core_logic"]
-        })
+        generate_schema::<CoreLogicOutput>()
     }
 
     fn terminology_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "terms": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "term": {"type": "string"},
-                            "definition": {"type": "string"},
-                            "category": {"type": "string", "enum": ["entity", "action", "state", "metric", "role", "concept", "event"]},
-                            "synonyms": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["term", "definition", "category"]
-                    }
-                },
-                "abbreviations": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "short": {"type": "string"},
-                            "full": {"type": "string"},
-                            "context": {"type": "string"}
-                        },
-                        "required": ["short", "full"]
-                    }
-                },
-                "relationships": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from_term": {"type": "string"},
-                            "to_term": {"type": "string"},
-                            "relationship_type": {"type": "string", "enum": ["is_a", "has_a", "belongs_to", "depends_on", "triggers", "related_to"]}
-                        },
-                        "required": ["from_term", "to_term", "relationship_type"]
-                    }
-                }
-            },
-            "required": ["terms", "abbreviations", "relationships"]
-        })
+        generate_schema::<TerminologyOutput>()
     }
 
     fn workflows_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "workflows": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                            "steps": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "order": {"type": "integer"},
-                                        "name": {"type": "string"},
-                                        "action": {"type": "string"},
-                                        "next_steps": {"type": "array", "items": {"type": "string"}},
-                                        "conditions": {"type": "array", "items": {"type": "string"}},
-                                        "is_terminal": {"type": "boolean"}
-                                    },
-                                    "required": ["order", "name", "action"]
-                                }
-                            },
-                            "entry_points": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "start_line": {"type": "integer"}
-                                    }
-                                }
-                            },
-                            "involved_modules": {"type": "array", "items": {"type": "string"}},
-                            "triggers": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["name", "description", "steps"]
-                    }
-                }
-            },
-            "required": ["workflows"]
-        })
+        generate_schema::<WorkflowsOutput>()
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, JsonSchema)]
 struct PoliciesOutput {
     #[serde(default)]
     policies: Vec<DomainPolicy>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, JsonSchema)]
 struct CoreLogicOutput {
     #[serde(default)]
     core_logic: Vec<CoreDomainLogic>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, JsonSchema)]
 struct TerminologyOutput {
     #[serde(default)]
     terms: Vec<DomainTerm>,
@@ -480,7 +332,7 @@ struct TerminologyOutput {
     relationships: Vec<TermRelationship>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, JsonSchema)]
 struct WorkflowsOutput {
     #[serde(default)]
     workflows: Vec<BusinessWorkflow>,

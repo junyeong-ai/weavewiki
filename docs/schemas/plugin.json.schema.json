@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "claudegen://schemas/plugin.json",
+  "title": "Claudegen Plugin Manifest",
+  "type": "object",
+  "required": ["schema_version", "generator", "project_name"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Semver for manifest compatibility."
+    },
+    "generator": {
+      "type": "string",
+      "description": "claudegen version used to generate this plugin."
+    },
+    "project_name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "required_skills": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Skills required for claude-pilot orchestration."
+    },
+    "required_agents": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Agents required for claude-pilot orchestration."
+    },
+    "skills": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional list of skill names for validation/reporting."
+    },
+    "agents": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional list of agent names for validation/reporting."
+    }
+  },
+  "additionalProperties": true
+}

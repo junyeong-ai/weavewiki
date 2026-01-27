@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Node {
     pub id: String,
     #[serde(rename = "type")]
@@ -81,7 +82,7 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
     Module,
@@ -99,7 +100,7 @@ pub enum NodeType {
     Config,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct NodeMetadata {
     pub description: Option<String>,
     pub visibility: Option<Visibility>,
@@ -113,7 +114,7 @@ pub struct NodeMetadata {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     Public,
@@ -122,7 +123,7 @@ pub enum Visibility {
     Internal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FunctionSignature {
     pub parameters: Vec<Parameter>,
     pub return_type: Option<String>,
@@ -131,7 +132,7 @@ pub struct FunctionSignature {
     pub generator: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Parameter {
     pub name: String,
     #[serde(rename = "type")]
@@ -140,7 +141,7 @@ pub struct Parameter {
     pub default_value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApiMetadata {
     pub method: HttpMethod,
     pub path: String,
@@ -150,7 +151,7 @@ pub struct ApiMetadata {
     pub rate_limit: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
     Get,
@@ -162,7 +163,7 @@ pub enum HttpMethod {
     Head,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AuthRequirement {
     pub required: bool,
     #[serde(rename = "type")]
@@ -170,14 +171,14 @@ pub struct AuthRequirement {
     pub roles: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComponentMetadata {
     pub props: Option<Vec<PropDefinition>>,
     pub state: Option<StateDefinition>,
     pub hooks: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PropDefinition {
     pub name: String,
     #[serde(rename = "type")]
@@ -186,19 +187,19 @@ pub struct PropDefinition {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StateDefinition {
     pub fields: Vec<FieldDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EntityMetadata {
     pub table_name: Option<String>,
     pub fields: Option<Vec<FieldDefinition>>,
     pub relations: Option<Vec<RelationDefinition>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FieldDefinition {
     pub name: String,
     #[serde(rename = "type")]
@@ -207,14 +208,14 @@ pub struct FieldDefinition {
     pub primary_key: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RelationDefinition {
     pub name: String,
     pub relation_type: String,
     pub target: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum InformationTier {
     Fact,
@@ -222,7 +223,7 @@ pub enum InformationTier {
     Interpretation,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeStatus {
     Verified,
@@ -231,7 +232,7 @@ pub enum NodeStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EvidenceLocation {
     pub file: String,
     pub start_line: u32,
@@ -252,7 +253,7 @@ impl EvidenceLocation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SchemaReference {
     Inline { schema: serde_json::Value },

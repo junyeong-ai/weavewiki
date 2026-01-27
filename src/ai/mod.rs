@@ -7,6 +7,7 @@ pub mod metrics;
 pub mod model_capabilities;
 pub mod prompt;
 pub mod provider;
+pub mod response;
 pub mod timeout;
 pub mod validation;
 
@@ -28,5 +29,10 @@ pub use provider::{
 
 #[cfg(feature = "claude-agent")]
 pub use provider::ClaudeAgentProvider;
+pub use response::{
+    FieldError, FieldParseError, ParseResult, ParseStatus, PartialParseable, RecoveryAction,
+    SetFieldResult, extract_bool, extract_f32, extract_field, extract_optional, extract_string,
+    extract_string_array, extract_u32, generate_schema, parse_partial, transform_for_strict,
+};
 pub use timeout::{with_timeout, with_timeout_map};
 pub use validation::{ProcessedResponse, ValidationPipeline, parse_structured_output};

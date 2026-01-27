@@ -15,6 +15,17 @@ use regex::Regex;
 /// - Paths with spaces when quoted: @"path with spaces/file.rs"
 /// - Standard path separators (/, \)
 /// - Common path characters (., _, -)
+///
+/// Known Limitations:
+/// - Requires delimiter before `@` (space, `(`, `[`, `{`, `,`, `;`, or line start)
+/// - Won't match `@file:line` after markdown bullet (`-`) or colon (`:`)
+/// - Designed for Claude Code context output format; other formats may not match
+/// - Backtick-wrapped refs (`` `@path` ``) won't match the inner path
+///
+/// These limitations are acceptable because:
+/// 1. Claude Code outputs references with consistent formatting
+/// 2. False negatives are preferable to false positives (email matching)
+/// 3. Programmatic extraction supplements, not replaces, LLM understanding
 pub static FILE_REFERENCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Pattern explanation:
     // - (?:^|[\s\(\[\{,;]) - Start of string or common delimiters (not alphanumeric to avoid emails)

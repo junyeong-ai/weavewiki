@@ -39,8 +39,9 @@ async fn run_async(options: GenerateOptions) -> Result<()> {
     if options.dry_run {
         println!("\nDry run mode:\n");
         println!("  Project: {}", project_root.display());
-        println!("  Preset: {:?}", config.preset);
         println!("  Depth: {:?}", config.analysis.depth);
+        println!("  Quality floor: {}", config.convergence.quality_floor);
+        println!("  Target quality: {}", config.convergence.target_quality);
         println!("  Quality loop: {}", config.quality_loop().enabled);
         println!("  Multi-agent: {}", config.multi_agent().enabled);
         return Ok(());

@@ -8,15 +8,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::ai::LlmProvider;
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
 use crate::config::{AnalysisConfig, DeepAnalysisConfig, ProjectType};
 use crate::pipeline::phases::ProjectDetection;
 use crate::types::{Result, Severity};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct DeepAnalysisResult {
     pub structure: SemanticStructure,
     pub patterns: Vec<PatternInstance>,
@@ -29,7 +32,7 @@ pub struct DeepAnalysisResult {
 }
 
 /// Metrics measuring the quality and completeness of the analysis
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct AnalysisQuality {
     /// Number of files actually read and analyzed
     pub files_analyzed: usize,
@@ -47,35 +50,58 @@ pub struct AnalysisQuality {
     pub confidence_score: f32,
 }
 
+/// Raw value breakdown for LLM contextual assessment.
+///
+/// Provides counts without arbitrary weighting so LLM can apply
+/// domain-specific judgment. For example, 2 security constraints
+/// in crypto code may be more valuable than 10 patterns in a web app.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
+pub struct ValueBreakdown {
+    pub pattern_count: usize,
+    pub constraint_count: usize,
+    pub high_value_constraint_count: usize,
+    pub gotcha_count: usize,
+    pub insight_count: usize,
+    pub evidence_count: usize,
+    pub validated_refs: usize,
+    pub filtered_hallucinations: usize,
+    pub confidence_score: f32,
+}
+
 impl DeepAnalysisResult {
-    /// Calculate the value score for this analysis result.
+    /// Quick heuristic score for logging/tracing only.
     ///
-    /// # ADVISORY HEURISTIC - NOT AUTHORITATIVE
+    /// **Do not use for quality decisions** - use `value_breakdown()` instead
+    /// and let LLM assess value based on domain context.
     ///
-    /// This score is a programmatic ESTIMATE based on finding counts.
-    /// The multipliers (0.1, 0.15, 0.2) and caps (0.3, 0.2) are heuristics
-    /// that may not reflect actual value for all projects.
+    /// Thresholds (0/5 items → 0.3/0.5/0.7):
+    /// - 0 items: 0.3 (minimal but not zero - file may have implicit value)
+    /// - 1-4 items: 0.5 (some findings, uncertain significance)
+    /// - 5+ items: 0.7 (multiple findings, likely valuable)
     ///
-    /// **Limitations:**
-    /// - A crypto codebase with 2 critical constraints may be more valuable
-    ///   than a web app with 10 patterns, but this formula doesn't know that
-    /// - Caps (.min(0.3)) prevent high scores even with many findings
-    /// - Doesn't consider domain-specific value (security, performance, etc.)
-    ///
-    /// **Proper use:**
-    /// - Use for rough prioritization of analysis depth
-    /// - Pass raw finding counts to LLM for contextual value assessment
-    /// - Don't use to reject findings or make binary decisions
+    /// These are rough heuristics for tracing output only.
     pub fn value_score(&self) -> f32 {
-        let mut score = 0.0f32;
+        let breakdown = self.value_breakdown();
+        let total = breakdown.pattern_count
+            + breakdown.high_value_constraint_count
+            + breakdown.gotcha_count;
 
-        // Patterns contribute: 0.1 per pattern, max 0.3
-        // NOTE: May undervalue pattern-heavy projects
-        score += (self.patterns.len() as f32 * 0.1).min(0.3);
+        if total == 0 {
+            0.3
+        } else if total < 5 {
+            0.5
+        } else {
+            0.7
+        }
+    }
 
-        // High-value constraints: 0.15 per constraint, max 0.3
-        // NOTE: May undervalue constraint-heavy projects (security, concurrency)
-        let high_value_constraints = self
+    /// Get raw value breakdown for LLM contextual assessment.
+    ///
+    /// Provides counts without arbitrary weighting so LLM can apply
+    /// domain-specific judgment (e.g., 2 security constraints in crypto
+    /// code may be more valuable than 10 patterns in a web app).
+    pub fn value_breakdown(&self) -> ValueBreakdown {
+        let high_value_constraint_count = self
             .constraints
             .iter()
             .filter(|c| {
@@ -85,29 +111,38 @@ impl DeepAnalysisResult {
                 )
             })
             .count();
-        score += (high_value_constraints as f32 * 0.15).min(0.3);
 
-        // Gotchas: 0.1 per gotcha, max 0.2
         let gotcha_count: usize = self.insights.iter().map(|i| i.gotchas.len()).sum();
-        score += (gotcha_count as f32 * 0.1).min(0.2);
 
-        // Analysis quality: 0.2 weight
-        score += self.analysis_quality.confidence_score * 0.2;
-
-        score.min(1.0)
+        ValueBreakdown {
+            pattern_count: self.patterns.len(),
+            constraint_count: self.constraints.len(),
+            high_value_constraint_count,
+            gotcha_count,
+            insight_count: self.insights.len(),
+            evidence_count: self.analysis_quality.evidence_count,
+            validated_refs: self.analysis_quality.validated_refs,
+            filtered_hallucinations: self.analysis_quality.filtered_hallucinations,
+            confidence_score: self.analysis_quality.confidence_score,
+        }
     }
 
-    /// Check if the analysis has sufficient evidence.
+    /// Check if analysis has minimum evidence for confidence.
     ///
-    /// NOTE: The threshold (>= 3 evidence, validated > hallucinated) is a
-    /// heuristic. Small projects may have fewer evidence points legitimately.
+    /// Threshold rationale:
+    /// - `evidence_count >= 3`: Single evidence point could be anomaly, two could
+    ///   be coincidence, three suggests a pattern. Aligns with "three strikes" rule
+    ///   common in pattern detection.
+    /// - `validated_refs > filtered_hallucinations`: More real than fabricated
+    ///   references indicates the analysis is grounded in actual code.
     pub fn has_sufficient_evidence(&self) -> bool {
-        self.analysis_quality.evidence_count >= 3
+        const MIN_EVIDENCE_FOR_PATTERN: usize = 3;
+        self.analysis_quality.evidence_count >= MIN_EVIDENCE_FOR_PATTERN
             && self.analysis_quality.validated_refs > self.analysis_quality.filtered_hallucinations
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct SemanticStructure {
     pub entry_points: Vec<EntryPoint>,
     pub core_modules: Vec<CoreModule>,
@@ -115,14 +150,14 @@ pub struct SemanticStructure {
     pub config_locations: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EntryPoint {
     pub path: String,
     pub kind: EntryPointKind,
     pub description: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryPointKind {
     Main,
@@ -141,7 +176,7 @@ pub enum EntryPointKind {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CoreModule {
     pub path: String,
     pub name: String,
@@ -150,7 +185,7 @@ pub struct CoreModule {
     pub internal_deps: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LayerBoundary {
     pub from_layer: String,
     pub to_layer: String,
@@ -158,7 +193,7 @@ pub struct LayerBoundary {
     pub evidence: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PatternInstance {
     pub name: String,
     pub category: PatternCategory,
@@ -167,7 +202,7 @@ pub struct PatternInstance {
     pub usage_guidance: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternCategory {
     Architecture,
@@ -187,14 +222,14 @@ pub enum PatternCategory {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PatternLocation {
     pub file: String,
     pub line: u32,
     pub snippet: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiscoveredConstraint {
     pub kind: ConstraintKind,
     pub title: String,
@@ -204,7 +239,7 @@ pub struct DiscoveredConstraint {
     pub severity: Severity,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintKind {
     AntiPattern,
@@ -214,14 +249,14 @@ pub enum ConstraintKind {
     NamingConvention,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConstraintEvidence {
     pub file: String,
     pub line: Option<u32>,
     pub context: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModuleDependency {
     pub from_module: String,
     pub to_module: String,
@@ -229,7 +264,7 @@ pub struct ModuleDependency {
     pub is_public: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyType {
     Import,
@@ -247,7 +282,7 @@ pub enum DependencyType {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FileInsight {
     pub file: String,
     pub purpose: String,
@@ -256,7 +291,7 @@ pub struct FileInsight {
     pub gotchas: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KeyAbstraction {
     pub name: String,
     pub kind: AbstractionKind,
@@ -266,7 +301,7 @@ pub struct KeyAbstraction {
     pub usage_notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AbstractionKind {
     Trait,
@@ -291,7 +326,7 @@ pub enum AbstractionKind {
 
 // File-level deep analysis types (consolidated from deep/ subdirectory)
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FileDeepAnalysis {
     pub file_path: String,
     pub gotchas: Vec<Gotcha>,
@@ -311,14 +346,11 @@ impl FileDeepAnalysis {
     }
 
     pub fn has_critical_constraints(&self) -> bool {
-        self.constraints.iter().any(|c| {
-            c.description.to_lowercase().contains("must")
-                || c.description.to_lowercase().contains("required")
-        })
+        !self.constraints.is_empty()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Gotcha {
     pub description: String,
     #[serde(default)]
@@ -328,7 +360,7 @@ pub struct Gotcha {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FileConstraint {
     pub description: String,
     #[serde(default)]
@@ -337,7 +369,7 @@ pub struct FileConstraint {
     pub enforcement: Option<ConstraintEnforcement>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintEnforcement {
     CompileTime,
@@ -345,7 +377,7 @@ pub enum ConstraintEnforcement {
     Convention,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CodePattern {
     pub name: String,
     pub description: String,
@@ -353,7 +385,7 @@ pub struct CodePattern {
     pub example_lines: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Relationship {
     pub target: String,
     pub relationship_type: String,
@@ -438,7 +470,7 @@ impl DeepAnalyzer {
         file_map: &HashMap<String, FileContent>,
         patterns: &[PatternInstance],
         constraints: &[DiscoveredConstraint],
-        insights: &[FileInsight],
+        _insights: &[FileInsight],
         detection: &ProjectDetection,
     ) -> AnalysisQuality {
         // Files and lines analyzed
@@ -482,38 +514,12 @@ impl DeepAnalyzer {
 
         let evidence_count = validated_refs + filtered_hallucinations;
 
-        // Calculate confidence score based on multiple factors
-        let mut confidence = 0.0f32;
-
-        // Coverage contributes to confidence
-        confidence += coverage_ratio * 0.3;
-
-        // Evidence density (refs per file analyzed)
-        if files_analyzed > 0 {
-            let ref_density = evidence_count as f32 / files_analyzed as f32;
-            confidence += (ref_density / 2.0).min(0.3);
-        }
-
-        // Insights with gotchas indicate deeper analysis
-        let gotcha_ratio = if insights.is_empty() {
-            0.0
+        let confidence = if evidence_count == 0 {
+            coverage_ratio * 0.5
         } else {
-            insights.iter().filter(|i| !i.gotchas.is_empty()).count() as f32 / insights.len() as f32
+            let validity_ratio = validated_refs as f32 / evidence_count as f32;
+            (coverage_ratio + validity_ratio) / 2.0
         };
-        confidence += gotcha_ratio * 0.2;
-
-        // Constraint quality (having multiple kinds is better)
-        let constraint_kinds: std::collections::HashSet<_> = constraints
-            .iter()
-            .map(|c| std::mem::discriminant(&c.kind))
-            .collect();
-        confidence += (constraint_kinds.len() as f32 * 0.05).min(0.2);
-
-        // Penalize high hallucination ratio
-        if evidence_count > 0 {
-            let hallucination_ratio = filtered_hallucinations as f32 / evidence_count as f32;
-            confidence *= 1.0 - (hallucination_ratio * 0.5);
-        }
 
         AnalysisQuality {
             files_analyzed,
@@ -610,7 +616,12 @@ impl DeepAnalyzer {
         {
             let lines = content.lines().count();
             let truncated = if content.len() > max_chars {
-                content[..max_chars].to_string()
+                // Find valid UTF-8 char boundary
+                let mut end = max_chars;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content[..end].to_string()
             } else {
                 content
             };
@@ -744,7 +755,12 @@ impl DeepAnalyzer {
             };
 
             let truncated = if content.len() > max_chars {
-                content[..max_chars].to_string()
+                // Find valid UTF-8 char boundary
+                let mut end = max_chars;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content[..end].to_string()
             } else {
                 content.clone()
             };
@@ -802,51 +818,14 @@ Be specific to THIS project's actual structure."#,
             samples = sample_contents
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "entry_points": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "kind": {"type": "string", "enum": ["main", "lib_root", "api_handler", "cli_command", "test"]},
-                            "description": {"type": "string"}
-                        }
-                    }
-                },
-                "core_modules": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "name": {"type": "string"},
-                            "responsibility": {"type": "string"},
-                            "public_items": {"type": "array", "items": {"type": "string"}},
-                            "internal_deps": {"type": "array", "items": {"type": "string"}}
-                        }
-                    }
-                },
-                "layer_boundaries": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from_layer": {"type": "string"},
-                            "to_layer": {"type": "string"},
-                            "allowed": {"type": "boolean"},
-                            "evidence": {"type": "string"}
-                        }
-                    }
-                },
-                "config_locations": {"type": "array", "items": {"type": "string"}}
-            }
-        });
+        let schema = generate_schema::<StructureOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
-            Ok(response) => self.parse_structure_response(&response.content),
+            Ok(response) => {
+                let output: StructureOutput =
+                    deserialize_llm_response(&response.content, "structure")?;
+                Ok(self.convert_structure_output(output))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Structure analysis failed, using fallback");
                 Ok(SemanticStructure::default())
@@ -854,105 +833,55 @@ Be specific to THIS project's actual structure."#,
         }
     }
 
-    fn parse_structure_response(&self, content: &serde_json::Value) -> Result<SemanticStructure> {
-        let mut structure = SemanticStructure::default();
-
-        if let Some(entries) = content.get("entry_points").and_then(|v| v.as_array()) {
-            for e in entries {
-                let kind = match e.get("kind").and_then(|v| v.as_str()).unwrap_or("main") {
+    fn convert_structure_output(&self, output: StructureOutput) -> SemanticStructure {
+        let entry_points = output
+            .entry_points
+            .into_iter()
+            .map(|e| {
+                let kind = match e.kind.as_str() {
                     "lib_root" => EntryPointKind::LibRoot,
                     "api_handler" => EntryPointKind::ApiHandler,
                     "cli_command" => EntryPointKind::CliCommand,
                     "test" => EntryPointKind::Test,
                     _ => EntryPointKind::Main,
                 };
-                structure.entry_points.push(EntryPoint {
-                    path: e
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                EntryPoint {
+                    path: e.path,
                     kind,
-                    description: e
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                });
-            }
-        }
+                    description: e.description,
+                }
+            })
+            .collect();
 
-        if let Some(modules) = content.get("core_modules").and_then(|v| v.as_array()) {
-            for m in modules {
-                structure.core_modules.push(CoreModule {
-                    path: m
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    name: m
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    responsibility: m
-                        .get("responsibility")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    public_items: m
-                        .get("public_items")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    internal_deps: m
-                        .get("internal_deps")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                });
-            }
-        }
+        let core_modules = output
+            .core_modules
+            .into_iter()
+            .map(|m| CoreModule {
+                path: m.path,
+                name: m.name,
+                responsibility: m.responsibility,
+                public_items: m.public_items,
+                internal_deps: m.internal_deps,
+            })
+            .collect();
 
-        if let Some(boundaries) = content.get("layer_boundaries").and_then(|v| v.as_array()) {
-            for b in boundaries {
-                structure.layer_boundaries.push(LayerBoundary {
-                    from_layer: b
-                        .get("from_layer")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    to_layer: b
-                        .get("to_layer")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    allowed: b.get("allowed").and_then(|v| v.as_bool()).unwrap_or(true),
-                    evidence: b
-                        .get("evidence")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                });
-            }
-        }
+        let layer_boundaries = output
+            .layer_boundaries
+            .into_iter()
+            .map(|b| LayerBoundary {
+                from_layer: b.from_layer,
+                to_layer: b.to_layer,
+                allowed: b.allowed,
+                evidence: b.evidence,
+            })
+            .collect();
 
-        if let Some(configs) = content.get("config_locations").and_then(|v| v.as_array()) {
-            structure.config_locations = configs
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
+        SemanticStructure {
+            entry_points,
+            core_modules,
+            layer_boundaries,
+            config_locations: output.config_locations,
         }
-
-        Ok(structure)
     }
 
     async fn extract_patterns(
@@ -986,37 +915,14 @@ ONLY include patterns you can see evidence for in the code."#,
             samples = sample_contents
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "patterns": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "category": {"type": "string"},
-                            "description": {"type": "string"},
-                            "locations": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "line": {"type": "integer"},
-                                        "snippet": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "usage_guidance": {"type": "string"}
-                        }
-                    }
-                }
-            }
-        });
+        let schema = generate_schema::<PatternsOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
-            Ok(response) => self.parse_patterns_response(&response.content, files),
+            Ok(response) => {
+                let output: PatternsOutput =
+                    deserialize_llm_response(&response.content, "patterns")?;
+                Ok(self.convert_patterns_output(output, files))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Pattern extraction failed");
                 Ok(Vec::new())
@@ -1024,21 +930,20 @@ ONLY include patterns you can see evidence for in the code."#,
         }
     }
 
-    fn parse_patterns_response(
+    fn convert_patterns_output(
         &self,
-        content: &serde_json::Value,
+        output: PatternsOutput,
         files: &HashMap<String, FileContent>,
-    ) -> Result<Vec<PatternInstance>> {
-        let mut patterns = Vec::new();
-
-        if let Some(arr) = content.get("patterns").and_then(|v| v.as_array()) {
-            for p in arr {
-                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                if name.is_empty() {
-                    continue;
+    ) -> Vec<PatternInstance> {
+        output
+            .patterns
+            .into_iter()
+            .filter_map(|p| {
+                if p.name.is_empty() {
+                    return None;
                 }
 
-                let category = match p.get("category").and_then(|v| v.as_str()).unwrap_or("") {
+                let category = match p.category.as_str() {
                     "architecture" => PatternCategory::Architecture,
                     "error_handling" => PatternCategory::ErrorHandling,
                     "concurrency" => PatternCategory::Concurrency,
@@ -1050,53 +955,33 @@ ONLY include patterns you can see evidence for in the code."#,
                 };
 
                 let locations: Vec<PatternLocation> = p
-                    .get("locations")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|loc| {
-                                let file = loc.get("file").and_then(|v| v.as_str())?;
-                                if !files.contains_key(file) && !self.file_exists_sync(file) {
-                                    return None;
-                                }
-                                Some(PatternLocation {
-                                    file: file.to_string(),
-                                    line: loc.get("line").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as u32,
-                                    snippet: loc
-                                        .get("snippet")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                })
-                            })
-                            .collect()
+                    .locations
+                    .into_iter()
+                    .filter_map(|loc| {
+                        if !files.contains_key(&loc.file) && !self.file_exists_sync(&loc.file) {
+                            return None;
+                        }
+                        Some(PatternLocation {
+                            file: loc.file,
+                            line: loc.line,
+                            snippet: loc.snippet,
+                        })
                     })
-                    .unwrap_or_default();
+                    .collect();
 
                 if locations.is_empty() {
-                    continue;
+                    return None;
                 }
 
-                patterns.push(PatternInstance {
-                    name: name.to_string(),
+                Some(PatternInstance {
+                    name: p.name,
                     category,
-                    description: p
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    description: p.description,
                     locations,
-                    usage_guidance: p
-                        .get("usage_guidance")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                });
-            }
-        }
-
-        Ok(patterns)
+                    usage_guidance: p.usage_guidance,
+                })
+            })
+            .collect()
     }
 
     fn file_exists_sync(&self, relative_path: &str) -> bool {
@@ -1144,38 +1029,14 @@ ONLY include constraints with evidence from the actual code."#,
             samples = sample_contents
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "constraints": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "kind": {"type": "string"},
-                            "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "rationale": {"type": "string"},
-                            "evidence": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "line": {"type": "integer"},
-                                        "context": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "severity": {"type": "string"}
-                        }
-                    }
-                }
-            }
-        });
+        let schema = generate_schema::<ConstraintsOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
-            Ok(response) => self.parse_constraints_response(&response.content, files),
+            Ok(response) => {
+                let output: ConstraintsOutput =
+                    deserialize_llm_response(&response.content, "constraints")?;
+                Ok(self.convert_constraints_output(output, files))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Constraint discovery failed");
                 Ok(Vec::new())
@@ -1183,21 +1044,17 @@ ONLY include constraints with evidence from the actual code."#,
         }
     }
 
-    fn parse_constraints_response(
+    fn convert_constraints_output(
         &self,
-        content: &serde_json::Value,
+        output: ConstraintsOutput,
         files: &HashMap<String, FileContent>,
-    ) -> Result<Vec<DiscoveredConstraint>> {
-        let mut constraints = Vec::new();
-
-        if let Some(arr) = content.get("constraints").and_then(|v| v.as_array()) {
-            for c in arr {
-                let title = c.get("title").and_then(|v| v.as_str()).unwrap_or_default();
-                if title.is_empty() {
-                    continue;
-                }
-
-                let kind = match c.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+    ) -> Vec<DiscoveredConstraint> {
+        output
+            .constraints
+            .into_iter()
+            .filter(|c| !c.title.is_empty())
+            .map(|c| {
+                let kind = match c.kind.as_str() {
                     "anti_pattern" => ConstraintKind::AntiPattern,
                     "hidden_dependency" => ConstraintKind::HiddenDependency,
                     "invariant" => ConstraintKind::Invariant,
@@ -1206,61 +1063,38 @@ ONLY include constraints with evidence from the actual code."#,
                     _ => ConstraintKind::AntiPattern,
                 };
 
-                let severity = match c
-                    .get("severity")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("medium")
-                {
+                let severity = match c.severity.as_str() {
                     "critical" => Severity::Critical,
                     "high" => Severity::High,
                     "low" => Severity::Low,
                     _ => Severity::Medium,
                 };
 
-                let evidence: Vec<ConstraintEvidence> = c
-                    .get("evidence")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|e| {
-                                let file = e.get("file").and_then(|v| v.as_str())?;
-                                if !files.contains_key(file) && !self.file_exists_sync(file) {
-                                    return None;
-                                }
-                                Some(ConstraintEvidence {
-                                    file: file.to_string(),
-                                    line: e.get("line").and_then(|v| v.as_u64()).map(|n| n as u32),
-                                    context: e
-                                        .get("context")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                })
-                            })
-                            .collect()
+                let evidence = c
+                    .evidence
+                    .into_iter()
+                    .filter_map(|e| {
+                        if !files.contains_key(&e.file) && !self.file_exists_sync(&e.file) {
+                            return None;
+                        }
+                        Some(ConstraintEvidence {
+                            file: e.file,
+                            line: if e.line > 0 { Some(e.line) } else { None },
+                            context: e.context,
+                        })
                     })
-                    .unwrap_or_default();
+                    .collect();
 
-                constraints.push(DiscoveredConstraint {
+                DiscoveredConstraint {
                     kind,
-                    title: title.to_string(),
-                    description: c
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    rationale: c
-                        .get("rationale")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    title: c.title,
+                    description: c.description,
+                    rationale: c.rationale,
                     evidence,
                     severity,
-                });
-            }
-        }
-
-        Ok(constraints)
+                }
+            })
+            .collect()
     }
 
     async fn map_dependencies(
@@ -1348,7 +1182,6 @@ ONLY include constraints with evidence from the actual code."#,
                     || path.contains("index.")
                     || path.contains("types.")
             })
-            .take(10)
             .collect();
 
         for (path, content) in key_files {
@@ -1372,7 +1205,12 @@ ONLY include constraints with evidence from the actual code."#,
         // Use configurable max chars (default 50,000, was hardcoded 3000)
         let max_chars = self.deep_config.max_code_context_chars;
         let truncated = if content.len() > max_chars {
-            &content[..max_chars]
+            // Find valid UTF-8 char boundary
+            let mut end = max_chars;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            &content[..end]
         } else {
             content
         };
@@ -1399,53 +1237,18 @@ Be specific and concise. Only include notable findings."#,
             content = truncated
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "purpose": {"type": "string"},
-                "key_exports": {"type": "array", "items": {"type": "string"}},
-                "notable_patterns": {"type": "array", "items": {"type": "string"}},
-                "gotchas": {"type": "array", "items": {"type": "string"}}
-            }
-        });
+        let schema = generate_schema::<FileInsightOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                let c = &response.content;
+                let output: FileInsightOutput =
+                    deserialize_llm_response(&response.content, "file_insight")?;
                 Ok(FileInsight {
                     file: path.to_string(),
-                    purpose: c
-                        .get("purpose")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    key_exports: c
-                        .get("key_exports")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    notable_patterns: c
-                        .get("notable_patterns")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    gotchas: c
-                        .get("gotchas")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    purpose: output.purpose,
+                    key_exports: output.key_exports,
+                    notable_patterns: output.notable_patterns,
+                    gotchas: output.gotchas,
                 })
             }
             Err(_) => Ok(FileInsight {
@@ -1490,28 +1293,14 @@ Focus on abstractions that define the project's architecture."#,
             samples = sample_contents
         );
 
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "abstractions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "kind": {"type": "string"},
-                            "file": {"type": "string"},
-                            "line": {"type": "integer"},
-                            "description": {"type": "string"},
-                            "usage_notes": {"type": "array", "items": {"type": "string"}}
-                        }
-                    }
-                }
-            }
-        });
+        let schema = generate_schema::<AbstractionsOutput>();
 
         match self.provider.generate(&prompt, &schema).await {
-            Ok(response) => self.parse_abstractions_response(&response.content, files),
+            Ok(response) => {
+                let output: AbstractionsOutput =
+                    deserialize_llm_response(&response.content, "abstractions")?;
+                Ok(self.convert_abstractions_output(output, files))
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Abstraction identification failed");
                 Ok(Vec::new())
@@ -1519,23 +1308,22 @@ Focus on abstractions that define the project's architecture."#,
         }
     }
 
-    fn parse_abstractions_response(
+    fn convert_abstractions_output(
         &self,
-        content: &serde_json::Value,
+        output: AbstractionsOutput,
         files: &HashMap<String, FileContent>,
-    ) -> Result<Vec<KeyAbstraction>> {
-        let mut abstractions = Vec::new();
-
-        if let Some(arr) = content.get("abstractions").and_then(|v| v.as_array()) {
-            for a in arr {
-                let name = a.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                let file = a.get("file").and_then(|v| v.as_str()).unwrap_or_default();
-
-                if name.is_empty() || (!files.contains_key(file) && !self.file_exists_sync(file)) {
-                    continue;
+    ) -> Vec<KeyAbstraction> {
+        output
+            .abstractions
+            .into_iter()
+            .filter_map(|a| {
+                if a.name.is_empty()
+                    || (!files.contains_key(&a.file) && !self.file_exists_sync(&a.file))
+                {
+                    return None;
                 }
 
-                let kind = match a.get("kind").and_then(|v| v.as_str()).unwrap_or("struct") {
+                let kind = match a.kind.as_str() {
                     "trait" => AbstractionKind::Trait,
                     "enum" => AbstractionKind::Enum,
                     "function" => AbstractionKind::Function,
@@ -1546,30 +1334,16 @@ Focus on abstractions that define the project's architecture."#,
                     _ => AbstractionKind::Struct,
                 };
 
-                abstractions.push(KeyAbstraction {
-                    name: name.to_string(),
+                Some(KeyAbstraction {
+                    name: a.name,
                     kind,
-                    file: file.to_string(),
-                    line: a.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    description: a
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    usage_notes: a
-                        .get("usage_notes")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                });
-            }
-        }
-
-        Ok(abstractions)
+                    file: a.file,
+                    line: a.line,
+                    description: a.description,
+                    usage_notes: a.usage_notes,
+                })
+            })
+            .collect()
     }
 
     fn build_sample_context(
@@ -1588,7 +1362,12 @@ Focus on abstractions that define the project's architecture."#,
             let file_header = format!("\n--- {} ---\n", path);
             let available = char_budget.saturating_sub(file_header.len());
             let truncated = if content.content.len() > available {
-                &content.content[..available]
+                // Find valid UTF-8 char boundary
+                let mut end = available;
+                while end > 0 && !content.content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content.content[..end]
             } else {
                 &content.content
             };
@@ -1605,6 +1384,154 @@ Focus on abstractions that define the project's architecture."#,
 struct FileContent {
     content: String,
     lines: usize,
+}
+
+// =============================================================================
+// LLM OUTPUT TYPES (for schema generation)
+// =============================================================================
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct StructureOutput {
+    #[serde(default)]
+    entry_points: Vec<EntryPointOutput>,
+    #[serde(default)]
+    core_modules: Vec<CoreModuleOutput>,
+    #[serde(default)]
+    layer_boundaries: Vec<LayerBoundaryOutput>,
+    #[serde(default)]
+    config_locations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct EntryPointOutput {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct CoreModuleOutput {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    responsibility: String,
+    #[serde(default)]
+    public_items: Vec<String>,
+    #[serde(default)]
+    internal_deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct LayerBoundaryOutput {
+    #[serde(default)]
+    from_layer: String,
+    #[serde(default)]
+    to_layer: String,
+    #[serde(default)]
+    allowed: bool,
+    #[serde(default)]
+    evidence: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct PatternsOutput {
+    #[serde(default)]
+    patterns: Vec<PatternOutput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct PatternOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    locations: Vec<LocationOutput>,
+    #[serde(default)]
+    usage_guidance: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct LocationOutput {
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: u32,
+    #[serde(default)]
+    snippet: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct ConstraintsOutput {
+    #[serde(default)]
+    constraints: Vec<ConstraintOutput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct ConstraintOutput {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    evidence: Vec<EvidenceOutput>,
+    #[serde(default)]
+    severity: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct EvidenceOutput {
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: u32,
+    #[serde(default)]
+    context: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct FileInsightOutput {
+    #[serde(default)]
+    purpose: String,
+    #[serde(default)]
+    key_exports: Vec<String>,
+    #[serde(default)]
+    notable_patterns: Vec<String>,
+    #[serde(default)]
+    gotchas: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AbstractionsOutput {
+    #[serde(default)]
+    abstractions: Vec<AbstractionOutput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AbstractionOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: u32,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    usage_notes: Vec<String>,
 }
 
 pub async fn analyze(

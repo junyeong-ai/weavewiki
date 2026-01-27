@@ -425,6 +425,18 @@ fn extract_impl_blocks(
     }
 }
 
+/// Detect Rust visibility from AST node text.
+///
+/// Uses string matching on node text as a fast approximation. This works because
+/// Rust visibility modifiers (`pub`, `pub(crate)`, `pub(super)`) have strict syntax.
+///
+/// Limitations:
+/// - `pub(in path)` treated as Public (not distinguished)
+/// - Doesn't handle `pub` in comments or string literals (rare in practice)
+/// - Order-dependent: checks `pub(crate)` before generic `pub`
+///
+/// For AST-level precision, tree-sitter's `visibility_modifier` node could be used,
+/// but string matching is sufficient for documentation generation purposes.
 fn detect_visibility(node: Option<tree_sitter::Node>, content: &str) -> Visibility {
     if let Some(parent) = node {
         let text = get_node_text(parent, content.as_bytes());

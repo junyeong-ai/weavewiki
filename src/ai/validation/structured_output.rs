@@ -20,29 +20,28 @@ pub fn parse_structured_output(raw: &str) -> Result<Value> {
     })
 }
 
-/// Deserialize LLM response content into typed struct with graceful fallback.
-/// Returns Default if parsing fails, logging the error for debugging.
-pub fn deserialize_llm_response<T: DeserializeOwned + Default>(
+/// Deserialize LLM response content into typed struct.
+/// Returns error if parsing fails, allowing caller to decide recovery strategy.
+pub fn deserialize_llm_response<T: DeserializeOwned>(
     content: &Value,
     context: &str,
-) -> T {
+) -> Result<T> {
     let content_str = match content {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
 
-    match serde_json::from_str(&content_str) {
-        Ok(output) => output,
-        Err(e) => {
-            tracing::warn!(
-                context = %context,
-                error = %e,
-                content_preview = %truncate_preview(&content_str, 200),
-                "LLM response parse failed, using default"
-            );
-            T::default()
-        }
-    }
+    serde_json::from_str(&content_str).map_err(|e| {
+        tracing::error!(
+            context = %context,
+            error = %e,
+            content_preview = %truncate_preview(&content_str, 200),
+            "LLM response parse failed"
+        );
+        ClaudegenError::LlmApi(format!(
+            "[{context}] JSON parse failed: {e}"
+        ))
+    })
 }
 
 fn preprocess(raw: &str) -> String {

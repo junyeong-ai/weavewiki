@@ -7,14 +7,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProjectType;
+use crate::pipeline::analysis::{SynthesizedAnalysis, SynthesizedInsights};
 use crate::types::Result;
+use crate::types::domain::DomainAnalysisResult;
 
 use super::OutputStrategy;
 use super::constraint_extraction::ExtractedConstraints;
 use super::convention_inference::InferredConventions;
 use super::monorepo_analyzer::MonorepoAnalysis;
 use super::project_detection::ProjectDetection;
-use crate::pipeline::analysis::SynthesizedAnalysis;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputPlan {
@@ -32,6 +33,7 @@ pub struct ClaudeMdPlan {
     pub include_architecture: bool,
     pub include_conventions: bool,
     pub include_constraints: bool,
+    pub include_domain_knowledge: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub enum SectionSource {
     Detection,
     Conventions,
     Constraints,
+    DomainAnalysis,
+    CrossInsights,
     Manual,
 }
 
@@ -160,11 +164,41 @@ impl OutputRouter {
         constraints: &ExtractedConstraints,
         synthesis: Option<&SynthesizedAnalysis>,
     ) -> Result<OutputPlan> {
+        Self::plan_full(
+            detection,
+            monorepo,
+            conventions,
+            constraints,
+            synthesis,
+            None,
+            None,
+        )
+    }
+
+    /// Full planning with all analysis data including domain and cross-reference insights
+    pub fn plan_full(
+        detection: &ProjectDetection,
+        monorepo: Option<&MonorepoAnalysis>,
+        conventions: &InferredConventions,
+        constraints: &ExtractedConstraints,
+        synthesis: Option<&SynthesizedAnalysis>,
+        domain_analysis: Option<&DomainAnalysisResult>,
+        cross_insights: Option<&SynthesizedInsights>,
+    ) -> Result<OutputPlan> {
         let strategy = Self::determine_strategy(detection, monorepo);
-        let claude_md_plan = Self::plan_claude_md(&strategy, detection, conventions, constraints);
+        let claude_md_plan =
+            Self::plan_claude_md(&strategy, detection, conventions, constraints, domain_analysis);
         let rules_plan = Self::plan_rules(&strategy, monorepo, conventions, constraints);
-        let skills_plan = Self::plan_skills(&strategy, constraints, monorepo, synthesis);
-        let agents_plan = Self::plan_agents(&strategy, detection, monorepo, synthesis);
+        let skills_plan =
+            Self::plan_skills(&strategy, constraints, monorepo, synthesis, domain_analysis);
+        let agents_plan = Self::plan_agents(
+            &strategy,
+            detection,
+            monorepo,
+            synthesis,
+            domain_analysis,
+            cross_insights,
+        );
 
         let plan = OutputPlan {
             strategy,
@@ -204,6 +238,7 @@ impl OutputRouter {
         detection: &ProjectDetection,
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
+        domain_analysis: Option<&DomainAnalysisResult>,
     ) -> ClaudeMdPlan {
         let content_scope = match strategy {
             OutputStrategy::Unified => ContentScope::Full,
@@ -247,6 +282,22 @@ impl OutputRouter {
                     source: SectionSource::Constraints,
                 });
             }
+
+            // Add domain knowledge section if domain analysis has content
+            if let Some(domain) = domain_analysis {
+                let has_domain_content = !domain.policies.is_empty()
+                    || !domain.core_logic.is_empty()
+                    || !domain.glossary.terms.is_empty()
+                    || !domain.workflows.is_empty();
+
+                if has_domain_content {
+                    sections.push(PlannedSection {
+                        name: "Domain Knowledge".to_string(),
+                        priority: SectionPriority::Recommended,
+                        source: SectionSource::DomainAnalysis,
+                    });
+                }
+            }
         }
 
         if detection.is_monorepo {
@@ -257,6 +308,15 @@ impl OutputRouter {
             });
         }
 
+        let has_domain_content = domain_analysis
+            .map(|d| {
+                !d.policies.is_empty()
+                    || !d.core_logic.is_empty()
+                    || !d.glossary.terms.is_empty()
+                    || !d.workflows.is_empty()
+            })
+            .unwrap_or(false);
+
         ClaudeMdPlan {
             content_scope,
             sections,
@@ -264,6 +324,7 @@ impl OutputRouter {
             include_conventions: content_scope == ContentScope::Full,
             include_constraints: content_scope == ContentScope::Full
                 && !constraints.anti_patterns.is_empty(),
+            include_domain_knowledge: content_scope == ContentScope::Full && has_domain_content,
         }
     }
 
@@ -341,11 +402,12 @@ impl OutputRouter {
         constraints: &ExtractedConstraints,
         monorepo: Option<&MonorepoAnalysis>,
         synthesis: Option<&SynthesizedAnalysis>,
+        domain_analysis: Option<&DomainAnalysisResult>,
     ) -> SkillsPlan {
         let mut planned_skills = Vec::new();
 
         for workflow in &constraints.complex_workflows {
-            if workflow.automation_potential >= 0.5 {
+            if !workflow.steps.is_empty() {
                 planned_skills.push(PlannedSkill {
                     name: to_kebab_case(&workflow.name),
                     trigger: workflow.trigger.clone(),
@@ -357,7 +419,7 @@ impl OutputRouter {
 
         if let Some(synth) = synthesis {
             for module in &synth.modules {
-                if module.patterns.len() >= 3 && !module.internal_deps.is_empty() {
+                if !module.patterns.is_empty() && !module.internal_deps.is_empty() {
                     let skill_name = format!("{}-workflow", to_kebab_case(&module.name));
                     if !planned_skills.iter().any(|s| s.name == skill_name) {
                         planned_skills.push(PlannedSkill {
@@ -371,6 +433,22 @@ impl OutputRouter {
             }
         }
 
+        // Skills from domain business workflows
+        if let Some(domain) = domain_analysis {
+            for workflow in &domain.workflows {
+                let skill_name = to_kebab_case(&workflow.name);
+                if !planned_skills.iter().any(|s| s.name == skill_name) {
+                    planned_skills.push(PlannedSkill {
+                        name: skill_name,
+                        trigger: workflow.description.clone(),
+                        source: SkillSource::ComplexWorkflow,
+                        project_scope: None,
+                    });
+                }
+            }
+        }
+
+        // Cross-project skill for monorepos
         if let Some(mono) = monorepo
             && strategy.requires_subproject_agents()
             && mono.subprojects.len() > 1
@@ -389,27 +467,27 @@ impl OutputRouter {
         }
     }
 
-    /// Dynamic agent planning based on synthesis analysis
-    /// Instead of hardcoded project-type agents, derive agents from actual codebase insights
+    /// Dynamic agent planning based on synthesis, domain analysis, and cross insights
+    /// Derives agents from actual codebase insights rather than hardcoded patterns
     fn plan_agents(
         strategy: &OutputStrategy,
         detection: &ProjectDetection,
         monorepo: Option<&MonorepoAnalysis>,
         synthesis: Option<&SynthesizedAnalysis>,
+        domain_analysis: Option<&DomainAnalysisResult>,
+        cross_insights: Option<&SynthesizedInsights>,
     ) -> AgentsPlan {
         let mut planned_agents = Vec::new();
 
         if let Some(synth) = synthesis {
             for module in &synth.modules {
-                let complexity_score = module.constraints.len() as f32 * 0.4
-                    + module.patterns.len() as f32 * 0.3
-                    + module.internal_deps.len() as f32 * 0.3;
+                let has_complexity = !module.constraints.is_empty()
+                    || module.patterns.len() >= 2
+                    || module.internal_deps.len() >= 2;
 
-                // Only create agents for truly complex modules
-                if complexity_score >= 2.0 && !module.responsibility.is_empty() {
+                if has_complexity && !module.responsibility.is_empty() {
                     let agent_name = format!("{}-specialist", to_kebab_case(&module.name));
 
-                    // Skip generic names
                     if !is_generic_agent_name(&agent_name) {
                         planned_agents.push(PlannedAgent {
                             name: agent_name,
@@ -419,7 +497,6 @@ impl OutputRouter {
                                 module
                                     .constraints
                                     .iter()
-                                    .take(3)
                                     .map(|c| c.as_str())
                                     .collect::<Vec<_>>()
                                     .join("; ")
@@ -430,13 +507,12 @@ impl OutputRouter {
                 }
             }
 
-            // Create constraint-based agents for areas with many gotchas
+            // Constraint-based agents for areas with patterns - no arbitrary limit
             let constraint_areas = synth
                 .deep
                 .patterns
                 .iter()
-                .filter(|p| p.locations.len() >= 2)
-                .take(2);
+                .filter(|p| p.locations.len() >= 2);
 
             for pattern in constraint_areas {
                 let area_name = pattern.name.replace(' ', "-").to_lowercase();
@@ -453,7 +529,67 @@ impl OutputRouter {
             }
         }
 
-        // Secondary: Add cross-project coordinator for monorepos
+        // Domain expert agents from core domain logic - include all
+        if let Some(domain) = domain_analysis {
+            for logic in &domain.core_logic {
+                let agent_name = format!("{}-expert", to_kebab_case(&logic.name));
+                if !planned_agents.iter().any(|a| a.name == agent_name)
+                    && !is_generic_agent_name(&agent_name)
+                {
+                    planned_agents.push(PlannedAgent {
+                        name: agent_name,
+                        role: format!(
+                            "Expert in {} ({:?}): {}",
+                            logic.name, logic.logic_type, logic.description
+                        ),
+                        scope: AgentScope::Domain(logic.location.file.clone()),
+                    });
+                }
+            }
+
+            // Policy enforcement agents for strict policies
+            for policy in domain.policies.iter().filter(|p| {
+                matches!(
+                    p.enforcement,
+                    crate::types::domain::EnforcementLevel::Strict
+                )
+            }) {
+                let agent_name = format!("{}-enforcer", to_kebab_case(&policy.name));
+                if !planned_agents.iter().any(|a| a.name == agent_name)
+                    && !is_generic_agent_name(&agent_name)
+                {
+                    planned_agents.push(PlannedAgent {
+                        name: agent_name,
+                        role: format!(
+                            "Enforce {} policy ({:?}): {}",
+                            policy.name, policy.policy_type, policy.description
+                        ),
+                        scope: AgentScope::Global,
+                    });
+                }
+            }
+        }
+
+        // Agents for critical cross-module concerns from tier3 insights - include all
+        if let Some(insights) = cross_insights {
+            for insight in &insights.tier3_insights {
+                let agent_name = format!("{}-guardian", to_kebab_case(&insight.title));
+                if !planned_agents.iter().any(|a| a.name == agent_name)
+                    && !is_generic_agent_name(&agent_name)
+                {
+                    planned_agents.push(PlannedAgent {
+                        name: agent_name,
+                        role: format!(
+                            "Guard against: {} → {}",
+                            insight.description, insight.prevention_guidance
+                        ),
+                        scope: AgentScope::Global,
+                    });
+                }
+            }
+        }
+
+        // Cross-project coordinator for monorepos
         if strategy.requires_subproject_agents()
             && let Some(mono) = monorepo
             && mono.subprojects.len() >= 2
@@ -468,28 +604,26 @@ impl OutputRouter {
             });
         }
 
-        // Tertiary: Add polyglot coordinator only if truly multi-language
         if detection.languages.len() > 1 {
-            let primary_langs: Vec<_> = detection
+            let significant_langs: Vec<_> = detection
                 .languages
                 .iter()
-                .filter(|l| l.percentage > 10.0)
+                .filter(|l| l.file_count >= 5)
                 .map(|l| l.language.as_str())
                 .collect();
 
-            if primary_langs.len() > 1 {
+            if significant_langs.len() > 1 {
                 planned_agents.push(PlannedAgent {
                     name: "polyglot-integrator".to_string(),
                     role: format!(
                         "Integrate changes across {} codebases with cross-language constraints",
-                        primary_langs.join("/")
+                        significant_langs.join("/")
                     ),
                     scope: AgentScope::Global,
                 });
             }
         }
 
-        // Limit to most valuable agents (avoid agent sprawl)
         if MAX_PLANNED_AGENTS > 0 {
             planned_agents.truncate(MAX_PLANNED_AGENTS);
         }

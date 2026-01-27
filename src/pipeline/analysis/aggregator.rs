@@ -25,6 +25,56 @@ pub struct AggregatedAnalysis {
     pub coverage: Coverage,
 }
 
+impl AggregatedAnalysis {
+    /// Convert to DeepAnalysisResult for compatibility with existing pipeline
+    pub fn to_deep_analysis_result(&self) -> super::DeepAnalysisResult {
+        use super::deep_analyzer::{
+            AnalysisQuality, DeepAnalysisResult, DependencyType, ModuleDependency,
+            SemanticStructure,
+        };
+
+        let patterns = self.patterns.iter().map(|p| p.pattern.clone()).collect();
+
+        let constraints = self
+            .constraints
+            .iter()
+            .map(|c| c.constraint.clone())
+            .collect();
+
+        let dependencies: Vec<ModuleDependency> = self
+            .dependency_graph
+            .edges
+            .iter()
+            .map(|e| ModuleDependency {
+                from_module: e.from.clone(),
+                to_module: e.to.clone(),
+                dependency_type: DependencyType::Import,
+                is_public: true,
+            })
+            .collect();
+
+        let analysis_quality = AnalysisQuality {
+            files_analyzed: self.coverage.analyzed_files,
+            lines_analyzed: self.coverage.analyzed_lines,
+            coverage_ratio: self.coverage.coverage_ratio,
+            evidence_count: self.patterns.len() + self.constraints.len(),
+            validated_refs: 0,
+            filtered_hallucinations: 0,
+            confidence_score: self.coverage.coverage_ratio,
+        };
+
+        DeepAnalysisResult {
+            structure: SemanticStructure::default(),
+            patterns,
+            constraints,
+            dependencies,
+            insights: Vec::new(),
+            key_abstractions: Vec::new(),
+            analysis_quality,
+        }
+    }
+}
+
 /// Project-wide conventions derived from all files
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConventions {
@@ -364,6 +414,11 @@ impl AnalysisAggregator {
             }
         }
 
+        // Hub threshold: modules with incoming edges >= 1/3 of total modules (min 2)
+        // Rationale: In a typical dependency graph, hub modules (utils, common, core)
+        // are imported by many modules. 1/3 threshold identifies frequently-imported
+        // modules. Min of 2 ensures small projects don't flag every module as a hub.
+        // LLM uses this to understand central architectural components.
         let hub_threshold = (modules.len() / 3).max(2);
         let mut hub_modules: Vec<_> = incoming_counts
             .into_iter()

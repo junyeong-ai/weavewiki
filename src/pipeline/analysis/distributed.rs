@@ -8,8 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+
+use crate::ai::response::generate_schema;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -29,7 +32,7 @@ use super::deep_analyzer::{DiscoveredConstraint, Gotcha, ModuleDependency, Patte
 // =============================================================================
 
 /// A chunk of files for parallel analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AnalysisChunk {
     pub chunk_id: String,
     pub module_path: String,
@@ -57,7 +60,7 @@ impl AnalysisChunk {
 }
 
 /// Result from analyzing a single chunk
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ChunkAnalysisResult {
     pub chunk_id: String,
     pub module_path: String,
@@ -72,7 +75,7 @@ pub struct ChunkAnalysisResult {
 }
 
 /// Conventions discovered in a chunk
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ChunkConventions {
     pub naming_patterns: HashMap<NamingCase, usize>,
     pub error_handling: HashMap<ErrorStyle, usize>,
@@ -80,7 +83,7 @@ pub struct ChunkConventions {
     pub import_patterns: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NamingCase {
     #[default]
@@ -91,7 +94,7 @@ pub enum NamingCase {
     ScreamingSnakeCase,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorStyle {
     ResultType,
@@ -101,7 +104,7 @@ pub enum ErrorStyle {
     MonadicChain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AsyncStyle {
     AsyncAwait,
@@ -331,7 +334,12 @@ impl DistributedAnalyzer {
         for (path, content) in file_contents {
             content_prompt.push_str(&format!("\n=== {} ===\n", path));
             let truncated = if content.len() > max_chars_per_file {
-                &content[..max_chars_per_file]
+                // Find valid UTF-8 char boundary
+                let mut end = max_chars_per_file;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &content[..end]
             } else {
                 content
             };
@@ -371,7 +379,7 @@ Analyze thoroughly and return structured findings."#
         let schema = Self::chunk_analysis_schema();
 
         let response = Self::retry_llm_call(provider, &prompt, &schema, module_path).await?;
-        Ok(deserialize_llm_response(&response.content, module_path))
+        deserialize_llm_response(&response.content, module_path)
     }
 
     async fn retry_llm_call(
@@ -416,82 +424,7 @@ Analyze thoroughly and return structured findings."#
     }
 
     fn chunk_analysis_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "patterns": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "category": {"type": "string", "enum": ["architecture", "error_handling", "concurrency", "data_flow", "testing", "configuration", "logging", "performance", "security", "caching", "validation", "other"]},
-                            "description": {"type": "string"},
-                            "locations": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "file": {"type": "string"},
-                                        "line": {"type": "integer"},
-                                        "snippet": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "usage_guidance": {"type": "string"}
-                        },
-                        "required": ["name", "category", "description"]
-                    }
-                },
-                "conventions": {
-                    "type": "object",
-                    "properties": {
-                        "naming_patterns": {"type": "object", "additionalProperties": {"type": "integer"}},
-                        "error_handling": {"type": "object", "additionalProperties": {"type": "integer"}},
-                        "async_patterns": {"type": "object", "additionalProperties": {"type": "integer"}},
-                        "import_patterns": {"type": "array", "items": {"type": "string"}}
-                    }
-                },
-                "constraints": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "kind": {"type": "string", "enum": ["hidden_dependency", "anti_pattern", "invariant", "ordering", "concurrency", "resource", "security"]},
-                            "title": {"type": "string"},
-                            "description": {"type": "string"},
-                            "evidence": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["kind", "title", "description"]
-                    }
-                },
-                "gotchas": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "description": {"type": "string"},
-                            "severity": {"type": "string", "enum": ["low", "medium", "high", "critical"]}
-                        },
-                        "required": ["description"]
-                    }
-                },
-                "dependencies": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from_module": {"type": "string"},
-                            "to_module": {"type": "string"},
-                            "dependency_type": {"type": "string"},
-                            "description": {"type": "string"}
-                        }
-                    }
-                },
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
-            },
-            "required": ["patterns", "conventions", "constraints", "gotchas", "dependencies", "confidence"]
-        })
+        generate_schema::<ChunkAnalysisOutput>()
     }
 }
 
@@ -499,7 +432,7 @@ Analyze thoroughly and return structured findings."#
 // LLM OUTPUT TYPES
 // =============================================================================
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 struct ChunkAnalysisOutput {
     #[serde(default)]
     patterns: Vec<PatternInstance>,

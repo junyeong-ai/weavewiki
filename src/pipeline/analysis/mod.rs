@@ -16,7 +16,6 @@ pub mod cross_synthesis;
 pub mod deep_analyzer;
 pub mod distributed;
 pub mod domain_analyzer;
-pub mod multi_agent;
 pub mod synthesis;
 
 // Distributed Analysis (100% coverage)
@@ -51,7 +50,7 @@ pub use architectural_analyzer::{
 pub use deep_analyzer::{
     AnalysisQuality, CodePattern, ConstraintEnforcement, ConstraintKind, DeepAnalysisResult,
     DeepAnalyzer, DiscoveredConstraint, FileConstraint, FileDeepAnalysis, FileInsight, Gotcha,
-    ModuleDependency, PatternInstance, Relationship,
+    ModuleDependency, PatternInstance, Relationship, ValueBreakdown,
 };
 
 // Synthesis

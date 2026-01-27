@@ -4,42 +4,32 @@
 //! Uses source insights and project context for context-aware regeneration.
 //! Falls back to regeneration when other strategies fail repeatedly.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 use crate::ai::LlmProvider;
+use crate::ai::response::generate_schema;
+use crate::ai::validation::deserialize_llm_response;
 use crate::types::{Agent, Result, Skill};
 
 use super::{
     IssueKind, RefinementStrategy, StrategyContext, StrategyResult, calculate_validated_quality,
 };
 
-/// Minimum content thresholds
-const SKILL_MIN_CHARS: usize = 200;
-const AGENT_MIN_CHARS: usize = 300;
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct SkillBodyOutput {
+    #[serde(default)]
+    skill_body: String,
+}
 
-/// JSON schema for skill body response
-static SKILL_BODY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "skill_body": {"type": "string"}
-        },
-        "required": ["skill_body"]
-    })
-});
-
-/// JSON schema for agent prompt response
-static AGENT_PROMPT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "agent_prompt": {"type": "string"}
-        },
-        "required": ["agent_prompt"]
-    })
-});
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+struct AgentPromptOutput {
+    #[serde(default)]
+    agent_prompt: String,
+}
 
 pub struct RegenerationStrategy {
     provider: Arc<dyn LlmProvider>,
@@ -164,17 +154,19 @@ impl RefinementStrategy for RegenerationStrategy {
         let old_score = calculate_validated_quality(&skill.body, context.file_registry);
         let prompt = self.build_skill_regeneration_prompt(&skill.name, &skill.description, context);
 
-        let schema = &*SKILL_BODY_SCHEMA;
+        let schema = generate_schema::<SkillBodyOutput>();
 
-        match self.provider.generate(&prompt, schema).await {
+        match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                if let Some(body) = response.content.get("skill_body").and_then(|v| v.as_str()) {
-                    let new_score = calculate_validated_quality(body, context.file_registry);
+                let output: SkillBodyOutput =
+                    deserialize_llm_response(&response.content, "skill_regeneration")?;
+
+                if !output.skill_body.is_empty() {
+                    let new_score = calculate_validated_quality(&output.skill_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if new content is better and meets minimum requirements
-                    if body.len() >= SKILL_MIN_CHARS && new_score > old_score + acceptance_delta {
-                        skill.body = body.to_string();
+                    if new_score > old_score + acceptance_delta {
+                        skill.body = output.skill_body;
                         return Ok(StrategyResult {
                             success: true,
                             quality_delta: new_score - old_score,
@@ -204,21 +196,19 @@ impl RefinementStrategy for RegenerationStrategy {
         let old_score = calculate_validated_quality(&agent.prompt, context.file_registry);
         let prompt = self.build_agent_regeneration_prompt(&agent.name, &agent.description, context);
 
-        let schema = &*AGENT_PROMPT_SCHEMA;
+        let schema = generate_schema::<AgentPromptOutput>();
 
-        match self.provider.generate(&prompt, schema).await {
+        match self.provider.generate(&prompt, &schema).await {
             Ok(response) => {
-                if let Some(body) = response
-                    .content
-                    .get("agent_prompt")
-                    .and_then(|v| v.as_str())
-                {
-                    let new_score = calculate_validated_quality(body, context.file_registry);
+                let output: AgentPromptOutput =
+                    deserialize_llm_response(&response.content, "agent_regeneration")?;
+
+                if !output.agent_prompt.is_empty() {
+                    let new_score = calculate_validated_quality(&output.agent_prompt, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
-                    // Only accept if new content is better and meets minimum requirements
-                    if body.len() >= AGENT_MIN_CHARS && new_score > old_score + acceptance_delta {
-                        agent.prompt = body.to_string();
+                    if new_score > old_score + acceptance_delta {
+                        agent.prompt = output.agent_prompt;
                         return Ok(StrategyResult {
                             success: true,
                             quality_delta: new_score - old_score,

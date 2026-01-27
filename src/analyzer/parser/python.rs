@@ -203,7 +203,14 @@ fn extract_functions(root: tree_sitter::Node, content: &str, path: &str, result:
     }
 }
 
-/// Python visibility: underscore prefix means private
+/// Python visibility based on PEP 8 naming convention.
+///
+/// Per PEP 8: "Use one leading underscore only for non-public methods and instance variables."
+/// This is the official Python convention, not a heuristic.
+///
+/// Note: `__dunder__` names are technically public (magic methods), but this
+/// function treats them as private since they're typically not user-facing API.
+/// For precise `__all__` based exports, use the module's actual `__all__` list.
 #[inline]
 fn python_visibility(name: &str) -> Visibility {
     if name.starts_with('_') {

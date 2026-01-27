@@ -291,9 +291,9 @@ impl QualityAssessor {
     pub fn new(target_quality: f32, require_all_dimensions: bool) -> Self {
         Self {
             target_quality,
-            quality_floor: 0.55,
+            quality_floor: 0.75,
             early_exit_threshold: 0.90,
-            early_exit_bypasses_dimensions: true,
+            early_exit_bypasses_dimensions: false,
             require_all_dimensions,
         }
     }
@@ -330,7 +330,8 @@ impl QualityAssessor {
         }
 
         // PATH 2.5: Relaxed quality floor - ANY dimension passes with high quality
-        if combined_quality >= 0.60 && dimensions.any_passed() && dimensions.passed_count() >= 2 {
+        // Use quality_floor for consistency, require 3+ dimensions for safety
+        if combined_quality >= self.quality_floor && dimensions.any_passed() && dimensions.passed_count() >= 3 {
             return Some(AssessmentPath::QualityFloorMet);
         }
 
@@ -378,10 +379,11 @@ impl QualityAssessor {
         }
 
         // 1.5. Stagnation convergence: quality stable at acceptable level
+        // Require minimum_viable or 3+ dimensions to prevent premature convergence
         if !is_improving
             && combined_quality >= self.quality_floor
             && (dimensions.minimum_viable()
-                || (dimensions.any_passed() && dimensions.passed_count() >= 2))
+                || (dimensions.any_passed() && dimensions.passed_count() >= 3))
         {
             if combined_quality >= self.target_quality {
                 return TerminationDecision::Terminate(TerminationReason::Converged(
@@ -494,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_early_exit_convergence() {
-        let checker = QualityAssessor::new(0.85, true);
+        // Explicit early_exit_bypasses_dimensions=true to test early exit path
+        let checker = QualityAssessor::new(0.85, true).with_early_exit(0.90, true);
         let dims = make_dimensions(true, true);
         let result = checker.check(0.90, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::EarlyExit));
@@ -519,20 +522,20 @@ mod tests {
     #[test]
     fn test_quality_floor_convergence() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.55)
+            .with_quality_floor(0.65)
             .with_early_exit(1.0, false);
         let dims = make_dimensions(true, false);
-        let result = checker.check(0.60, &dims, false, 1);
+        let result = checker.check(0.70, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::QualityFloorMet));
     }
 
     #[test]
     fn test_no_issues_convergence_requires_quality() {
         let checker = QualityAssessor::new(0.85, true)
-            .with_quality_floor(0.55)
+            .with_quality_floor(0.65)
             .with_early_exit(1.0, false);
         let dims = make_dimensions(true, false);
-        let result = checker.check(0.50, &dims, false, 0);
+        let result = checker.check(0.60, &dims, false, 0);
         assert_eq!(result, None);
         let result = checker.check(0.85, &dims, false, 0);
         assert_eq!(result, Some(AssessmentPath::QualityTargetMet));
@@ -541,21 +544,21 @@ mod tests {
     #[test]
     fn test_minimum_viable_path() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.55)
+            .with_quality_floor(0.65)
             .with_early_exit(1.0, false);
         let mut dims = make_dimensions(true, false);
         dims.evidence_quality.passed = false;
-        let result = checker.check(0.60, &dims, false, 1);
+        let result = checker.check(0.70, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::QualityFloorMet));
     }
 
     #[test]
     fn test_aggregated_feedback_convergence() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.55)
+            .with_quality_floor(0.65)
             .with_early_exit(1.0, false);
         let dims = make_dimensions(true, false);
-        let result = checker.check(0.60, &dims, true, 1);
+        let result = checker.check(0.70, &dims, true, 1);
         assert_eq!(result, Some(AssessmentPath::QualityFloorMet));
     }
 }

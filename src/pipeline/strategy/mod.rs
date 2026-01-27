@@ -96,6 +96,15 @@ impl StrategyIssue {
     }
 }
 
+/// Default quality improvement delta required for refinement acceptance.
+///
+/// Rationale: Refinement should produce measurable improvement.
+/// 2% (0.02) is chosen as the minimum threshold because:
+/// - Smaller improvements may be noise from scoring variance
+/// - Larger thresholds would reject valid incremental progress
+/// - Matches typical quality score granularity in the pipeline
+const DEFAULT_QUALITY_ACCEPTANCE_DELTA: f32 = 0.02;
+
 /// Rich context for refinement strategies
 ///
 /// Provides file registry and issue context for strategy-based refinement.
@@ -109,7 +118,8 @@ pub struct StrategyContext<'a> {
     pub suggestions: Vec<String>,
     /// Validation feedback from previous passes
     pub validation_feedback: Option<ValidationFeedback>,
-    /// Minimum quality improvement required for acceptance
+    /// Minimum quality improvement required for acceptance.
+    /// Default: 0.02 (2%) - refinement must improve quality by at least this amount.
     pub quality_acceptance_delta: f32,
 }
 
@@ -121,7 +131,7 @@ impl<'a> StrategyContext<'a> {
             issues: Vec::new(),
             suggestions: Vec::new(),
             validation_feedback: None,
-            quality_acceptance_delta: 0.02,
+            quality_acceptance_delta: DEFAULT_QUALITY_ACCEPTANCE_DELTA,
         }
     }
 
@@ -477,8 +487,15 @@ impl StrategyRotator {
 }
 
 /// Lightweight quality heuristic for quick filtering.
-/// This is NOT a quality judgment - LLM makes the final quality assessment.
-/// This only checks basic structural requirements (has content, has evidence).
+/// Structural completeness check - NOT a quality judgment.
+/// Returns a score indicating structural completeness only.
+/// LLM Judge makes the actual quality assessment.
+///
+/// Design rationale:
+/// - Simple universal heuristics that work across all languages/frameworks
+/// - No language-specific patterns or Markdown assumptions
+/// - Provides gradient signal for refinement loops
+/// - Does NOT filter or reject - only measures
 pub fn calculate_quick_quality(content: &str) -> f32 {
     use super::file_reference;
 
@@ -487,41 +504,59 @@ pub fn calculate_quick_quality(content: &str) -> f32 {
         return 0.0;
     }
 
-    // Evidence: Has file references? (verifiable anchors to codebase)
-    let file_refs = file_reference::count_references(content);
-    let has_evidence = file_refs > 0;
+    // Reference density: more references = more anchored to codebase
+    // Uses count directly rather than binary has/doesn't have
+    let ref_count = file_reference::count_references(content);
+    let ref_score = (ref_count as f32 / 5.0).min(1.0); // Saturates at 5 refs
 
-    // Substance: Has meaningful content? (not just a single line)
-    // Count non-empty lines (format-agnostic, no Markdown assumptions)
-    let content_lines = trimmed.lines().filter(|l| l.trim().len() >= 5).count();
-    let has_substance = content_lines >= 3;
+    // Content density: longer content = more comprehensive (generally)
+    // Uses character count - works for all languages including CJK
+    let char_count = trimmed.chars().count();
+    let content_score = (char_count as f32 / 500.0).min(1.0); // Saturates at 500 chars
 
-    // Simple scoring: base 0.5, +0.25 for evidence, +0.25 for substance
-    let mut score = 0.5;
-    if has_evidence {
-        score += 0.25;
-    }
-    if has_substance {
-        score += 0.25;
-    }
-
-    score
+    // Weighted combination: references matter more than length
+    // 60% reference density, 40% content density
+    0.6 * ref_score + 0.4 * content_score
 }
 
+/// Validated quality with reference resolution.
+/// Adjusts score based on how many references resolve to actual files.
+/// Invalid references reduce score but don't gate acceptance.
 pub fn calculate_validated_quality(content: &str, registry: &VerifiedFileRegistry) -> f32 {
-    let base_quality = calculate_quick_quality(content);
+    let base = calculate_quick_quality(content);
 
     let refs = super::file_reference::extract_references(content);
     if refs.is_empty() {
-        return base_quality;
+        return base;
     }
 
-    let valid_refs = refs.iter().filter(|r| registry.contains(&r.path)).count();
+    let valid_count = refs.iter().filter(|r| registry.contains(&r.path)).count();
+    let total = refs.len();
 
-    let validity_ratio = valid_refs as f32 / refs.len() as f32;
-    let evidence_adjustment = (validity_ratio - 0.5) * 0.1;
+    // Validity ratio directly scales the reference portion of the score
+    // If all refs valid: no change. If none valid: reduces by ~30%
+    let validity_ratio = valid_count as f32 / total as f32;
 
-    (base_quality + evidence_adjustment).clamp(0.0, 1.0)
+    // Log invalid references as warnings, not errors
+    // This provides feedback without blocking
+    if validity_ratio < 1.0 {
+        let invalid: Vec<_> = refs
+            .iter()
+            .filter(|r| !registry.contains(&r.path))
+            .map(|r| r.path.as_str())
+            .take(3)
+            .collect();
+        tracing::debug!(
+            valid = valid_count,
+            total = total,
+            invalid_samples = ?invalid,
+            "Some file references not found in registry"
+        );
+    }
+
+    // Adjust base score: validity ratio affects only reference component (60%)
+    let adjusted = base * (0.4 + 0.6 * validity_ratio);
+    adjusted.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -546,14 +581,17 @@ mod tests {
 
     #[test]
     fn test_quick_quality_calculation() {
+        // 1 reference + short content = low-moderate quality
         let content = "You must use @src/main.rs:10 and should avoid direct access.
 ## Example
 ```rust
 // good code
 ```";
         let score = calculate_quick_quality(content);
-        assert!(score > 0.2, "Expected score > 0.2, got {}", score);
+        // Formula: 0.6 * (1/5) + 0.4 * (~100/500) ≈ 0.12 + 0.08 = 0.20
+        assert!(score > 0.15, "Expected score > 0.15, got {}", score);
 
+        // 2 references + moderate content = moderate quality
         let rich_content = "You must always prefer @src/main.rs:10 over alternatives.
 You should use @src/lib.rs:20 and must avoid direct access.
 ## Overview
@@ -567,9 +605,10 @@ fn main() {}
 ## Gotchas
 Things to avoid.";
         let rich_score = calculate_quick_quality(rich_content);
+        // Formula: 0.6 * (2/5) + 0.4 * (~280/500) ≈ 0.24 + 0.22 = 0.46
         assert!(
-            rich_score > 0.5,
-            "Expected rich_score > 0.5, got {}",
+            rich_score > 0.4,
+            "Expected rich_score > 0.4, got {}",
             rich_score
         );
 

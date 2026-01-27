@@ -11,6 +11,20 @@
 //! - Periodic checkpointing for crash recovery
 //! - Lock file for concurrent execution prevention
 //! - Progress persistence across sessions
+//!
+//! # Threshold Constants
+//!
+//! The following thresholds are used for quality gates. These are empirical
+//! values based on testing across diverse codebases:
+//!
+//! - `EVIDENCE_INVALID_RATIO_THRESHOLD` (0.3): Maximum allowed ratio of invalid
+//!   file references. Above this, the output is considered unreliable.
+//!   Rationale: Some false positives are expected from pattern matching,
+//!   but >30% invalid suggests systematic hallucination.
+//!
+//! - `EVIDENCE_GAP_ESCALATION_THRESHOLD` (5): Number of evidence gaps that
+//!   triggers analysis depth escalation.
+//!   Rationale: Few gaps may be sampling variance; 5+ suggests coverage issue.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +32,7 @@ use std::time::Duration;
 
 use tokio::sync::OnceCell;
 
-use crate::ai::{LlmProvider, ProviderSet, phase_id, with_timeout};
+use crate::ai::{ProviderSet, phase_id, with_timeout};
 use crate::config::{AnalysisDepth, Config};
 use crate::types::Result;
 
@@ -30,7 +44,18 @@ use super::checkpoint::{
 use super::context::ClaudegenContext;
 use super::context::VerifiedFileRegistry;
 use super::deep_review::{DeepReviewEngine, ReviewArtifacts, TwoPassResult};
-// Simplified: ValidationPipeline replaced with LLM Judge in quality module
+
+/// Maximum allowed ratio of invalid file references before failing evidence check.
+///
+/// Rationale: Pattern-based reference extraction has some false positives.
+/// Up to 30% invalid is acceptable noise; above suggests LLM hallucination.
+const EVIDENCE_INVALID_RATIO_THRESHOLD: f32 = 0.3;
+
+/// Number of evidence gaps that triggers analysis depth escalation.
+///
+/// Rationale: Few gaps may be sampling variance or edge cases.
+/// 5+ gaps suggests systematic coverage issue requiring deeper analysis.
+const EVIDENCE_GAP_ESCALATION_THRESHOLD: usize = 5;
 
 /// Simplified clean pass status
 #[derive(Debug, Clone)]
@@ -119,18 +144,6 @@ impl QualityLoop {
     pub fn with_metrics(mut self, metrics: crate::ai::metrics::SharedMetrics) -> Self {
         self.metrics = Some(metrics);
         self
-    }
-
-    /// Create a QualityLoop with a single provider for all phases (backward compatibility)
-    ///
-    /// **Warning**: This path does NOT include ProviderChain resilience (circuit breaker, retry).
-    /// For production use, prefer `QualityLoop::new()` with a ProviderSet from `create_provider_set()`.
-    pub fn with_single_provider(
-        project_root: PathBuf,
-        provider: Arc<dyn LlmProvider>,
-        config: Config,
-    ) -> Self {
-        Self::new(project_root, ProviderSet::single(provider), config)
     }
 
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
@@ -464,11 +477,11 @@ impl QualityLoop {
                 })
                 .unwrap_or(0.0);
 
-            if analysis_confidence < loop_config.target_score {
+            if analysis_confidence < loop_config.target_quality {
                 tracing::warn!(
                     iteration = outer_iter + 1,
                     confidence = format!("{:.1}%", analysis_confidence * 100.0),
-                    threshold = format!("{:.1}%", loop_config.target_score * 100.0),
+                    threshold = format!("{:.1}%", loop_config.target_quality * 100.0),
                     "Analysis confidence below threshold, escalating depth"
                 );
 
@@ -510,11 +523,11 @@ impl QualityLoop {
                 continue;
             }
 
-            if synthesis_confidence < loop_config.target_score {
+            if synthesis_confidence < loop_config.target_quality {
                 tracing::warn!(
                     iteration = outer_iter + 1,
                     confidence = format!("{:.1}%", synthesis_confidence * 100.0),
-                    threshold = format!("{:.1}%", loop_config.target_score * 100.0),
+                    threshold = format!("{:.1}%", loop_config.target_quality * 100.0),
                     "Synthesis confidence below threshold, escalating depth"
                 );
 
@@ -557,13 +570,13 @@ impl QualityLoop {
             }
 
             let evidence_check = self.validate_evidence(&result).await;
-            if evidence_check.invalid_ratio > 0.3 {
+            if evidence_check.invalid_ratio > EVIDENCE_INVALID_RATIO_THRESHOLD {
                 tracing::warn!(
                     iteration = outer_iter + 1,
                     invalid = evidence_check.invalid_refs,
                     total = evidence_check.total_refs,
                     ratio = format!("{:.1}%", evidence_check.invalid_ratio * 100.0),
-                    threshold = format!("{:.1}%", 0.3 * 100.0),
+                    threshold = format!("{:.1}%", EVIDENCE_INVALID_RATIO_THRESHOLD * 100.0),
                     "Evidence validation failed: too many invalid file references"
                 );
 
@@ -575,7 +588,7 @@ impl QualityLoop {
                     });
                 }
 
-                if evidence_check.gaps.len() >= 5 {
+                if evidence_check.gaps.len() >= EVIDENCE_GAP_ESCALATION_THRESHOLD {
                     if let Some(escalated) =
                         self.try_escalate_analysis_depth(current_config.clone())
                     {
@@ -608,7 +621,7 @@ impl QualityLoop {
                 }
             }
 
-            if result.quality_score >= self.config.quality().min_score {
+            if result.quality_score >= self.config.quality().min_quality {
                 // Run deep review if enabled
                 let (deep_review_passed, deep_review_attempts) =
                     if self.config.deep_review().required_passes > 0 {
@@ -664,7 +677,7 @@ impl QualityLoop {
             tracing::debug!(
                 iteration = outer_iter + 1,
                 quality = format!("{:.1}%", result.quality_score * 100.0),
-                target = format!("{:.1}%", self.config.quality().min_score * 100.0),
+                target = format!("{:.1}%", self.config.quality().min_quality * 100.0),
                 "Quality below target, continuing loop"
             );
         }
@@ -877,7 +890,7 @@ impl QualityLoop {
         }
 
         let quality_score = result.quality_score;
-        let required_quality = self.config.quality().minimum_quality;
+        let required_quality = self.config.quality().min_quality;
 
         // Collect issues from all validation layers
         let mut error_count = 0;

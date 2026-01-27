@@ -480,7 +480,12 @@ pub fn build_inference_prompt(
         .take(max_samples)
         .map(|(path, content)| {
             let preview = if content.len() > 500 {
-                format!("{}...", &content[..500])
+                // Find valid UTF-8 char boundary to avoid panic on multi-byte chars
+                let mut end = 500;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &content[..end])
             } else {
                 content.clone()
             };

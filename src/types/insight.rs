@@ -1,10 +1,11 @@
 //! Insight types for extracted knowledge from codebase analysis
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Tier classification for content value assessment
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TierClassification {
     Tier0Hallucinated,
@@ -92,7 +93,7 @@ impl std::fmt::Display for TierClassification {
 }
 
 /// Target artifact type for insight classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactClassification {
     #[default]
@@ -104,7 +105,7 @@ pub enum ArtifactClassification {
 }
 
 /// Module-level context for insight scoping
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModuleContext {
     pub path: String,
     pub name: String,
@@ -148,7 +149,7 @@ impl ModuleContext {
 }
 
 /// Domain-level context for business-aware insights
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DomainContext {
     pub domain: String,
     pub business_rules: Vec<String>,

@@ -5,8 +5,12 @@
 
 use std::collections::HashMap;
 
-/// Maximum number of suggestions to return (0 = unlimited)
-const MAX_SUGGESTIONS: usize = 10; // Increased from hardcoded 5
+/// Maximum number of suggestions to return (0 = unlimited).
+///
+/// Rationale: More than 10 suggestions overwhelms users and dilutes focus.
+/// LLM should prioritize most impactful issues; this truncation ensures
+/// output remains actionable rather than exhaustive.
+const MAX_SUGGESTIONS: usize = 10;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +77,18 @@ pub struct FeedbackAggregator {
 }
 
 impl Default for FeedbackAggregator {
+    /// Default feedback aggregation settings.
+    ///
+    /// Threshold rationale:
+    /// - `target_quality: 0.85` (85%) - High bar for production readiness; below this
+    ///   indicates significant gaps. Based on manual review of generated artifacts.
+    /// - `dimension_pass_threshold: 0.6` (60%) - Minimum for any dimension. Below 60%
+    ///   means critical failures in that area (e.g., no evidence, no structure).
+    ///
+    /// Weight rationale (40/30/30):
+    /// - Quality (40%): Semantic correctness is most important - useless if inaccurate.
+    /// - Structural (30%): Module coverage ensures completeness.
+    /// - Evidence (30%): File references ground claims in reality.
     fn default() -> Self {
         Self {
             target_quality: 0.85,
@@ -191,6 +207,15 @@ impl FeedbackAggregator {
         issues
     }
 
+    /// Calculate impact score for issue prioritization.
+    ///
+    /// Scores reflect relative urgency for refinement:
+    /// - Critical (1.0): Blocks release; must fix immediately
+    /// - High (0.8): Significant issue; high priority
+    /// - Medium (0.5): Notable issue; address in iteration
+    /// - Low (0.2): Minor; can defer if time-constrained
+    ///
+    /// These weights affect issue sorting, not pass/fail decisions.
     fn calculate_impact(&self, priority: Severity) -> f32 {
         match priority {
             Severity::Critical => 1.0,

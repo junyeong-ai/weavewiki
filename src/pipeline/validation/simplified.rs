@@ -18,6 +18,11 @@
 
 use std::collections::HashSet;
 
+/// Minimum evidence coverage score to pass validation.
+/// Set at 50% because LLM may reference directories, renamed files, or generated paths.
+/// This is a soft threshold - LLM judge makes the final quality decision.
+const EVIDENCE_COVERAGE_THRESHOLD: f32 = 0.5;
+
 use crate::pipeline::context::VerifiedFileRegistry;
 use crate::types::{Agent, ContentTier, ProjectMemory, Rule, Skill};
 use crate::utils::patterns::extract_file_refs;
@@ -131,8 +136,10 @@ impl ConsistencyResult {
             }
         }
 
+        // Monorepo rules check removed - some monorepos work fine with shared conventions
+        // Having no path-based rules is valid if all subprojects follow same patterns
         if is_monorepo && rules.is_empty() {
-            issues.push("Monorepo detected but no path-based rules generated".to_string());
+            tracing::debug!("Monorepo without path-based rules - using shared conventions");
         }
 
         Self {
@@ -161,10 +168,7 @@ impl CrossValidationResult {
             EvidenceTraceabilityResult::check(skills, agents, rules, claude_md, file_registry);
         let plan_consistency = PlanConsistencyResult::check(skills, agents, claude_md);
 
-        // Evidence check is advisory, not a hard gate
-        // LLM may intentionally reference directories, renamed files, or generated paths
-        // Only fail if evidence coverage is very poor (< 50% valid references)
-        let evidence_ok = evidence_traceability.coverage_score >= 0.5;
+        let evidence_ok = evidence_traceability.coverage_score >= EVIDENCE_COVERAGE_THRESHOLD;
 
         let passed = evidence_ok && plan_consistency.passed;
 
@@ -335,6 +339,8 @@ mod tests {
             commands: Vec::new(),
             standards: Vec::new(),
             imports: Vec::new(),
+            domain_knowledge: None,
+            gotchas: Vec::new(),
         };
 
         let result = PlanConsistencyResult::check(&[], &[], &claude_md);

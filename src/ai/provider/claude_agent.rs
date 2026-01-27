@@ -22,8 +22,8 @@ mod inner {
     use crate::types::{ClaudegenError, Result};
 
     const DEFAULT_MODEL: &str = "claude-sonnet-4-5-20250929";
-    const MAX_ATTEMPTS: u32 = 2;
-    const TOKEN_INCREASE_FACTOR: f64 = 1.5;
+    const MAX_ATTEMPTS: u32 = 4;
+    const TOKEN_INCREASE_FACTOR: f64 = 2.0;
 
     pub struct ClaudeAgentProvider {
         client: Client,
@@ -292,14 +292,16 @@ mod inner {
                         ));
                     }
                     Err(e) => {
-                        let can_retry =
-                            stop_reason == StopReason::MaxTokens && attempt < MAX_ATTEMPTS;
+                        let is_truncation = stop_reason == StopReason::MaxTokens
+                            || e.to_string().contains("EOF while parsing");
+                        let can_retry = is_truncation && attempt < MAX_ATTEMPTS;
                         if can_retry {
                             current_max_tokens =
                                 (current_max_tokens as f64 * TOKEN_INCREASE_FACTOR) as u32;
                             tracing::warn!(
                                 attempt,
                                 new_max_tokens = current_max_tokens,
+                                error = %e,
                                 "Response truncated, retrying with increased tokens"
                             );
                             continue;

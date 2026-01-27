@@ -6,6 +6,7 @@
 //! - Domain terminology (entities, actions, states)
 //! - Business workflows (sequences, state machines, transactions)
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -16,7 +17,7 @@ use super::EvidenceLocation;
 // =============================================================================
 
 /// Domain core policy extracted from codebase
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DomainPolicy {
     pub name: String,
     pub description: String,
@@ -59,7 +60,7 @@ impl DomainPolicy {
 }
 
 /// Type of domain policy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyType {
     /// Input validation rules
@@ -102,7 +103,7 @@ impl fmt::Display for PolicyType {
 }
 
 /// Enforcement level for policies
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EnforcementLevel {
     /// Must be followed, failure results in error
@@ -135,7 +136,7 @@ impl fmt::Display for EnforcementLevel {
 // =============================================================================
 
 /// Core domain logic identified in the codebase
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CoreDomainLogic {
     pub name: String,
     pub description: String,
@@ -174,7 +175,7 @@ impl CoreDomainLogic {
 }
 
 /// Type of domain logic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainLogicType {
     /// Calculation logic (pricing, scoring, statistics)
@@ -221,7 +222,7 @@ impl fmt::Display for DomainLogicType {
 // =============================================================================
 
 /// Domain glossary containing terminology
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct DomainGlossary {
     pub terms: Vec<DomainTerm>,
     pub abbreviations: Vec<Abbreviation>,
@@ -258,7 +259,7 @@ impl DomainGlossary {
 }
 
 /// Single domain term with definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DomainTerm {
     pub term: String,
     pub definition: String,
@@ -294,7 +295,7 @@ impl DomainTerm {
 }
 
 /// Category of domain term
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TermCategory {
     /// Core entity (User, Order, Product)
@@ -334,7 +335,7 @@ impl fmt::Display for TermCategory {
 }
 
 /// Abbreviation used in the codebase
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Abbreviation {
     pub short: String,
     pub full: String,
@@ -357,7 +358,7 @@ impl Abbreviation {
 }
 
 /// Relationship between domain terms
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TermRelationship {
     pub from_term: String,
     pub to_term: String,
@@ -375,7 +376,7 @@ impl TermRelationship {
 }
 
 /// Type of relationship between terms
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TermRelationType {
     /// A is a type of B (inheritance)
@@ -397,7 +398,7 @@ pub enum TermRelationType {
 // =============================================================================
 
 /// Business workflow identified in the codebase
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BusinessWorkflow {
     pub name: String,
     pub description: String,
@@ -440,7 +441,7 @@ impl BusinessWorkflow {
 }
 
 /// Single step in a business workflow
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowStep {
     pub order: usize,
     pub name: String,
@@ -484,7 +485,7 @@ impl WorkflowStep {
 // =============================================================================
 
 /// Complete domain analysis result
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct DomainAnalysisResult {
     pub policies: Vec<DomainPolicy>,
     pub core_logic: Vec<CoreDomainLogic>,
