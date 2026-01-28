@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod constraint_extraction;
 pub mod convention_inference;
 pub mod few_shot;
+pub mod module_detection;
 pub mod monorepo_analyzer;
 pub mod output_router;
 pub mod project_detection;
@@ -50,8 +51,12 @@ pub use convention_inference::{
 pub use few_shot::{
     FewShotExample, get_claude_md_example, get_examples, get_rule_example, get_skill_example,
 };
+pub use module_detection::{ModuleDetectionResult, ModuleDetector};
 pub use monorepo_analyzer::{CrossDependency, MonorepoAnalysis, SharedPackage, SubprojectInfo};
-pub use output_router::{AgentsPlan, ClaudeMdPlan, OutputPlan, RulesPlan, SkillsPlan};
+pub use output_router::{
+    AgentsPlan, ClaudeMdPlan, ModuleMapPlan, OrchestrationPlan, OutputPlan,
+    PlannedGroupOrchestrator, RulesPlan, SkillsPlan,
+};
 pub use project_detection::{
     DetectionSignal, LanguageInfo, ProjectDetection, ProjectDetector, SignalType, WorkspaceConfig,
     WorkspaceMember, WorkspaceType,

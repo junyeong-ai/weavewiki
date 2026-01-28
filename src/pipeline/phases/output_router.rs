@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::ProjectType;
 use crate::pipeline::analysis::{SynthesizedAnalysis, SynthesizedInsights};
 use crate::types::Result;
-use crate::types::domain::DomainAnalysisResult;
+use crate::types::domain::{DomainAnalysisResult, PolicyType};
+use crate::types::module_map::{DetectedModule, ModuleGroup};
 
 use super::OutputStrategy;
 use super::constraint_extraction::ExtractedConstraints;
@@ -24,6 +25,68 @@ pub struct OutputPlan {
     pub rules_plan: RulesPlan,
     pub skills_plan: SkillsPlan,
     pub agents_plan: AgentsPlan,
+    pub orchestration_plan: Option<OrchestrationPlan>,
+    pub module_map_plan: Option<ModuleMapPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedGroupOrchestrator {
+    pub name: String,
+    pub group_id: String,
+    pub module_agent_names: Vec<String>,
+    pub tools: Vec<String>,
+    pub model: String,
+    pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationPlan {
+    pub orchestration_skills: Vec<PlannedOrchestrationSkill>,
+    pub module_skills: Vec<PlannedModuleSkill>,
+    pub orchestration_agents: Vec<PlannedOrchestrationAgent>,
+    pub module_agents: Vec<PlannedModuleAgent>,
+    pub group_orchestrators: Vec<PlannedGroupOrchestrator>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedOrchestrationSkill {
+    pub name: String,
+    pub description: String,
+    pub user_invocable: bool,
+    pub disable_model_invocation: bool,
+    pub context: Option<String>,
+    pub agent: Option<String>,
+    pub allowed_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedModuleSkill {
+    pub name: String,
+    pub module_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedOrchestrationAgent {
+    pub name: String,
+    pub description: String,
+    pub tools: Vec<String>,
+    pub model: String,
+    pub permission_mode: String,
+    pub skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedModuleAgent {
+    pub name: String,
+    pub module_id: String,
+    pub tools: Vec<String>,
+    pub model: String,
+    pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleMapPlan {
+    pub output_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,42 +204,22 @@ pub enum AgentScope {
 }
 
 /// Maximum number of agents to plan (prevents agent sprawl)
-/// Set to 0 for unlimited. LLM can generate fewer based on project needs.
-const MAX_PLANNED_AGENTS: usize = 10; // Increased from hardcoded 5
+const MAX_PLANNED_AGENTS: usize = 10;
+
+// --- Orchestration generation thresholds ---
+const MIN_MODULES_FOR_GROUPING: usize = 6;
+const MIN_MODULES_FOR_ORCHESTRATOR: usize = 2;
+const MIN_MODULES_FOR_ARCHITECT: usize = 3;
+const QA_RISK_THRESHOLD: f32 = 0.5;
+const MIN_GOTCHAS_FOR_QA: usize = 3;
+const HIGH_RISK_THRESHOLD: f32 = 0.7;
+const HIGH_VALUE_THRESHOLD: f32 = 0.8;
 
 pub struct OutputRouter;
 
 impl OutputRouter {
+    #[allow(clippy::too_many_arguments)]
     pub fn plan(
-        detection: &ProjectDetection,
-        monorepo: Option<&MonorepoAnalysis>,
-        conventions: &InferredConventions,
-        constraints: &ExtractedConstraints,
-    ) -> Result<OutputPlan> {
-        Self::plan_with_synthesis(detection, monorepo, conventions, constraints, None)
-    }
-
-    /// Plan output with optional synthesis data for enhanced skill/agent generation
-    pub fn plan_with_synthesis(
-        detection: &ProjectDetection,
-        monorepo: Option<&MonorepoAnalysis>,
-        conventions: &InferredConventions,
-        constraints: &ExtractedConstraints,
-        synthesis: Option<&SynthesizedAnalysis>,
-    ) -> Result<OutputPlan> {
-        Self::plan_full(
-            detection,
-            monorepo,
-            conventions,
-            constraints,
-            synthesis,
-            None,
-            None,
-        )
-    }
-
-    /// Full planning with all analysis data including domain and cross-reference insights
-    pub fn plan_full(
         detection: &ProjectDetection,
         monorepo: Option<&MonorepoAnalysis>,
         conventions: &InferredConventions,
@@ -184,6 +227,8 @@ impl OutputRouter {
         synthesis: Option<&SynthesizedAnalysis>,
         domain_analysis: Option<&DomainAnalysisResult>,
         cross_insights: Option<&SynthesizedInsights>,
+        detected_modules: Option<&[DetectedModule]>,
+        groups: &[ModuleGroup],
     ) -> Result<OutputPlan> {
         let strategy = Self::determine_strategy(detection, monorepo);
         let claude_md_plan =
@@ -200,12 +245,29 @@ impl OutputRouter {
             cross_insights,
         );
 
+        let orchestration_plan = detected_modules
+            .filter(|modules| !modules.is_empty())
+            .map(|modules| Self::plan_orchestration(
+                modules,
+                constraints,
+                cross_insights,
+                domain_analysis,
+                groups,
+            ));
+        let module_map_plan = detected_modules
+            .filter(|modules| !modules.is_empty())
+            .map(|_| ModuleMapPlan {
+                output_path: ".claudegen/module_map.json".to_string(),
+            });
+
         let plan = OutputPlan {
             strategy,
             claude_md_plan,
             rules_plan,
             skills_plan,
             agents_plan,
+            orchestration_plan,
+            module_map_plan,
         };
 
         tracing::info!(
@@ -488,22 +550,20 @@ impl OutputRouter {
                 if has_complexity && !module.responsibility.is_empty() {
                     let agent_name = format!("{}-specialist", to_kebab_case(&module.name));
 
-                    if !is_generic_agent_name(&agent_name) {
-                        planned_agents.push(PlannedAgent {
-                            name: agent_name,
-                            role: format!(
-                                "{} domain expert with knowledge of: {}",
-                                module.name,
-                                module
-                                    .constraints
-                                    .iter()
-                                    .map(|c| c.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("; ")
-                            ),
-                            scope: AgentScope::Domain(module.path.clone()),
-                        });
-                    }
+                    planned_agents.push(PlannedAgent {
+                        name: agent_name,
+                        role: format!(
+                            "{} domain expert with knowledge of: {}",
+                            module.name,
+                            module
+                                .constraints
+                                .iter()
+                                .map(|c| c.as_str())
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
+                        scope: AgentScope::Domain(module.path.clone()),
+                    });
                 }
             }
 
@@ -516,16 +576,14 @@ impl OutputRouter {
 
             for pattern in constraint_areas {
                 let area_name = pattern.name.replace(' ', "-").to_lowercase();
-                if !is_generic_agent_name(&area_name) {
-                    planned_agents.push(PlannedAgent {
-                        name: format!("{}-debugger", area_name),
-                        role: format!(
-                            "Debug {} related issues using internal knowledge",
-                            pattern.name
-                        ),
-                        scope: AgentScope::Global,
-                    });
-                }
+                planned_agents.push(PlannedAgent {
+                    name: format!("{}-debugger", area_name),
+                    role: format!(
+                        "Debug {} related issues using internal knowledge",
+                        pattern.name
+                    ),
+                    scope: AgentScope::Global,
+                });
             }
         }
 
@@ -533,9 +591,7 @@ impl OutputRouter {
         if let Some(domain) = domain_analysis {
             for logic in &domain.core_logic {
                 let agent_name = format!("{}-expert", to_kebab_case(&logic.name));
-                if !planned_agents.iter().any(|a| a.name == agent_name)
-                    && !is_generic_agent_name(&agent_name)
-                {
+                if !planned_agents.iter().any(|a| a.name == agent_name) {
                     planned_agents.push(PlannedAgent {
                         name: agent_name,
                         role: format!(
@@ -555,9 +611,7 @@ impl OutputRouter {
                 )
             }) {
                 let agent_name = format!("{}-enforcer", to_kebab_case(&policy.name));
-                if !planned_agents.iter().any(|a| a.name == agent_name)
-                    && !is_generic_agent_name(&agent_name)
-                {
+                if !planned_agents.iter().any(|a| a.name == agent_name) {
                     planned_agents.push(PlannedAgent {
                         name: agent_name,
                         role: format!(
@@ -574,9 +628,7 @@ impl OutputRouter {
         if let Some(insights) = cross_insights {
             for insight in &insights.tier3_insights {
                 let agent_name = format!("{}-guardian", to_kebab_case(&insight.title));
-                if !planned_agents.iter().any(|a| a.name == agent_name)
-                    && !is_generic_agent_name(&agent_name)
-                {
+                if !planned_agents.iter().any(|a| a.name == agent_name) {
                     planned_agents.push(PlannedAgent {
                         name: agent_name,
                         role: format!(
@@ -633,15 +685,256 @@ impl OutputRouter {
             planned_agents,
         }
     }
+
+    fn plan_orchestration(
+        modules: &[DetectedModule],
+        constraints: &ExtractedConstraints,
+        cross_insights: Option<&SynthesizedInsights>,
+        domain_analysis: Option<&DomainAnalysisResult>,
+        groups: &[ModuleGroup],
+    ) -> OrchestrationPlan {
+        let read_tools = vec![
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+            "Task".to_string(),
+        ];
+        let read_only_tools = vec![
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+        ];
+        let tool_runner_tools = vec![
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+            "Bash".to_string(),
+        ];
+        let edit_tools = vec![
+            "Read".to_string(),
+            "Grep".to_string(),
+            "Glob".to_string(),
+            "Edit".to_string(),
+            "Write".to_string(),
+            "Bash".to_string(),
+        ];
+
+        // --- Conditional system agents ---
+        let mut orchestration_agents = Vec::new();
+        let mut orchestration_skills = Vec::new();
+
+        let has_orchestrator = modules.len() >= MIN_MODULES_FOR_ORCHESTRATOR;
+
+        let has_violations = cross_insights
+            .map(|i| !i.architecture_violations.is_empty())
+            .unwrap_or(false);
+        let has_architect = modules.len() >= MIN_MODULES_FOR_ARCHITECT || has_violations;
+        if has_architect {
+            orchestration_agents.push(PlannedOrchestrationAgent {
+                name: "architect".to_string(),
+                description: "Architecture reviewer ensuring module boundaries, dependency rules, and design patterns are respected.".to_string(),
+                tools: read_only_tools.clone(),
+                model: "sonnet".to_string(),
+                permission_mode: "default".to_string(),
+                skills: vec![],
+            });
+        }
+
+        let has_risky_modules = modules.iter().any(|m| m.risk_score > QA_RISK_THRESHOLD);
+        let has_qa = has_risky_modules || constraints.gotchas.len() >= MIN_GOTCHAS_FOR_QA;
+        if has_qa {
+            orchestration_agents.push(PlannedOrchestrationAgent {
+                name: "qa-reviewer".to_string(),
+                description: "Quality assurance reviewer checking consistency across module boundaries. Use proactively after code changes.".to_string(),
+                tools: tool_runner_tools.clone(),
+                model: "sonnet".to_string(),
+                permission_mode: "default".to_string(),
+                skills: vec![
+                    "qa-static-analysis".to_string(),
+                    "qa-test-runner".to_string(),
+                ],
+            });
+        }
+
+        let has_security_constraints = constraints.gotchas.iter().any(|g| has_security_keywords(&g.title))
+            || constraints.anti_patterns.iter().any(|a| has_security_keywords(&a.name));
+        let has_security_policies = domain_analysis
+            .map(|d| {
+                d.policies.iter().any(|p| {
+                    matches!(p.policy_type, PolicyType::Authorization)
+                })
+            })
+            .unwrap_or(false);
+        let has_security = has_security_constraints || has_security_policies;
+        if has_security {
+            orchestration_agents.push(PlannedOrchestrationAgent {
+                name: "security-reviewer".to_string(),
+                description: "Security reviewer analyzing changes for vulnerabilities with module-scoped threat awareness.".to_string(),
+                tools: read_only_tools.clone(),
+                model: "sonnet".to_string(),
+                permission_mode: "default".to_string(),
+                skills: vec![],
+            });
+        }
+
+        // --- Conditional skills (tied to agent existence) ---
+        if has_orchestrator {
+            let orchestrator_tools = vec![
+                "Read".to_string(),
+                "Grep".to_string(),
+                "Glob".to_string(),
+                "Task".to_string(),
+                "Skill".to_string(),
+            ];
+            orchestration_skills.push(PlannedOrchestrationSkill {
+                name: "claude-pilot".to_string(),
+                description: "Multi-agent orchestration. Decomposes tasks, coordinates module agents via consensus planning. Use for cross-module changes.".to_string(),
+                user_invocable: true,
+                disable_model_invocation: false,
+                context: None,
+                agent: None,
+                allowed_tools: orchestrator_tools.clone(),
+            });
+            orchestration_skills.push(PlannedOrchestrationSkill {
+                name: "consensus-planning".to_string(),
+                description: "Cross-module consensus planning. Queries module agents for constraints and resolves conflicts.".to_string(),
+                user_invocable: false,
+                disable_model_invocation: false,
+                context: None,
+                agent: None,
+                allowed_tools: orchestrator_tools,
+            });
+        }
+
+        if has_architect {
+            orchestration_skills.push(PlannedOrchestrationSkill {
+                name: "architecture-review".to_string(),
+                description: "Review changes against architecture patterns, layer rules, and module boundaries.".to_string(),
+                user_invocable: false,
+                disable_model_invocation: false,
+                context: Some("fork".to_string()),
+                agent: Some("architect".to_string()),
+                allowed_tools: read_only_tools,
+            });
+        }
+
+        if has_qa {
+            orchestration_skills.push(PlannedOrchestrationSkill {
+                name: "qa-review".to_string(),
+                description: "Verify changes against gotchas, anti-patterns, and cross-module consistency.".to_string(),
+                user_invocable: false,
+                disable_model_invocation: false,
+                context: Some("fork".to_string()),
+                agent: Some("qa-reviewer".to_string()),
+                allowed_tools: read_tools,
+            });
+        }
+
+        orchestration_skills.push(PlannedOrchestrationSkill {
+            name: "qa-static-analysis".to_string(),
+            description: "Run project linters, formatters, and static analysis tools on affected paths.".to_string(),
+            user_invocable: false,
+            disable_model_invocation: true,
+            context: None,
+            agent: None,
+            allowed_tools: tool_runner_tools.clone(),
+        });
+        orchestration_skills.push(PlannedOrchestrationSkill {
+            name: "qa-test-runner".to_string(),
+            description: "Run test suites scoped to affected module paths and report results.".to_string(),
+            user_invocable: false,
+            disable_model_invocation: true,
+            context: None,
+            agent: None,
+            allowed_tools: tool_runner_tools,
+        });
+
+        // --- Module skills ---
+        let module_skills: Vec<PlannedModuleSkill> = modules
+            .iter()
+            .map(|m| PlannedModuleSkill {
+                name: format!("module-{}", m.module_id),
+                module_id: m.module_id.clone(),
+            })
+            .collect();
+
+        // --- Module agents with differentiated settings ---
+        let module_agents: Vec<PlannedModuleAgent> = modules
+            .iter()
+            .map(|m| {
+                let (model, permission_mode) =
+                    if m.risk_score > HIGH_RISK_THRESHOLD || m.value_score > HIGH_VALUE_THRESHOLD {
+                        ("sonnet", "default")
+                    } else {
+                        ("haiku", "acceptEdits")
+                    };
+                PlannedModuleAgent {
+                    name: format!("module-{}", m.module_id),
+                    module_id: m.module_id.clone(),
+                    tools: edit_tools.clone(),
+                    model: model.to_string(),
+                    permission_mode: permission_mode.to_string(),
+                }
+            })
+            .collect();
+
+        let group_orchestrators = Self::plan_group_orchestrators(groups, modules);
+
+        OrchestrationPlan {
+            orchestration_skills,
+            module_skills,
+            orchestration_agents,
+            module_agents,
+            group_orchestrators,
+        }
+    }
+
+    fn plan_group_orchestrators(
+        groups: &[ModuleGroup],
+        modules: &[DetectedModule],
+    ) -> Vec<PlannedGroupOrchestrator> {
+        if groups.is_empty() || modules.len() < MIN_MODULES_FOR_GROUPING {
+            return Vec::new();
+        }
+
+        groups
+            .iter()
+            .map(|group| {
+                let module_agent_names: Vec<String> = group
+                    .module_ids
+                    .iter()
+                    .map(|id| format!("module-{}", id))
+                    .collect();
+
+                PlannedGroupOrchestrator {
+                    name: format!("group-{}", group.group_id),
+                    group_id: group.group_id.clone(),
+                    module_agent_names,
+                    tools: vec![
+                        "Read".to_string(),
+                        "Grep".to_string(),
+                        "Glob".to_string(),
+                        "Task".to_string(),
+                        "Skill".to_string(),
+                    ],
+                    model: "sonnet".to_string(),
+                    permission_mode: "default".to_string(),
+                }
+            })
+            .collect()
+    }
 }
 
-/// Agent name filtering is delegated to LLM during generation.
-/// Programmatic filtering with hardcoded patterns causes:
-/// - False positives ("main-handler", "core-service" are legitimate)
-/// - English-only bias
-/// - No override mechanism for context-specific names
-fn is_generic_agent_name(_name: &str) -> bool {
-    false // LLM determines agent name quality, not pattern matching
+/// Check if a string contains security-related keywords.
+/// Used as a fast-path heuristic for conditional agent generation.
+/// Over-matching is acceptable (creates an unused reviewer) — under-matching is not.
+pub(crate) fn has_security_keywords(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("security")
+        || lower.contains("auth")
+        || lower.contains("permission")
+        || lower.contains("injection")
+        || lower.contains("xss")
 }
 
 fn to_kebab_case(s: &str) -> String {
@@ -657,15 +950,6 @@ fn to_kebab_case(s: &str) -> String {
         .replace("--", "-")
         .trim_matches('-')
         .to_string()
-}
-
-pub fn plan(
-    detection: &ProjectDetection,
-    monorepo: Option<&MonorepoAnalysis>,
-    conventions: &InferredConventions,
-    constraints: &ExtractedConstraints,
-) -> Result<OutputPlan> {
-    OutputRouter::plan(detection, monorepo, conventions, constraints)
 }
 
 #[cfg(test)]

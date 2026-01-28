@@ -9,7 +9,14 @@
 
 use crate::types::{InformationTier, NodeStatus, NodeType};
 use serde::Serialize;
+use serde_yaml_bw as serde_yaml;
 use std::fmt::Display;
+
+/// Convert any serializable value to a serde_yaml::Value.
+/// Used by Skill and Agent `to_markdown()` for frontmatter serialization.
+pub fn yaml_value<T: Serialize>(v: &T) -> serde_yaml::Value {
+    serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null(None))
+}
 
 // =============================================================================
 // JSON Value Extraction Helpers

@@ -17,8 +17,6 @@ pub struct EnrichedPlan {
     pub agent_knowledge: HashMap<String, AgentInternalKnowledge>,
     /// Coverage tracking
     pub coverage: ConstraintCoverage,
-    /// Suggested additional artifacts to cover uncovered constraints
-    pub suggested_artifacts: Vec<SuggestedArtifact>,
     /// Key abstractions from deep analysis
     pub key_abstractions: Vec<EnrichedAbstraction>,
     /// File insights with gotchas
@@ -103,23 +101,7 @@ pub struct UncoveredConstraint {
     pub description: String,
     pub category: ConstraintCategory,
     pub severity: Severity,
-    pub suggested_artifact_type: SuggestedArtifactType,
-}
-
-/// Suggested artifact to cover uncovered constraints
-#[derive(Debug, Clone)]
-pub struct SuggestedArtifact {
-    pub artifact_type: SuggestedArtifactType,
-    pub name: String,
-    pub reason: String,
-    pub constraints_to_cover: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SuggestedArtifactType {
-    Skill,
-    Agent,
-    Rule,
+    pub file_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +114,21 @@ pub enum ConstraintCategory {
     ResourceManagement,
     InitializationOrder,
     SecurityConstraint,
+}
+
+impl std::fmt::Display for ConstraintCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gotcha => write!(f, "Gotcha"),
+            Self::HiddenDependency => write!(f, "Hidden Dependency"),
+            Self::AntiPattern => write!(f, "Anti-Pattern"),
+            Self::OrderDependency => write!(f, "Order Dependency"),
+            Self::Concurrency => write!(f, "Concurrency"),
+            Self::ResourceManagement => write!(f, "Resource Management"),
+            Self::InitializationOrder => write!(f, "Initialization Order"),
+            Self::SecurityConstraint => write!(f, "Security"),
+        }
+    }
 }
 
 use crate::types::Severity;
@@ -240,7 +237,7 @@ impl EnrichmentEngine {
                 description: c.description.clone(),
                 category: c.category,
                 severity: c.severity,
-                suggested_artifact_type: self.suggest_artifact_type(c),
+                file_refs: c.file_refs.clone(),
             })
             .collect();
 
@@ -258,9 +255,6 @@ impl EnrichmentEngine {
             artifact_coverage,
         };
 
-        // Generate suggestions for uncovered constraints
-        let suggested_artifacts = self.generate_suggestions(&uncovered);
-
         // Extract key abstractions (from deep analysis)
         let key_abstractions = self.extract_key_abstractions(synthesis);
 
@@ -272,7 +266,6 @@ impl EnrichmentEngine {
             skill_constraints,
             agent_knowledge,
             coverage,
-            suggested_artifacts,
             key_abstractions,
             file_insights,
         }
@@ -751,80 +744,6 @@ impl EnrichmentEngine {
         }
     }
 
-    /// Suggest artifact type for uncovered constraint
-    fn suggest_artifact_type(&self, constraint: &EnrichedConstraint) -> SuggestedArtifactType {
-        match constraint.category {
-            ConstraintCategory::OrderDependency | ConstraintCategory::InitializationOrder => {
-                SuggestedArtifactType::Skill
-            }
-            ConstraintCategory::SecurityConstraint | ConstraintCategory::AntiPattern => {
-                SuggestedArtifactType::Rule
-            }
-            _ => {
-                if constraint.severity >= Severity::High {
-                    SuggestedArtifactType::Agent
-                } else {
-                    SuggestedArtifactType::Skill
-                }
-            }
-        }
-    }
-
-    /// Generate suggestions for uncovered constraints
-    fn generate_suggestions(&self, uncovered: &[UncoveredConstraint]) -> Vec<SuggestedArtifact> {
-        // Group by suggested artifact type
-        let mut by_type: HashMap<SuggestedArtifactType, Vec<&UncoveredConstraint>> = HashMap::new();
-        for c in uncovered {
-            by_type
-                .entry(c.suggested_artifact_type)
-                .or_default()
-                .push(c);
-        }
-
-        let mut suggestions = Vec::new();
-
-        for (artifact_type, constraints) in by_type {
-            if constraints.is_empty() {
-                continue;
-            }
-
-            // Group related constraints together
-            let name = match artifact_type {
-                SuggestedArtifactType::Skill => {
-                    format!(
-                        "{}-workflow",
-                        Self::extract_topic(&constraints[0].description)
-                    )
-                }
-                SuggestedArtifactType::Agent => {
-                    format!(
-                        "{}-specialist",
-                        Self::extract_topic(&constraints[0].description)
-                    )
-                }
-                SuggestedArtifactType::Rule => {
-                    format!(
-                        "{}-guidelines",
-                        Self::extract_topic(&constraints[0].description)
-                    )
-                }
-            };
-
-            suggestions.push(SuggestedArtifact {
-                artifact_type,
-                name,
-                reason: format!(
-                    "Cover {} uncovered {} constraints",
-                    constraints.len(),
-                    format!("{:?}", artifact_type).to_lowercase()
-                ),
-                constraints_to_cover: constraints.iter().map(|c| c.description.clone()).collect(),
-            });
-        }
-
-        suggestions
-    }
-
     fn is_relevant_to_role(&self, text: &str, role_lower: &str) -> bool {
         let text_lower = text.to_lowercase();
         // Allow short keywords (2+ chars) to match valid role names like "api", "db", "qa", "ui"
@@ -859,15 +778,6 @@ impl EnrichmentEngine {
             ConstraintKind::WorkflowRequirement => ConstraintCategory::OrderDependency,
             ConstraintKind::NamingConvention => ConstraintCategory::Gotcha,
         }
-    }
-
-    fn extract_topic(description: &str) -> String {
-        // Extract first meaningful word as topic
-        description
-            .split_whitespace()
-            .find(|w| w.len() > 3 && w.chars().all(|c| c.is_alphanumeric()))
-            .unwrap_or("constraint")
-            .to_lowercase()
     }
 
     /// Check if coverage meets minimum threshold

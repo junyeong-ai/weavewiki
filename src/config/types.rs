@@ -2099,6 +2099,14 @@ pub struct MultiAgentConfig {
     pub max_files_for_constraints: usize,
     /// Maximum lines per file for constraint analysis
     pub max_lines_per_file_constraints: usize,
+    /// Minimum detected modules to trigger multi-agent orchestration
+    pub min_modules: usize,
+    /// Generate hook scripts for module scope validation
+    pub generate_hooks: bool,
+    /// Generate module_map.json
+    pub generate_module_map: bool,
+    /// Minimum modules to trigger hierarchical grouping with sub-orchestrators
+    pub min_modules_for_grouping: usize,
 }
 
 impl Default for MultiAgentConfig {
@@ -2121,8 +2129,12 @@ impl Default for MultiAgentConfig {
             // Code preview limits - configurable to balance context vs token limits
             max_files_for_patterns: 15,      // Increased from hardcoded 10
             max_lines_per_file_patterns: 80, // Increased from hardcoded 50
-            max_files_for_constraints: 20,   // Increased from hardcoded 15
-            max_lines_per_file_constraints: 150, // Increased from hardcoded 100
+            max_files_for_constraints: 20,
+            max_lines_per_file_constraints: 150,
+            min_modules: 2,
+            generate_hooks: true,
+            generate_module_map: true,
+            min_modules_for_grouping: 6,
         }
     }
 }

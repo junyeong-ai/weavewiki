@@ -16,6 +16,7 @@ use super::phases::{
     project_detection::ProjectDetection,
 };
 use crate::types::domain::DomainAnalysisResult;
+use crate::types::module_map::DetectedModule;
 
 /// Extracted constraint (Tier3 - essential)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +41,8 @@ pub struct AnalysisResults {
     pub domain_analysis: Option<DomainAnalysisResult>,
     /// Cross-reference synthesis insights
     pub cross_insights: Option<SynthesizedInsights>,
+    /// Detected modules for multi-agent orchestration
+    pub detected_modules: Option<Vec<DetectedModule>>,
 }
 
 /// Synthesis summary for context
@@ -165,6 +168,14 @@ impl ClaudegenContext {
         self.analysis_results.cross_insights.as_ref()
     }
 
+    pub fn set_detected_modules(&mut self, modules: Vec<DetectedModule>) {
+        self.analysis_results.detected_modules = Some(modules);
+    }
+
+    pub fn detected_modules(&self) -> Option<&[DetectedModule]> {
+        self.analysis_results.detected_modules.as_deref()
+    }
+
     pub fn merge_from(&mut self, other: &ClaudegenContext) {
         self.tier3_constraints
             .extend(other.tier3_constraints.clone());
@@ -204,6 +215,12 @@ impl ClaudegenContext {
             && self.analysis_results.cross_insights.is_none()
         {
             self.analysis_results.cross_insights = other.analysis_results.cross_insights.clone();
+        }
+        if other.analysis_results.detected_modules.is_some()
+            && self.analysis_results.detected_modules.is_none()
+        {
+            self.analysis_results.detected_modules =
+                other.analysis_results.detected_modules.clone();
         }
     }
 

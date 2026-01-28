@@ -124,9 +124,7 @@ pub struct SkillFile {
     pub content: String,
 }
 
-fn yaml_value<T: serde::Serialize>(v: &T) -> serde_yaml::Value {
-    serde_yaml::to_value(v).unwrap_or(serde_yaml::Value::Null(None))
-}
+use super::utils::yaml_value;
 
 /// Minimum required @file:line references for a skill to pass quality.
 ///

@@ -435,7 +435,7 @@ impl ClaudeMdGenerator {
         let commands = Vec::new();
 
         let standards = if plan.claude_md_plan.include_conventions {
-            Self::generate_standards_with_evidence(conventions, constraints, ctx.synthesis)
+            Self::generate_standards_with_evidence(conventions, constraints, ctx.synthesis, ctx.cross_insights)
         } else {
             Vec::new()
         };
@@ -598,6 +598,7 @@ impl ClaudeMdGenerator {
         conventions: &InferredConventions,
         constraints: &ExtractedConstraints,
         synthesis: Option<&SynthesizedAnalysis>,
+        cross_insights: Option<&crate::pipeline::analysis::SynthesizedInsights>,
     ) -> Vec<String> {
         let mut standards = Vec::new();
 
@@ -661,6 +662,23 @@ impl ClaudeMdGenerator {
             for insight in synth.deep.insights.iter().filter(|i| !i.gotchas.is_empty()) {
                 for gotcha in &insight.gotchas {
                     standards.push(format!("⚠️ {} ({})", gotcha, insight.file));
+                }
+            }
+        }
+
+        // Tier 2 insights from cross-synthesis (project conventions)
+        if let Some(insights) = cross_insights {
+            for insight in &insights.tier2_insights {
+                if insight.scope.is_empty() || insight.scope == "Project-wide" {
+                    standards.push(format!(
+                        "- {}: {} — {}",
+                        insight.category, insight.title, insight.description
+                    ));
+                } else {
+                    standards.push(format!(
+                        "- {}: {} — {} (scope: {})",
+                        insight.category, insight.title, insight.description, insight.scope
+                    ));
                 }
             }
         }

@@ -181,6 +181,19 @@ pub enum Tier2Category {
     CodeStyle,
 }
 
+impl std::fmt::Display for Tier2Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NamingConvention => write!(f, "Naming Convention"),
+            Self::FileOrganization => write!(f, "File Organization"),
+            Self::ErrorHandling => write!(f, "Error Handling"),
+            Self::TestingPattern => write!(f, "Testing Pattern"),
+            Self::DocumentationStyle => write!(f, "Documentation Style"),
+            Self::CodeStyle => write!(f, "Code Style"),
+        }
+    }
+}
+
 /// Coverage analysis from synthesis
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CoverageAnalysis {

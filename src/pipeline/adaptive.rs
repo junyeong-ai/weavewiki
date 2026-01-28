@@ -13,7 +13,10 @@ use crate::ai::response::generate_schema;
 use crate::ai::validation::deserialize_llm_response;
 use crate::ai::{ProviderSet, phase_id, with_timeout};
 use crate::config::Config;
-use crate::types::{Agent, AgentModel, Plugin, PluginManifest, ProjectMemory, Result, Rule, Skill};
+use crate::types::{
+    Agent, AgentModel, ModuleMap, Plugin, PluginManifest, ProjectMemory, Result, Rule, Severity,
+    Skill,
+};
 
 use super::analysis::{
     AggregatedAnalysis, AnalysisAggregator, AnalysisSynthesizer, AstEnricher, ChunkingStrategy,
@@ -25,6 +28,7 @@ use super::context::VerifiedFileRegistry;
 use super::context::ClaudegenContext;
 use super::enrichment::{EnrichedPlan, EnrichmentEngine};
 use super::generation::path_rules::{ClaudeMdGenerator, PathRulesGenerator};
+use super::generation::{HookScriptGenerator, ModuleMapGenerator, OrchestrationGenerator};
 use super::phases::{
     constraint_extraction::{self, ExtractedConstraints},
     convention_inference::{self, InferredConventions},
@@ -59,6 +63,7 @@ pub struct AdaptivePipelineOutput {
     pub refinement_iterations: usize,
     pub refinement_converged: bool,
     pub context: ClaudegenContext,
+    pub module_map: Option<ModuleMap>,
 }
 
 pub struct AdaptivePipeline {
@@ -402,8 +407,57 @@ impl AdaptivePipeline {
             "Constraints extracted"
         );
 
-        // Phase 5: Output Planning (enhanced with all analysis data)
-        let output_plan = output_router::OutputRouter::plan_full(
+        // Phase 4.5: Module Detection (for multi-agent orchestration)
+        let (detected_modules, detected_groups) = if self.config.multi_agent.enabled {
+            let detector = super::phases::module_detection::ModuleDetector::new(Arc::clone(
+                self.providers
+                    .provider_for_phase(phase_id::DEEP_ANALYSIS),
+            ))
+            .with_grouping_threshold(self.config.multi_agent.min_modules_for_grouping);
+            match detector
+                .detect(
+                    &detection,
+                    &file_registry,
+                    synthesis.as_ref(),
+                    domain_analysis.as_ref(),
+                    cross_insights.as_ref(),
+                    &conventions,
+                    &constraints,
+                )
+                .await
+            {
+                Ok(result) if result.modules.len() >= self.config.multi_agent.min_modules => {
+                    tracing::info!(
+                        modules = result.modules.len(),
+                        groups = result.groups.len(),
+                        "Module detection complete - multi-agent orchestration enabled"
+                    );
+                    ctx.set_detected_modules(result.modules.clone());
+                    let groups = result.groups;
+                    (Some(result.modules), groups)
+                }
+                Ok(result) => {
+                    tracing::info!(
+                        modules = result.modules.len(),
+                        min = self.config.multi_agent.min_modules,
+                        "Too few modules detected - skipping multi-agent orchestration"
+                    );
+                    if !result.modules.is_empty() {
+                        ctx.set_detected_modules(result.modules);
+                    }
+                    (None, Vec::new())
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Module detection failed - skipping multi-agent orchestration");
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
+
+        // Phase 5: Output Planning (module-aware)
+        let output_plan = output_router::OutputRouter::plan(
             &detection,
             monorepo.as_ref(),
             &conventions,
@@ -411,12 +465,15 @@ impl AdaptivePipeline {
             synthesis.as_ref(),
             domain_analysis.as_ref(),
             cross_insights.as_ref(),
+            detected_modules.as_deref(),
+            &detected_groups,
         )?;
         tracing::info!(
             strategy = ?output_plan.strategy,
             rule_groups = output_plan.rules_plan.rule_groups.len(),
             skills = output_plan.skills_plan.planned_skills.len(),
             agents = output_plan.agents_plan.planned_agents.len(),
+            orchestration = output_plan.orchestration_plan.is_some(),
             "Output planned"
         );
 
@@ -428,7 +485,6 @@ impl AdaptivePipeline {
             total_constraints = enriched_plan.coverage.total_constraints,
             covered = enriched_plan.coverage.covered_constraints,
             coverage_ratio = format!("{:.1}%", enriched_plan.coverage.coverage_ratio * 100.0),
-            suggested_artifacts = enriched_plan.suggested_artifacts.len(),
             "Enrichment complete"
         );
 
@@ -487,6 +543,55 @@ impl AdaptivePipeline {
         let agents = self
             .generate_agents_with_enrichment(&enriched_plan, &detection, monorepo.as_ref())
             .await?;
+
+        // Phase 6.5: Orchestration Generation (if modules detected)
+        let (module_map, orchestration_artifacts) =
+            if let (Some(orch_plan), Some(modules)) =
+                (&output_plan.orchestration_plan, &detected_modules)
+            {
+                let artifacts = OrchestrationGenerator::generate(
+                    orch_plan,
+                    modules,
+                    &detected_groups,
+                    cross_insights.as_ref(),
+                    &constraints,
+                    domain_analysis.as_ref(),
+                    &conventions,
+                );
+                let module_map = ModuleMapGenerator::generate(modules, &detected_groups)?;
+
+                tracing::info!(
+                    orch_skills = artifacts.skills.len(),
+                    orch_agents = artifacts.agents.len(),
+                    orch_rules = artifacts.rules.len(),
+                    modules = module_map.modules.len(),
+                    "Orchestration artifacts generated"
+                );
+
+                (Some(module_map), Some(artifacts))
+            } else {
+                (None, None)
+            };
+
+        // Merge orchestration artifacts into main artifacts
+        let mut skills = skills;
+        let mut agents = agents;
+        let mut rules = rules;
+        if let Some(orch) = orchestration_artifacts {
+            skills.extend(orch.skills);
+            agents.extend(orch.agents);
+            rules.extend(orch.rules);
+        }
+
+        // Generate rules from uncovered Critical/High constraints
+        let uncovered_rules = generate_rules_from_uncovered(&enriched_plan);
+        if !uncovered_rules.is_empty() {
+            tracing::info!(
+                count = uncovered_rules.len(),
+                "Generated rules from uncovered Critical/High constraints"
+            );
+            rules.extend(uncovered_rules);
+        }
 
         tracing::info!(
             skills = skills.len(),
@@ -554,10 +659,25 @@ impl AdaptivePipeline {
             "Final validation complete"
         );
 
-        let plugin = Plugin {
-            manifest: PluginManifest::new(format!("{}-plugin", to_kebab_case(&project_name)))
+        let mut manifest =
+            PluginManifest::new(format!("{}-plugin", to_kebab_case(&project_name)))
                 .with_version("1.0.0")
-                .with_description(format!("Claude Code plugin for {}", project_name)),
+                .with_description(format!("Claude Code plugin for {}", project_name))
+                .with_schema_version("1.0.0")
+                .with_generator(format!("claudegen@{}", env!("CARGO_PKG_VERSION")));
+
+        if detected_modules.is_some() {
+            manifest = manifest
+                .with_required_skills(skills.iter().map(|s| s.name.clone()).collect())
+                .with_required_agents(agents.iter().map(|a| a.name.clone()).collect());
+
+            if self.config.multi_agent.generate_hooks {
+                manifest = manifest.with_hooks(HookScriptGenerator::generate_plugin_hooks());
+            }
+        }
+
+        let plugin = Plugin {
+            manifest,
             skills: skills.clone(),
             agents: agents.clone(),
             rules: rules.clone(),
@@ -589,6 +709,7 @@ impl AdaptivePipeline {
             refinement_iterations: refinement_result.iterations,
             refinement_converged: refinement_result.converged,
             context: ctx,
+            module_map,
         })
     }
 
@@ -1342,12 +1463,83 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
         if !output.rules.is_empty() || output.output_plan.strategy.requires_path_rules() {
             fs::create_dir_all(&rules_dir).await?;
 
+            // Write module rules to .claude/rules/modules/
+            let module_rules_dir = rules_dir.join("modules");
+            let has_module_rules = output.rules.iter().any(|r| r.name.starts_with("module-"));
+            if has_module_rules {
+                if module_rules_dir.exists() {
+                    fs::remove_dir_all(&module_rules_dir).await?;
+                }
+                fs::create_dir_all(&module_rules_dir).await?;
+            }
+
             for rule in &output.rules {
+                let target_dir = if rule.name.starts_with("module-") {
+                    &module_rules_dir
+                } else {
+                    &rules_dir
+                };
                 atomic_write(
-                    &rules_dir.join(format!("{}.md", rule.name)),
+                    &target_dir.join(format!("{}.md", rule.name)),
                     rule.to_markdown().as_bytes(),
                 )
                 .await?;
+            }
+        }
+
+        // Write multi-agent artifacts
+        if let Some(ref module_map) = output.module_map {
+            let claudegen_dir = self.project_root.join(".claudegen");
+            fs::create_dir_all(&claudegen_dir).await?;
+
+            // module_map.json
+            if self.config.multi_agent.generate_module_map {
+                let json = module_map.to_json().map_err(|e| {
+                    crate::types::ClaudegenError::Config(format!(
+                        "Failed to serialize module map: {e}"
+                    ))
+                })?;
+                atomic_write(&claudegen_dir.join("module_map.json"), json.as_bytes()).await?;
+            }
+
+            // Hook scripts
+            if self.config.multi_agent.generate_hooks {
+                let hooks_dir = claudegen_dir.join("hooks");
+                fs::create_dir_all(&hooks_dir).await?;
+
+                let validate_script = HookScriptGenerator::generate_validate_module_scope();
+                let test_script = HookScriptGenerator::generate_run_module_tests();
+
+                atomic_write(
+                    &hooks_dir.join("validate-module-scope.sh"),
+                    validate_script.as_bytes(),
+                )
+                .await?;
+                atomic_write(
+                    &hooks_dir.join("run-module-tests.sh"),
+                    test_script.as_bytes(),
+                )
+                .await?;
+
+                // Make scripts executable
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    for script in ["validate-module-scope.sh", "run-module-tests.sh"] {
+                        let path = hooks_dir.join(script);
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            let mut perms = metadata.permissions();
+                            perms.set_mode(0o755);
+                            let _ = std::fs::set_permissions(&path, perms);
+                        }
+                    }
+                }
+            }
+
+            // Shared directory scaffold
+            let shared_dir = claudegen_dir.join("shared");
+            if !shared_dir.exists() {
+                fs::create_dir_all(&shared_dir).await?;
             }
         }
 
@@ -1407,6 +1599,86 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
         }
 
         Ok(())
+    }
+}
+
+/// Generate rules from uncovered Critical/High constraints.
+///
+/// Constraints that were identified during enrichment but not covered
+/// by any planned artifact are surfaced as standalone rules with evidence.
+fn generate_rules_from_uncovered(enriched_plan: &EnrichedPlan) -> Vec<Rule> {
+    use std::collections::HashSet;
+    use crate::types::node::EvidenceLocation;
+
+    let mut seen_names = HashSet::new();
+    enriched_plan
+        .coverage
+        .uncovered
+        .iter()
+        .filter(|c| matches!(c.severity, Severity::Critical | Severity::High))
+        .filter_map(|c| {
+            let name = slugify_constraint_name(&c.category.to_string(), &c.description);
+            if !seen_names.insert(name.clone()) {
+                return None;
+            }
+
+            let severity_label = match c.severity {
+                Severity::Critical => "CRITICAL",
+                Severity::High => "HIGH",
+                _ => "MEDIUM",
+            };
+
+            let mut content = vec![
+                format!("# {} — {}", c.category, c.description),
+                String::new(),
+                format!("**Severity**: {}", severity_label),
+            ];
+
+            if !c.file_refs.is_empty() {
+                content.push(String::new());
+                content.push("**Evidence**:".to_string());
+                for file_ref in &c.file_refs {
+                    content.push(format!("- {}", file_ref));
+                }
+            }
+
+            let evidence: Vec<EvidenceLocation> = c.file_refs.iter()
+                .filter_map(|r| {
+                    let r = r.strip_prefix('@').unwrap_or(r);
+                    let (file, line) = r.rsplit_once(':')?;
+                    let line: u32 = line.parse().ok()?;
+                    Some(EvidenceLocation {
+                        file: file.to_string(),
+                        start_line: line,
+                        end_line: line,
+                        start_column: None,
+                        end_column: None,
+                    })
+                })
+                .collect();
+
+            let mut rule = Rule::new(name, content);
+            rule.evidence = evidence;
+            Some(rule)
+        })
+        .collect()
+}
+
+/// Generate a kebab-case rule name from constraint category and description.
+fn slugify_constraint_name(category: &str, description: &str) -> String {
+    let slug: String = description
+        .split_whitespace()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '-')
+        .collect();
+    if slug.is_empty() {
+        format!("constraint-{}", category.to_lowercase().replace(' ', "-"))
+    } else {
+        format!("constraint-{}", slug)
     }
 }
 

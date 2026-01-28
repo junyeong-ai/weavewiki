@@ -5,7 +5,6 @@ mod inner {
     use async_trait::async_trait;
     use claude_agent::client::{
         BetaFeature, CreateMessageRequest, ProviderConfig as SdkProviderConfig,
-        transform_for_strict,
     };
     use claude_agent::types::StopReason as SdkStopReason;
     use claude_agent::{Auth, Client, Message, OAuthConfig};
@@ -247,8 +246,10 @@ mod inner {
                         )
                         .with_max_tokens(current_max_tokens);
 
-                if !schema.is_null() && schema.is_object() {
-                    request = request.with_json_schema(transform_for_strict(schema.clone()));
+                if !schema.is_null() && schema.is_object()
+                    && !schema.as_object().map_or(true, |o| o.is_empty())
+                {
+                    request = request.with_json_schema(schema.clone());
                 }
 
                 let response = self

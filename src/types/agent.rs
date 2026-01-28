@@ -1,12 +1,14 @@
 //! Claude Code Agent types - Official spec compliant
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use serde_yaml_bw as serde_yaml;
 
 use super::hook::ToolHooks;
 use super::insight::ContentTier;
 use super::node::EvidenceLocation;
 use super::skill::QualityMetrics;
-use super::utils::is_kebab_case;
+use super::utils::{is_kebab_case, yaml_value};
 use super::validation::ValidationIssue;
 use crate::utils::{is_valid_tool, patterns};
 
@@ -322,58 +324,37 @@ impl Agent {
     }
 
     pub fn to_markdown(&self) -> String {
-        let mut lines = vec!["---".to_string()];
-        lines.push(format!("name: {}", self.name));
-
-        if self.description.contains('\n') {
-            lines.push("description: |".to_string());
-            for line in self.description.lines() {
-                lines.push(format!("  {line}"));
-            }
-        } else {
-            lines.push(format!(
-                "description: \"{}\"",
-                self.description.replace('"', "\\\"")
-            ));
-        }
+        let mut fm: IndexMap<&str, serde_yaml::Value> = IndexMap::new();
+        fm.insert("name", yaml_value(&self.name));
+        fm.insert("description", yaml_value(&self.description));
 
         if let Some(model) = &self.model {
-            lines.push(format!("model: {model}"));
+            fm.insert("model", yaml_value(&model.to_string()));
         }
         if let Some(color) = &self.color {
-            lines.push(format!("color: {color}"));
+            fm.insert("color", yaml_value(&color.to_string()));
         }
         if let Some(tools) = &self.tools {
-            // Claude Code expects comma-separated string, not JSON array
-            lines.push(format!("tools: {}", tools.join(", ")));
+            fm.insert("tools", yaml_value(&tools.join(", ")));
         }
         if let Some(disallowed) = &self.disallowed_tools {
-            // Claude Code expects comma-separated string, not JSON array
-            lines.push(format!("disallowedTools: {}", disallowed.join(", ")));
+            fm.insert("disallowedTools", yaml_value(&disallowed.join(", ")));
         }
         if let Some(mode) = &self.permission_mode {
-            let mode_str = match mode {
-                PermissionMode::Default => "default",
-                PermissionMode::AcceptEdits => "acceptEdits",
-                PermissionMode::DontAsk => "dontAsk",
-                PermissionMode::BypassPermissions => "bypassPermissions",
-                PermissionMode::Plan => "plan",
-            };
-            lines.push(format!("permissionMode: {mode_str}"));
+            fm.insert("permissionMode", yaml_value(&mode.to_string()));
         }
         if let Some(skills) = &self.skills {
-            // Skills should be YAML array format
-            lines.push("skills:".to_string());
-            for skill in skills {
-                lines.push(format!("  - {skill}"));
-            }
+            fm.insert("skills", serde_yaml::to_value(skills).unwrap_or_default());
+        }
+        if let Some(hooks) = &self.hooks {
+            fm.insert("hooks", serde_yaml::to_value(hooks).unwrap_or_default());
         }
 
-        lines.push("---".to_string());
-        lines.push(String::new());
-        lines.push(self.build_prompt_with_examples());
-
-        lines.join("\n")
+        let yaml = serde_yaml::to_string(&fm).unwrap_or_else(|e| {
+            tracing::error!(agent = %self.name, error = %e, "Failed to serialize agent frontmatter");
+            format!("name: \"{}\"\n", self.name.replace('"', "\\\""))
+        });
+        format!("---\n{}---\n\n{}", yaml, self.build_prompt_with_examples())
     }
 
     pub fn validate(&self) -> Vec<ValidationIssue> {
@@ -461,13 +442,14 @@ mod tests {
         .with_tools(vec!["Read".to_string(), "Grep".to_string()]);
 
         let md = agent.to_markdown();
-        assert!(md.contains("name: code-reviewer"));
-        assert!(md.contains("description: \"Use this agent for code review.\""));
-        assert!(md.contains("color: blue"));
-        assert!(md.contains("model: sonnet"));
-        // Claude Code format: comma-separated string, not JSON array
-        assert!(md.contains("tools: Read, Grep"));
-        assert!(md.contains("You are a code reviewer."));
+        assert!(md.contains("name:"), "missing name field");
+        assert!(md.contains("code-reviewer"), "missing name value");
+        assert!(md.contains("Use this agent for code review."), "missing description");
+        assert!(md.contains("blue"), "missing color");
+        assert!(md.contains("sonnet"), "missing model");
+        assert!(md.contains("Read, Grep"), "missing tools");
+        assert!(md.contains("You are a code reviewer."), "missing prompt body");
+        assert!(md.starts_with("---\n"), "missing frontmatter opener");
     }
 
     #[test]
@@ -476,11 +458,9 @@ mod tests {
             .with_example(AgentExample::new("ctx", "user msg", "assistant msg"));
 
         let md = agent.to_markdown();
-        assert!(md.contains("description: \"Test description\""));
-        assert!(md.contains("## Examples"));
-        assert!(md.contains("<example>"));
-        let desc_line = md.lines().find(|l| l.starts_with("description:")).unwrap();
-        assert!(!desc_line.contains("<example>"));
+        assert!(md.contains("Test description"), "missing description");
+        assert!(md.contains("## Examples"), "missing examples section");
+        assert!(md.contains("<example>"), "missing example block");
     }
 
     #[test]

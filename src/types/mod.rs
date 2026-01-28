@@ -8,6 +8,7 @@ pub mod hint;
 pub mod hook;
 pub mod insight;
 pub mod memory;
+pub mod module_map;
 pub mod node;
 pub mod plugin;
 pub mod rule;
@@ -41,6 +42,7 @@ pub use insight::{
     ArtifactClassification, ContentTier, DomainContext, ModuleContext, TierClassification,
 };
 pub use memory::{DevelopmentCommand, ProjectMemory};
+pub use module_map::{DetectedModule, ModuleGroup, ModuleMap};
 pub use node::{
     ApiMetadata, AuthRequirement, ComponentMetadata, EntityMetadata, EvidenceLocation,
     FieldDefinition, FunctionSignature, HttpMethod, InformationTier, Node, NodeMetadata,
@@ -55,7 +57,7 @@ pub use severity::Severity;
 pub use skill::{ContextMode, MIN_FILE_REFS, QualityMetrics, Skill};
 pub use utils::{
     ParseWithDefault, enum_to_str, json_bool, json_f64, json_i64, json_string, json_string_array,
-    json_string_or, log_filter_error, log_filter_warn,
+    json_string_or, log_filter_error, log_filter_warn, yaml_value,
 };
 pub use validation::{DiagnosticLevel, ValidationIssue, ValidationResult};
 

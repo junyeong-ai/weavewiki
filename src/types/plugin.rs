@@ -70,6 +70,18 @@ pub struct PluginManifest {
     /// Plugin-level hooks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HooksConfig>,
+    /// Schema version for multi-agent support
+    #[serde(rename = "schemaVersion", skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<String>,
+    /// Generator tool identifier
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generator: Option<String>,
+    /// Required skills for this plugin
+    #[serde(rename = "requiredSkills", skip_serializing_if = "Option::is_none")]
+    pub required_skills: Option<Vec<String>>,
+    /// Required agents for this plugin
+    #[serde(rename = "requiredAgents", skip_serializing_if = "Option::is_none")]
+    pub required_agents: Option<Vec<String>>,
 }
 
 /// Plugin permissions control tool access
@@ -157,6 +169,10 @@ impl PluginManifest {
             lsp_servers: None,
             permissions: None,
             hooks: None,
+            schema_version: None,
+            generator: None,
+            required_skills: None,
+            required_agents: None,
         }
     }
 
@@ -179,6 +195,10 @@ impl PluginManifest {
             lsp_servers: None,
             permissions: None,
             hooks: None,
+            schema_version: None,
+            generator: None,
+            required_skills: None,
+            required_agents: None,
         }
     }
 
@@ -245,6 +265,26 @@ impl PluginManifest {
     /// Set hooks
     pub fn with_hooks(mut self, hooks: HooksConfig) -> Self {
         self.hooks = Some(hooks);
+        self
+    }
+
+    pub fn with_schema_version(mut self, version: impl Into<String>) -> Self {
+        self.schema_version = Some(version.into());
+        self
+    }
+
+    pub fn with_generator(mut self, generator: impl Into<String>) -> Self {
+        self.generator = Some(generator.into());
+        self
+    }
+
+    pub fn with_required_skills(mut self, skills: Vec<String>) -> Self {
+        self.required_skills = Some(skills);
+        self
+    }
+
+    pub fn with_required_agents(mut self, agents: Vec<String>) -> Self {
+        self.required_agents = Some(agents);
         self
     }
 
