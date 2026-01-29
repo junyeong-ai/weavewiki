@@ -162,7 +162,8 @@ impl RefinementStrategy for RegenerationStrategy {
                     deserialize_llm_response(&response.content, "skill_regeneration")?;
 
                 if !output.skill_body.is_empty() {
-                    let new_score = calculate_validated_quality(&output.skill_body, context.file_registry);
+                    let new_score =
+                        calculate_validated_quality(&output.skill_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
                     if new_score > old_score + acceptance_delta {
@@ -204,7 +205,8 @@ impl RefinementStrategy for RegenerationStrategy {
                     deserialize_llm_response(&response.content, "agent_regeneration")?;
 
                 if !output.agent_prompt.is_empty() {
-                    let new_score = calculate_validated_quality(&output.agent_prompt, context.file_registry);
+                    let new_score =
+                        calculate_validated_quality(&output.agent_prompt, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
                     if new_score > old_score + acceptance_delta {

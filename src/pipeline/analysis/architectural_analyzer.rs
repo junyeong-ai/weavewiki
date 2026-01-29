@@ -346,8 +346,28 @@ fn is_common_word(word: &str) -> bool {
     // Kept minimal: "go" could be Go language module, "io" is common module name
     matches!(
         word,
-        "an" | "as" | "at" | "be" | "by" | "do" | "he" | "if" | "in" | "is" | "it" | "me" | "my"
-            | "no" | "of" | "ok" | "on" | "or" | "so" | "to" | "up" | "us" | "we"
+        "an" | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "do"
+            | "he"
+            | "if"
+            | "in"
+            | "is"
+            | "it"
+            | "me"
+            | "my"
+            | "no"
+            | "of"
+            | "ok"
+            | "on"
+            | "or"
+            | "so"
+            | "to"
+            | "up"
+            | "us"
+            | "we"
     )
 }
 

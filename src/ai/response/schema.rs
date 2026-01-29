@@ -72,25 +72,21 @@ fn transform_object(value: &Value) -> Value {
             // If this is a schema object with "type": "object" and "properties"
             if obj.get("type").and_then(|v| v.as_str()) == Some("object")
                 && let Some(props) = obj.get("properties")
-                    && let Some(props_obj) = props.as_object() {
-                        // Add additionalProperties: false
-                        new_obj.insert(
-                            "additionalProperties".to_string(),
-                            Value::Bool(false),
-                        );
+                && let Some(props_obj) = props.as_object()
+            {
+                // Add additionalProperties: false
+                new_obj.insert("additionalProperties".to_string(), Value::Bool(false));
 
-                        // Make all properties required (unless already specified)
-                        if !new_obj.contains_key("required") {
-                            let all_props: Vec<Value> = props_obj
-                                .keys()
-                                .map(|k| Value::String(k.clone()))
-                                .collect();
+                // Make all properties required (unless already specified)
+                if !new_obj.contains_key("required") {
+                    let all_props: Vec<Value> =
+                        props_obj.keys().map(|k| Value::String(k.clone())).collect();
 
-                            if !all_props.is_empty() {
-                                new_obj.insert("required".to_string(), Value::Array(all_props));
-                            }
-                        }
+                    if !all_props.is_empty() {
+                        new_obj.insert("required".to_string(), Value::Array(all_props));
                     }
+                }
+            }
 
             Value::Object(new_obj)
         }
@@ -131,7 +127,12 @@ fn transform_one_of(variants: &[Value], parent: &serde_json::Map<String, Value>)
         result.insert("type".to_string(), Value::String("string".to_string()));
         result.insert(
             "enum".to_string(),
-            Value::Array(string_constants.iter().map(|s| Value::String(s.to_string())).collect()),
+            Value::Array(
+                string_constants
+                    .iter()
+                    .map(|s| Value::String(s.to_string()))
+                    .collect(),
+            ),
         );
         return Value::Object(result);
     }
@@ -157,7 +158,10 @@ fn transform_one_of(variants: &[Value], parent: &serde_json::Map<String, Value>)
     if has_object_variants && !merged_props.is_empty() {
         let mut result = serde_json::Map::new();
         result.insert("type".to_string(), Value::String("object".to_string()));
-        result.insert("properties".to_string(), Value::Object(merged_props.clone()));
+        result.insert(
+            "properties".to_string(),
+            Value::Object(merged_props.clone()),
+        );
         result.insert("additionalProperties".to_string(), Value::Bool(false));
         // All merged properties are optional (no required array)
         return Value::Object(result);
@@ -235,15 +239,8 @@ mod tests {
 
         let transformed = transform_for_strict(schema);
 
-        let inner = transformed
-            .get("properties")
-            .unwrap()
-            .get("inner")
-            .unwrap();
-        assert_eq!(
-            inner.get("additionalProperties"),
-            Some(&Value::Bool(false))
-        );
+        let inner = transformed.get("properties").unwrap().get("inner").unwrap();
+        assert_eq!(inner.get("additionalProperties"), Some(&Value::Bool(false)));
     }
 
     #[test]
@@ -259,7 +256,10 @@ mod tests {
 
         let transformed = transform_for_strict(schema);
 
-        assert_eq!(transformed.get("type"), Some(&Value::String("string".to_string())));
+        assert_eq!(
+            transformed.get("type"),
+            Some(&Value::String("string".to_string()))
+        );
         let enum_vals = transformed.get("enum").unwrap().as_array().unwrap();
         assert_eq!(enum_vals.len(), 3);
         assert!(enum_vals.contains(&Value::String("active".to_string())));
@@ -291,7 +291,10 @@ mod tests {
 
         let transformed = transform_for_strict(schema);
 
-        assert_eq!(transformed.get("type"), Some(&Value::String("object".to_string())));
+        assert_eq!(
+            transformed.get("type"),
+            Some(&Value::String("object".to_string()))
+        );
         let props = transformed.get("properties").unwrap().as_object().unwrap();
         // Should have merged properties from both variants
         assert!(props.contains_key("tag"));

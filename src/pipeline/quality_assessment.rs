@@ -331,7 +331,10 @@ impl QualityAssessor {
 
         // PATH 2.5: Relaxed quality floor - ANY dimension passes with high quality
         // Use quality_floor for consistency, require 3+ dimensions for safety
-        if combined_quality >= self.quality_floor && dimensions.any_passed() && dimensions.passed_count() >= 3 {
+        if combined_quality >= self.quality_floor
+            && dimensions.any_passed()
+            && dimensions.passed_count() >= 3
+        {
             return Some(AssessmentPath::QualityFloorMet);
         }
 

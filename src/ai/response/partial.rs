@@ -136,7 +136,10 @@ impl FieldParseError {
     }
 
     pub fn type_mismatch(expected: &str, actual: &Value) -> Self {
-        Self::new(expected, format!("expected {expected}, got {}", value_type_name(actual)))
+        Self::new(
+            expected,
+            format!("expected {expected}, got {}", value_type_name(actual)),
+        )
     }
 }
 
@@ -151,7 +154,11 @@ pub trait PartialParseable: Default {
     /// - `Ok(SetFieldResult::Set)` if the field was successfully set
     /// - `Ok(SetFieldResult::Ignored)` if the field name is not recognized
     /// - `Err(FieldParseError)` if the field is known but the value failed to parse
-    fn try_set_field(&mut self, name: &str, value: &Value) -> Result<SetFieldResult, FieldParseError>;
+    fn try_set_field(
+        &mut self,
+        name: &str,
+        value: &Value,
+    ) -> Result<SetFieldResult, FieldParseError>;
 
     /// List of required field names.
     /// Missing required fields will be reported but won't prevent parsing.
@@ -181,7 +188,8 @@ pub fn extract_field<T: DeserializeOwned + Default>(obj: &Map<String, Value>, fi
 
 /// Helper to extract an optional field
 pub fn extract_optional<T: DeserializeOwned>(obj: &Map<String, Value>, field: &str) -> Option<T> {
-    obj.get(field).and_then(|v| serde_json::from_value(v.clone()).ok())
+    obj.get(field)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
 /// Helper to extract a string field
@@ -238,21 +246,29 @@ mod tests {
     }
 
     impl PartialParseable for TestStruct {
-        fn try_set_field(&mut self, name: &str, value: &Value) -> Result<SetFieldResult, FieldParseError> {
+        fn try_set_field(
+            &mut self,
+            name: &str,
+            value: &Value,
+        ) -> Result<SetFieldResult, FieldParseError> {
             match name {
                 "name" => {
-                    self.name = value.as_str()
+                    self.name = value
+                        .as_str()
                         .ok_or_else(|| FieldParseError::type_mismatch("string", value))?
                         .to_string();
                     Ok(SetFieldResult::Set)
                 }
                 "count" => {
-                    self.count = value.as_u64()
-                        .ok_or_else(|| FieldParseError::type_mismatch("integer", value))? as u32;
+                    self.count = value
+                        .as_u64()
+                        .ok_or_else(|| FieldParseError::type_mismatch("integer", value))?
+                        as u32;
                     Ok(SetFieldResult::Set)
                 }
                 "items" => {
-                    self.items = value.as_array()
+                    self.items = value
+                        .as_array()
                         .ok_or_else(|| FieldParseError::type_mismatch("array", value))?
                         .iter()
                         .filter_map(|v| v.as_str().map(String::from))

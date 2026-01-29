@@ -366,7 +366,7 @@ mod tests {
                 "calc",
                 "desc",
                 DomainLogicType::Calculation,
-                EvidenceLocation::empty(),
+                EvidenceLocation::default(),
             )],
             &glossary,
             &[BusinessWorkflow::new("flow", "desc")],

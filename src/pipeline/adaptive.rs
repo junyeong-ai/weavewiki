@@ -4,31 +4,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::ai::response::generate_schema;
-use crate::ai::validation::deserialize_llm_response;
 use crate::ai::{ProviderSet, phase_id, with_timeout};
 use crate::config::Config;
-use crate::types::{
-    Agent, AgentModel, ModuleMap, Plugin, PluginManifest, ProjectMemory, Result, Rule, Severity,
-    Skill,
-};
+use crate::types::{ModuleMap, Plugin, PluginManifest, ProjectMemory, Result, Rule};
+use crate::utils::to_kebab_case;
 
 use super::analysis::{
     AggregatedAnalysis, AnalysisAggregator, AnalysisSynthesizer, AstEnricher, ChunkingStrategy,
     CrossSynthesizer, DeepAnalysisResult, DeepAnalyzer, DistributedAnalyzer, DomainAnalyzer,
     SynthesizedAnalysis, SynthesizedInsights,
 };
-use super::context::VerifiedFileRegistry;
-
-use super::context::ClaudegenContext;
+use super::context::{ClaudegenContext, VerifiedFileRegistry};
 use super::enrichment::{EnrichedPlan, EnrichmentEngine};
-use super::generation::path_rules::{ClaudeMdGenerator, PathRulesGenerator};
-use super::generation::{HookScriptGenerator, ModuleMapGenerator, OrchestrationGenerator};
+use super::generation::{
+    ClaudeMdContext, ClaudeMdGenerator, ModuleMapGenerator, OrchestrationGenerator,
+    RuleGenerationContext, RulesGenerator,
+};
 use super::phases::{
     constraint_extraction::{self, ExtractedConstraints},
     convention_inference::{self, InferredConventions},
@@ -36,15 +30,9 @@ use super::phases::{
     output_router::{self, OutputPlan},
     project_detection::{self, ProjectDetection},
 };
-use super::reference_extractor::ReferenceExtractor;
 use super::refinement::RefinementEngine;
 use super::validation::{ConsistencyResult, CrossValidationResult, TierFilterResult};
-
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-struct AgentPromptOutput {
-    #[serde(default)]
-    prompt: String,
-}
+use crate::types::module_map::TechStack;
 
 #[derive(Debug, Clone)]
 pub struct AdaptivePipelineOutput {
@@ -97,6 +85,15 @@ impl AdaptivePipeline {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    fn build_tech_stack(detection: &ProjectDetection) -> TechStack {
+        let primary_language = detection
+            .languages
+            .first()
+            .map(|l| l.language.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        TechStack::new(primary_language)
     }
 
     async fn validate_preconditions(&self) -> Result<()> {
@@ -355,7 +352,10 @@ impl AdaptivePipeline {
         let cross_insights = if let (Some(aggregated), Some(domain)) =
             (aggregated_analysis.as_ref(), domain_analysis.as_ref())
         {
-            match self.run_cross_synthesis(aggregated, domain, &file_registry).await {
+            match self
+                .run_cross_synthesis(aggregated, domain, &file_registry)
+                .await
+            {
                 Ok(insights) => {
                     tracing::info!(
                         hidden_deps = insights.hidden_dependencies.len(),
@@ -410,8 +410,7 @@ impl AdaptivePipeline {
         // Phase 4.5: Module Detection (for multi-agent orchestration)
         let (detected_modules, detected_groups) = if self.config.multi_agent.enabled {
             let detector = super::phases::module_detection::ModuleDetector::new(Arc::clone(
-                self.providers
-                    .provider_for_phase(phase_id::DEEP_ANALYSIS),
+                self.providers.provider_for_phase(phase_id::DEEP_ANALYSIS),
             ))
             .with_grouping_threshold(self.config.multi_agent.min_modules_for_grouping);
             match detector
@@ -473,7 +472,6 @@ impl AdaptivePipeline {
             rule_groups = output_plan.rules_plan.rule_groups.len(),
             skills = output_plan.skills_plan.planned_skills.len(),
             agents = output_plan.agents_plan.planned_agents.len(),
-            orchestration = output_plan.orchestration_plan.is_some(),
             "Output planned"
         );
 
@@ -505,93 +503,52 @@ impl AdaptivePipeline {
             .unwrap_or("project")
             .to_string();
 
-        let enrichment_ctx = crate::pipeline::generation::path_rules::EnrichmentContext {
+        // Generate CLAUDE.md
+        let claude_md_ctx = ClaudeMdContext {
+            plan: &output_plan,
+            detection: &detection,
+            conventions: &conventions,
+            constraints: &constraints,
+            project_name: &project_name,
             enriched_plan: Some(&enriched_plan),
             synthesis: synthesis.as_ref(),
             domain_analysis: domain_analysis.as_ref(),
             cross_insights: cross_insights.as_ref(),
         };
-        let claude_md = ClaudeMdGenerator::generate_with_enrichment(
-            &output_plan,
-            &detection,
-            &conventions,
-            &constraints,
-            &project_name,
-            &enrichment_ctx,
-        )?;
+        let claude_md = ClaudeMdGenerator::generate(&claude_md_ctx)?;
 
-        let rules = PathRulesGenerator::generate_with_threshold(
-            &output_plan,
-            monorepo.as_ref(),
-            &conventions,
-            &constraints,
-            synthesis.as_ref(),
-            Some(&file_registry),
-            self.config.generation.min_rule_value_score,
-        )?;
+        // Build TechStack from detection
+        let tech_stack = Self::build_tech_stack(&detection);
 
-        let skills = self
-            .generate_skills_with_enrichment(
-                &enriched_plan,
-                &constraints,
-                &file_registry,
-                synthesis.as_ref(),
-                domain_analysis.as_ref(),
-                cross_insights.as_ref(),
-            )
-            .await?;
-        let agents = self
-            .generate_agents_with_enrichment(&enriched_plan, &detection, monorepo.as_ref())
-            .await?;
+        // Generate module_map
+        let (modules, groups, module_map) = if let Some(ref detected) = detected_modules {
+            let map =
+                ModuleMapGenerator::generate_simple(detected, &detected_groups, &project_name)?;
+            (detected.clone(), detected_groups.clone(), Some(map))
+        } else {
+            (Vec::new(), Vec::new(), None)
+        };
 
-        // Phase 6.5: Orchestration Generation (if modules detected)
-        let (module_map, orchestration_artifacts) =
-            if let (Some(orch_plan), Some(modules)) =
-                (&output_plan.orchestration_plan, &detected_modules)
-            {
-                let artifacts = OrchestrationGenerator::generate(
-                    orch_plan,
-                    modules,
-                    &detected_groups,
-                    cross_insights.as_ref(),
-                    &constraints,
-                    domain_analysis.as_ref(),
-                    &conventions,
-                );
-                let module_map = ModuleMapGenerator::generate(modules, &detected_groups)?;
-
-                tracing::info!(
-                    orch_skills = artifacts.skills.len(),
-                    orch_agents = artifacts.agents.len(),
-                    orch_rules = artifacts.rules.len(),
-                    modules = module_map.modules.len(),
-                    "Orchestration artifacts generated"
-                );
-
-                (Some(module_map), Some(artifacts))
-            } else {
-                (None, None)
+        // Generate hierarchical rules using RulesGenerator
+        let rules = if !modules.is_empty() {
+            let rule_ctx = RuleGenerationContext {
+                detection: &detection,
+                conventions: &conventions,
+                constraints: &constraints,
+                tech_stack: &tech_stack,
+                modules: &modules,
+                groups: &groups,
+                project_name: &project_name,
             };
+            RulesGenerator::generate(&rule_ctx)
+        } else {
+            Vec::new()
+        };
 
-        // Merge orchestration artifacts into main artifacts
-        let mut skills = skills;
-        let mut agents = agents;
-        let mut rules = rules;
-        if let Some(orch) = orchestration_artifacts {
-            skills.extend(orch.skills);
-            agents.extend(orch.agents);
-            rules.extend(orch.rules);
-        }
-
-        // Generate rules from uncovered Critical/High constraints
-        let uncovered_rules = generate_rules_from_uncovered(&enriched_plan);
-        if !uncovered_rules.is_empty() {
-            tracing::info!(
-                count = uncovered_rules.len(),
-                "Generated rules from uncovered Critical/High constraints"
-            );
-            rules.extend(uncovered_rules);
-        }
+        // Generate fixed skills and agents
+        let orchestration_artifacts = OrchestrationGenerator::generate();
+        let skills = orchestration_artifacts.skills;
+        let agents = orchestration_artifacts.agents;
 
         tracing::info!(
             skills = skills.len(),
@@ -659,21 +616,16 @@ impl AdaptivePipeline {
             "Final validation complete"
         );
 
-        let mut manifest =
-            PluginManifest::new(format!("{}-plugin", to_kebab_case(&project_name)))
-                .with_version("1.0.0")
-                .with_description(format!("Claude Code plugin for {}", project_name))
-                .with_schema_version("1.0.0")
-                .with_generator(format!("claudegen@{}", env!("CARGO_PKG_VERSION")));
+        let mut manifest = PluginManifest::new(format!("{}-plugin", to_kebab_case(&project_name)))
+            .with_version("1.0.0")
+            .with_description(format!("Claude Code plugin for {}", project_name))
+            .with_schema_version("1.0.0")
+            .with_generator(format!("claudegen@{}", env!("CARGO_PKG_VERSION")));
 
         if detected_modules.is_some() {
             manifest = manifest
                 .with_required_skills(skills.iter().map(|s| s.name.clone()).collect())
                 .with_required_agents(agents.iter().map(|a| a.name.clone()).collect());
-
-            if self.config.multi_agent.generate_hooks {
-                manifest = manifest.with_hooks(HookScriptGenerator::generate_plugin_hooks());
-            }
         }
 
         let plugin = Plugin {
@@ -1028,368 +980,6 @@ impl AdaptivePipeline {
         Ok((Some(deep_result), Some(aggregated)))
     }
 
-    async fn generate_skills_with_enrichment(
-        &self,
-        enriched_plan: &EnrichedPlan,
-        constraints: &ExtractedConstraints,
-        file_registry: &VerifiedFileRegistry,
-        synthesis: Option<&SynthesizedAnalysis>,
-        domain_analysis: Option<&crate::types::domain::DomainAnalysisResult>,
-        cross_insights: Option<&SynthesizedInsights>,
-    ) -> Result<Vec<Skill>> {
-        let mut skills = Vec::new();
-
-        for planned in &enriched_plan.plan.skills_plan.planned_skills {
-            // Get enriched constraints for this skill
-            let skill_constraints = enriched_plan
-                .skill_constraints
-                .get(&planned.name)
-                .cloned()
-                .unwrap_or_default();
-
-            let workflow = constraints
-                .complex_workflows
-                .iter()
-                .find(|w| to_kebab_case(&w.name) == planned.name);
-
-            let mut body = if let Some(w) = workflow {
-                let mut body = format!("## {}\n\n", w.name);
-                body.push_str(&format!("{}\n\n", w.description));
-                body.push_str("### Steps\n");
-                for step in &w.steps {
-                    let valid_files: Vec<_> = step
-                        .files_involved
-                        .iter()
-                        .filter(|f| file_registry.contains(f) || file_registry.directory_exists(f))
-                        .collect();
-
-                    if let Some(file_ref) = valid_files.first() {
-                        body.push_str(&format!(
-                            "{}. {} (see @{})\n",
-                            step.order, step.action, file_ref
-                        ));
-                    } else {
-                        body.push_str(&format!("{}. {}\n", step.order, step.action));
-                    }
-                }
-                if !w.gotchas.is_empty() {
-                    body.push_str("\n### Gotchas\n");
-                    for gotcha in &w.gotchas {
-                        body.push_str(&format!("- {}\n", gotcha));
-                    }
-                }
-                body
-            } else {
-                format!("## {}\n\n{}", planned.name, planned.trigger)
-            };
-
-            // Inject enriched constraints into skill body
-            if !skill_constraints.is_empty() {
-                body.push_str("\n### Critical Constraints\n");
-                for constraint in &skill_constraints {
-                    body.push_str(&format!("- {}\n", constraint.format_for_skill()));
-                }
-            }
-
-            // Add module context from synthesis if available
-            // No truncation - LLM token budget is the natural limit
-            if let Some(synth) = synthesis
-                && !synth.modules.is_empty() {
-                    body.push_str("\n### Project Modules\n");
-                    for module in &synth.modules {
-                        body.push_str(&format!("- @{}: {}\n", module.path, module.responsibility));
-                    }
-                }
-
-            // Add domain context - no arbitrary truncation
-            if let Some(domain) = domain_analysis {
-                if !domain.policies.is_empty() {
-                    body.push_str("\n### Domain Policies\n");
-                    for policy in &domain.policies {
-                        body.push_str(&format!(
-                            "- **{}** ({:?}): {}\n",
-                            policy.name, policy.policy_type, policy.description
-                        ));
-                    }
-                }
-
-                if !domain.workflows.is_empty() {
-                    body.push_str("\n### Business Workflows\n");
-                    for workflow in &domain.workflows {
-                        body.push_str(&format!("#### {}\n{}\n", workflow.name, workflow.description));
-                        for step in &workflow.steps {
-                            body.push_str(&format!("{}. {}\n", step.order, step.action));
-                        }
-                    }
-                }
-            }
-
-            // Add Tier 3 insights from cross-synthesis - no truncation
-            if let Some(insights) = cross_insights
-                && !insights.tier3_insights.is_empty() {
-                    body.push_str("\n### Critical Gotchas\n");
-                    for insight in &insights.tier3_insights {
-                        body.push_str(&format!(
-                            "- **{}**: {} → {}\n",
-                            insight.title, insight.description, insight.prevention_guidance
-                        ));
-                    }
-                }
-
-            let skill = Skill::new(&planned.name, &planned.trigger, body).with_user_invocable(true);
-
-            skills.push(skill);
-        }
-
-        Ok(skills)
-    }
-
-    /// Generate agents with enriched internal knowledge from synthesis
-    async fn generate_agents_with_enrichment(
-        &self,
-        enriched_plan: &EnrichedPlan,
-        detection: &ProjectDetection,
-        monorepo: Option<&MonorepoAnalysis>,
-    ) -> Result<Vec<Agent>> {
-        let mut agents = Vec::new();
-
-        for planned in &enriched_plan.plan.agents_plan.planned_agents {
-            // Get enriched knowledge for this agent
-            let knowledge = enriched_plan.agent_knowledge.get(&planned.name).cloned();
-
-            let agent = self
-                .build_agent_with_knowledge(
-                    &planned.name,
-                    &planned.role,
-                    detection,
-                    monorepo,
-                    knowledge,
-                )
-                .await?;
-            agents.push(agent);
-        }
-
-        Ok(agents)
-    }
-
-    /// Build agent with injected internal knowledge
-    async fn build_agent_with_knowledge(
-        &self,
-        name: &str,
-        role: &str,
-        detection: &ProjectDetection,
-        monorepo: Option<&MonorepoAnalysis>,
-        knowledge: Option<super::enrichment::AgentInternalKnowledge>,
-    ) -> Result<Agent> {
-        let (model, tools) = self.determine_agent_config(name, role);
-
-        // Generate prompt with injected internal knowledge
-        let prompt = if let Some(ref k) = knowledge
-            && k.is_substantial()
-        {
-            // Use enriched knowledge directly
-            self.build_enriched_agent_prompt(role, detection, monorepo, k)
-        } else {
-            // Fallback to LLM generation
-            self.generate_agent_prompt_with_llm(role, detection, monorepo)
-                .await?
-        };
-
-        let mut agent = Agent::new(name, role, prompt).with_model(model);
-
-        if !tools.is_empty() {
-            agent = agent.with_tools(tools);
-        }
-
-        Ok(agent)
-    }
-
-    /// Build agent prompt with enriched internal knowledge
-    fn build_enriched_agent_prompt(
-        &self,
-        role: &str,
-        detection: &ProjectDetection,
-        _monorepo: Option<&MonorepoAnalysis>,
-        knowledge: &super::enrichment::AgentInternalKnowledge,
-    ) -> String {
-        let project_type = detection.primary_type.as_str();
-        let langs: Vec<_> = detection
-            .languages
-            .iter()
-            .map(|l| l.language.as_str())
-            .collect();
-
-        let mut prompt = format!(
-            "## Description\n\
-            {role} specialist for {project_type} ({langs}) with deep internal project knowledge.\n\n",
-            role = role,
-            project_type = project_type,
-            langs = langs.join(", "),
-        );
-
-        // Add the enriched internal knowledge section
-        prompt.push_str(&knowledge.format_as_prompt_section());
-
-        prompt
-    }
-
-    fn determine_agent_config(&self, name: &str, role: &str) -> (AgentModel, Vec<String>) {
-        let agent_config = &self.config.output.agents;
-
-        // Check per-agent overrides first (exact name match)
-        if let Some(override_cfg) = agent_config.overrides.get(name) {
-            let model = override_cfg
-                .model
-                .as_ref()
-                .map(|m| m.to_agent_model())
-                .unwrap_or_else(|| agent_config.default_model.to_agent_model());
-
-            let tools = override_cfg
-                .tools
-                .clone()
-                .unwrap_or_else(|| agent_config.tools.default.clone());
-
-            return (model, tools);
-        }
-
-        let role_lower = role.to_lowercase();
-
-        // Check configurable role mappings
-        // Note: uses substring matching - pattern "code" matches "code-reviewer" and "encode"
-        for mapping in &agent_config.role_mappings {
-            if mapping.patterns.iter().any(|p| role_lower.contains(p)) {
-                return (mapping.model.to_agent_model(), agent_config.tools.default.clone());
-            }
-        }
-
-        // Fallback to default
-        (
-            agent_config.default_model.to_agent_model(),
-            agent_config.tools.default.clone(),
-        )
-    }
-
-    async fn generate_agent_prompt_with_llm(
-        &self,
-        role: &str,
-        detection: &ProjectDetection,
-        monorepo: Option<&MonorepoAnalysis>,
-    ) -> Result<String> {
-        let project_type = detection.primary_type.as_str();
-        let langs: Vec<_> = detection
-            .languages
-            .iter()
-            .map(|l| l.language.as_str())
-            .collect();
-
-        let key_paths = self.get_key_paths().await;
-
-        let prompt = format!(
-            "Generate a domain-expert agent prompt for a \"{role}\" specialist.\n\n\
-Project: {project_type} in {langs}\n\
-Key paths: {key_paths}\n\
-{monorepo_info}\n\n\
-CRITICAL REQUIREMENTS (ALL must be satisfied):\n\
-1. MUST include an \"Internal Knowledge\" section with project-specific hidden constraints\n\
-2. MUST have at least 2 file references with line numbers (e.g., @src/pipeline/mod.rs:42)\n\
-3. MUST NOT be a generic role name (code-reviewer, test-writer, bug-fixer, etc.)\n\
-4. MUST describe specific workflows/sequences unique to this project\n\
-5. MUST include gotchas or order-dependent operations\n\n\
-REQUIRED STRUCTURE:\n\
-## Description\n\
-One line explaining the agent's domain expertise in THIS project.\n\n\
-## Internal Knowledge\n\
-- Hidden constraints specific to this project\n\
-- Order-dependent workflows\n\
-- Gotchas that new developers would not know\n\n\
-## Key References\n\
-- @path/to/file.rs:line - Description of what this reference teaches\n\n\
-Return as JSON: {{\"prompt\": \"...\"}}\n",
-            role = role,
-            project_type = project_type,
-            langs = langs.join(", "),
-            key_paths = key_paths.join(", "),
-            monorepo_info = if let Some(mono) = monorepo {
-                format!("Monorepo with {} subprojects", mono.subprojects.len())
-            } else {
-                String::new()
-            }
-        );
-
-        let schema = generate_schema::<AgentPromptOutput>();
-
-        match self
-            .providers
-            .default_provider()
-            .generate(&prompt, &schema)
-            .await
-        {
-            Ok(response) => {
-                let output: AgentPromptOutput =
-                    deserialize_llm_response(&response.content, "agent_prompt")?;
-
-                if !output.prompt.is_empty() {
-                    Ok(output.prompt.trim().to_string())
-                } else {
-                    tracing::debug!(role = %role, "LLM response missing prompt field, using template");
-                    Ok(Self::fallback_agent_prompt(role, detection, &key_paths))
-                }
-            }
-            Err(e) => {
-                tracing::debug!(role = %role, error = %e, "Agent prompt generation failed, using template");
-                Ok(Self::fallback_agent_prompt(role, detection, &key_paths))
-            }
-        }
-    }
-
-    async fn get_key_paths(&self) -> Vec<String> {
-        // Use ReferenceExtractor which checks file existence for common patterns
-        // Project-type-specific fallback removed - patterns are already comprehensive
-        if let Ok(refs) = ReferenceExtractor::extract_key_references(&self.project_root).await {
-            let paths: Vec<String> = refs
-                .into_iter()
-                .take(self.config.analysis.max_key_paths)
-                .map(|r| r.to_string_ref())
-                .collect();
-
-            if !paths.is_empty() {
-                return paths;
-            }
-        }
-
-        // Generic fallback only
-        vec!["@src/".to_string()]
-    }
-
-    fn fallback_agent_prompt(
-        role: &str,
-        detection: &ProjectDetection,
-        key_paths: &[String],
-    ) -> String {
-        let project_type = detection.primary_type.as_str();
-        let langs: Vec<_> = detection
-            .languages
-            .iter()
-            .map(|l| l.language.as_str())
-            .collect();
-
-        format!(
-            "## Description\n\
-{role} specialist for {project_type} ({langs}) with internal project knowledge.\n\n\
-## Internal Knowledge\n\
-- This agent has project-specific constraints that must be discovered through analysis\n\
-- Consult @CLAUDE.md for architecture patterns and anti-patterns\n\n\
-## Key References\n\
-{paths}\n\
-- @CLAUDE.md - Project conventions and architecture\n\
-- @.claude/rules/ - Path-specific rules",
-            role = role,
-            project_type = project_type,
-            langs = langs.join(", "),
-            paths = key_paths.join("\n")
-        )
-    }
-
     pub async fn write_output(&self, output: &AdaptivePipelineOutput) -> Result<()> {
         // Write CLAUDE.md atomically
         atomic_write(
@@ -1398,14 +988,16 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
         )
         .await?;
 
-        // Create plugin directory structure
+        // Create unified plugin directory structure
+        // All artifacts consolidated under .claude/plugins/{project}/
         let plugin_dir = output.plugin.plugin_dir(&self.project_root);
         let claude_plugin_dir = plugin_dir.join(".claude-plugin");
         let skills_dir = plugin_dir.join("skills");
         let agents_dir = plugin_dir.join("agents");
+        let rules_dir = plugin_dir.join("rules");
 
-        // Clean old directories
-        for dir in [&skills_dir, &agents_dir] {
+        // Clean old directories for fresh generation
+        for dir in [&skills_dir, &agents_dir, &rules_dir] {
             if dir.exists() {
                 fs::remove_dir_all(dir).await?;
             }
@@ -1443,104 +1035,55 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
             .await?;
         }
 
-        // Write rules to .claude/rules/
-        // Clean stale rules first to prevent invalid constraints from previous runs
-        let rules_dir = self.project_root.join(".claude").join("rules");
-        if rules_dir.exists() {
-            // Remove all existing .md files to prevent stale rules
-            if let Ok(mut entries) = fs::read_dir(&rules_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "md")
-                        && let Err(e) = fs::remove_file(&path).await
-                    {
-                        tracing::debug!(path = %path.display(), error = %e, "Failed to remove stale rule");
-                    }
-                }
-            }
-        }
-
+        // Write rules using category-based subdirectories
         if !output.rules.is_empty() || output.output_plan.strategy.requires_path_rules() {
-            fs::create_dir_all(&rules_dir).await?;
-
-            // Write module rules to .claude/rules/modules/
-            let module_rules_dir = rules_dir.join("modules");
-            let has_module_rules = output.rules.iter().any(|r| r.name.starts_with("module-"));
-            if has_module_rules {
-                if module_rules_dir.exists() {
-                    fs::remove_dir_all(&module_rules_dir).await?;
-                }
-                fs::create_dir_all(&module_rules_dir).await?;
-            }
-
-            for rule in &output.rules {
-                let target_dir = if rule.name.starts_with("module-") {
-                    &module_rules_dir
-                } else {
-                    &rules_dir
-                };
-                atomic_write(
-                    &target_dir.join(format!("{}.md", rule.name)),
-                    rule.to_markdown().as_bytes(),
-                )
-                .await?;
-            }
+            self.write_rules(&output.rules, &rules_dir).await?;
         }
 
-        // Write multi-agent artifacts
-        if let Some(ref module_map) = output.module_map {
-            let claudegen_dir = self.project_root.join(".claudegen");
-            fs::create_dir_all(&claudegen_dir).await?;
+        // Write module_map.json to plugin directory
+        if let Some(ref module_map) = output.module_map
+            && self.config.multi_agent.generate_module_map
+        {
+            let json = module_map.to_json().map_err(|e| {
+                crate::types::ClaudegenError::Config(format!(
+                    "Failed to serialize module map: {e}"
+                ))
+            })?;
+            atomic_write(&plugin_dir.join("module_map.json"), json.as_bytes()).await?;
+        }
 
-            // module_map.json
-            if self.config.multi_agent.generate_module_map {
-                let json = module_map.to_json().map_err(|e| {
-                    crate::types::ClaudegenError::Config(format!(
-                        "Failed to serialize module map: {e}"
-                    ))
-                })?;
-                atomic_write(&claudegen_dir.join("module_map.json"), json.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Write rules to category-based subdirectories using Rule::output_path()
+    async fn write_rules(&self, rules: &[Rule], rules_dir: &std::path::Path) -> Result<()> {
+        use crate::types::rule::RuleCategory;
+
+        // Create all category subdirectories upfront
+        for category in [
+            RuleCategory::Tech,
+            RuleCategory::Framework,
+            RuleCategory::Module,
+            RuleCategory::Group,
+            RuleCategory::Domain,
+        ] {
+            let subdir = rules_dir.join(category.subdirectory());
+            fs::create_dir_all(&subdir).await?;
+        }
+
+        // Ensure root rules_dir exists (for project rules)
+        fs::create_dir_all(rules_dir).await?;
+
+        // Write each rule to its correct path based on category
+        for rule in rules {
+            let output_path = rules_dir.join(rule.output_path());
+
+            // Ensure parent directory exists (safety for nested paths)
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).await?;
             }
 
-            // Hook scripts
-            if self.config.multi_agent.generate_hooks {
-                let hooks_dir = claudegen_dir.join("hooks");
-                fs::create_dir_all(&hooks_dir).await?;
-
-                let validate_script = HookScriptGenerator::generate_validate_module_scope();
-                let test_script = HookScriptGenerator::generate_run_module_tests();
-
-                atomic_write(
-                    &hooks_dir.join("validate-module-scope.sh"),
-                    validate_script.as_bytes(),
-                )
-                .await?;
-                atomic_write(
-                    &hooks_dir.join("run-module-tests.sh"),
-                    test_script.as_bytes(),
-                )
-                .await?;
-
-                // Make scripts executable
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    for script in ["validate-module-scope.sh", "run-module-tests.sh"] {
-                        let path = hooks_dir.join(script);
-                        if let Ok(metadata) = std::fs::metadata(&path) {
-                            let mut perms = metadata.permissions();
-                            perms.set_mode(0o755);
-                            let _ = std::fs::set_permissions(&path, perms);
-                        }
-                    }
-                }
-            }
-
-            // Shared directory scaffold
-            let shared_dir = claudegen_dir.join("shared");
-            if !shared_dir.exists() {
-                fs::create_dir_all(&shared_dir).await?;
-            }
+            atomic_write(&output_path, rule.to_markdown().as_bytes()).await?;
         }
 
         Ok(())
@@ -1602,101 +1145,6 @@ Return as JSON: {{\"prompt\": \"...\"}}\n",
     }
 }
 
-/// Generate rules from uncovered Critical/High constraints.
-///
-/// Constraints that were identified during enrichment but not covered
-/// by any planned artifact are surfaced as standalone rules with evidence.
-fn generate_rules_from_uncovered(enriched_plan: &EnrichedPlan) -> Vec<Rule> {
-    use std::collections::HashSet;
-    use crate::types::node::EvidenceLocation;
-
-    let mut seen_names = HashSet::new();
-    enriched_plan
-        .coverage
-        .uncovered
-        .iter()
-        .filter(|c| matches!(c.severity, Severity::Critical | Severity::High))
-        .filter_map(|c| {
-            let name = slugify_constraint_name(&c.category.to_string(), &c.description);
-            if !seen_names.insert(name.clone()) {
-                return None;
-            }
-
-            let severity_label = match c.severity {
-                Severity::Critical => "CRITICAL",
-                Severity::High => "HIGH",
-                _ => "MEDIUM",
-            };
-
-            let mut content = vec![
-                format!("# {} — {}", c.category, c.description),
-                String::new(),
-                format!("**Severity**: {}", severity_label),
-            ];
-
-            if !c.file_refs.is_empty() {
-                content.push(String::new());
-                content.push("**Evidence**:".to_string());
-                for file_ref in &c.file_refs {
-                    content.push(format!("- {}", file_ref));
-                }
-            }
-
-            let evidence: Vec<EvidenceLocation> = c.file_refs.iter()
-                .filter_map(|r| {
-                    let r = r.strip_prefix('@').unwrap_or(r);
-                    let (file, line) = r.rsplit_once(':')?;
-                    let line: u32 = line.parse().ok()?;
-                    Some(EvidenceLocation {
-                        file: file.to_string(),
-                        start_line: line,
-                        end_line: line,
-                        start_column: None,
-                        end_column: None,
-                    })
-                })
-                .collect();
-
-            let mut rule = Rule::new(name, content);
-            rule.evidence = evidence;
-            Some(rule)
-        })
-        .collect()
-}
-
-/// Generate a kebab-case rule name from constraint category and description.
-fn slugify_constraint_name(category: &str, description: &str) -> String {
-    let slug: String = description
-        .split_whitespace()
-        .take(4)
-        .collect::<Vec<_>>()
-        .join("-")
-        .to_lowercase()
-        .chars()
-        .filter(|ch| ch.is_alphanumeric() || *ch == '-')
-        .collect();
-    if slug.is_empty() {
-        format!("constraint-{}", category.to_lowercase().replace(' ', "-"))
-    } else {
-        format!("constraint-{}", slug)
-    }
-}
-
-fn to_kebab_case(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_whitespace() || c == '_' {
-                '-'
-            } else {
-                c.to_ascii_lowercase()
-            }
-        })
-        .collect::<String>()
-        .replace("--", "-")
-        .trim_matches('-')
-        .to_string()
-}
-
 /// Atomically write content to a file.
 ///
 /// Writes to a temporary file in the same directory, syncs to disk,
@@ -1725,14 +1173,3 @@ async fn atomic_write(path: &std::path::Path, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_to_kebab_case() {
-        assert_eq!(to_kebab_case("Hello World"), "hello-world");
-        assert_eq!(to_kebab_case("API_Client"), "api-client");
-        assert_eq!(to_kebab_case("  spaced  "), "spaced");
-    }
-}

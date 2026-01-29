@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::config::{AnalysisConfig, ProjectType};
-use crate::types::hint::{AnalysisHint, HintCategory, HintCollection};
 use crate::types::Result;
+use crate::types::hint::{AnalysisHint, HintCategory, HintCollection};
 
 /// Minimum signal weight to consider "strong" for hybrid detection.
 ///
@@ -100,12 +100,10 @@ impl ProjectDetection {
         for signal in &self.signals {
             let confidence = match signal.signal_type {
                 // File existence is definitive
-                SignalType::EntryPoint | SignalType::ManifestFile => {
-                    AnalysisHint::definitive(
-                        HintCategory::ProjectType,
-                        format!("{:?} suggested by {}", signal.suggests, signal.source),
-                    )
-                }
+                SignalType::EntryPoint | SignalType::ManifestFile => AnalysisHint::definitive(
+                    HintCategory::ProjectType,
+                    format!("{:?} suggested by {}", signal.suggests, signal.source),
+                ),
                 // Dependency presence is high confidence, but usage needs verification
                 SignalType::Dependency | SignalType::FrameworkMarker => {
                     AnalysisHint::high_confidence(
@@ -115,13 +113,14 @@ impl ProjectDetection {
                     .with_evidence(["Dependency detected in manifest, usage not verified"])
                 }
                 // Directory structure is medium confidence (naming != purpose)
-                SignalType::DirectoryStructure => {
-                    AnalysisHint::medium_confidence(
-                        HintCategory::DirectoryRole,
-                        format!("{:?} pattern suggested by {}", signal.suggests, signal.source),
-                    )
-                    .with_evidence(["Directory exists, actual purpose needs verification"])
-                }
+                SignalType::DirectoryStructure => AnalysisHint::medium_confidence(
+                    HintCategory::DirectoryRole,
+                    format!(
+                        "{:?} pattern suggested by {}",
+                        signal.suggests, signal.source
+                    ),
+                )
+                .with_evidence(["Directory exists, actual purpose needs verification"]),
                 // Tool config is high confidence
                 SignalType::ToolConfig => AnalysisHint::high_confidence(
                     HintCategory::ProjectType,
@@ -133,15 +132,16 @@ impl ProjectDetection {
 
         // Monorepo detection is definitive (based on workspace manifest)
         if self.is_monorepo
-            && let Some(ref ws) = self.workspace_config {
-                hints.push(
-                    AnalysisHint::definitive(
-                        HintCategory::ProjectType,
-                        format!("{:?} with {} members", ws.workspace_type, ws.members.len()),
-                    )
-                    .with_evidence(ws.members.iter().map(|m| m.path.clone())),
-                );
-            }
+            && let Some(ref ws) = self.workspace_config
+        {
+            hints.push(
+                AnalysisHint::definitive(
+                    HintCategory::ProjectType,
+                    format!("{:?} with {} members", ws.workspace_type, ws.members.len()),
+                )
+                .with_evidence(ws.members.iter().map(|m| m.path.clone())),
+            );
+        }
 
         hints
     }

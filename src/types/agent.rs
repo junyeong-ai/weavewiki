@@ -31,6 +31,8 @@ pub struct Agent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus: Option<ConsensusRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<ToolHooks>,
     pub prompt: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -51,6 +53,7 @@ impl PartialEq for Agent {
             && self.model == other.model
             && self.permission_mode == other.permission_mode
             && self.skills == other.skills
+            && self.consensus == other.consensus
             && self.hooks == other.hooks
             && self.prompt == other.prompt
             && self.examples == other.examples
@@ -209,6 +212,49 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsensusRole {
+    pub priority: u8,
+    #[serde(default)]
+    pub can_veto: bool,
+    #[serde(default = "default_vote_threshold")]
+    pub vote_threshold: f64,
+}
+
+fn default_vote_threshold() -> f64 {
+    0.67
+}
+
+impl Default for ConsensusRole {
+    fn default() -> Self {
+        Self {
+            priority: 50,
+            can_veto: false,
+            vote_threshold: 0.67,
+        }
+    }
+}
+
+impl ConsensusRole {
+    pub fn new(priority: u8) -> Self {
+        Self {
+            priority,
+            can_veto: false,
+            vote_threshold: 0.67,
+        }
+    }
+
+    pub fn with_veto(mut self) -> Self {
+        self.can_veto = true;
+        self
+    }
+
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.vote_threshold = threshold;
+        self
+    }
+}
+
 /// Minimum required @file:line references for an agent to pass quality
 pub const MIN_AGENT_FILE_REFS: usize = 2;
 
@@ -229,6 +275,7 @@ impl Agent {
             model: None,
             permission_mode: None,
             skills: None,
+            consensus: None,
             hooks: None,
             prompt: prompt_str,
             examples: Vec::new(),
@@ -304,6 +351,11 @@ impl Agent {
         self
     }
 
+    pub fn with_consensus(mut self, consensus: ConsensusRole) -> Self {
+        self.consensus = Some(consensus);
+        self
+    }
+
     pub fn with_hooks(mut self, hooks: ToolHooks) -> Self {
         self.hooks = Some(hooks);
         self
@@ -335,16 +387,19 @@ impl Agent {
             fm.insert("color", yaml_value(&color.to_string()));
         }
         if let Some(tools) = &self.tools {
-            fm.insert("tools", yaml_value(&tools.join(", ")));
+            fm.insert("tools", serde_yaml::to_value(tools).unwrap_or_default());
         }
         if let Some(disallowed) = &self.disallowed_tools {
-            fm.insert("disallowedTools", yaml_value(&disallowed.join(", ")));
+            fm.insert("disallowedTools", serde_yaml::to_value(disallowed).unwrap_or_default());
         }
         if let Some(mode) = &self.permission_mode {
             fm.insert("permissionMode", yaml_value(&mode.to_string()));
         }
         if let Some(skills) = &self.skills {
             fm.insert("skills", serde_yaml::to_value(skills).unwrap_or_default());
+        }
+        if let Some(consensus) = &self.consensus {
+            fm.insert("consensus", serde_yaml::to_value(consensus).unwrap_or_default());
         }
         if let Some(hooks) = &self.hooks {
             fm.insert("hooks", serde_yaml::to_value(hooks).unwrap_or_default());
@@ -444,11 +499,19 @@ mod tests {
         let md = agent.to_markdown();
         assert!(md.contains("name:"), "missing name field");
         assert!(md.contains("code-reviewer"), "missing name value");
-        assert!(md.contains("Use this agent for code review."), "missing description");
+        assert!(
+            md.contains("Use this agent for code review."),
+            "missing description"
+        );
         assert!(md.contains("blue"), "missing color");
         assert!(md.contains("sonnet"), "missing model");
-        assert!(md.contains("Read, Grep"), "missing tools");
-        assert!(md.contains("You are a code reviewer."), "missing prompt body");
+        // Tools serialized as YAML array (block style)
+        assert!(md.contains("- Read"), "missing tool Read");
+        assert!(md.contains("- Grep"), "missing tool Grep");
+        assert!(
+            md.contains("You are a code reviewer."),
+            "missing prompt body"
+        );
         assert!(md.starts_with("---\n"), "missing frontmatter opener");
     }
 

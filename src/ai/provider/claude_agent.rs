@@ -246,8 +246,9 @@ mod inner {
                         )
                         .with_max_tokens(current_max_tokens);
 
-                if !schema.is_null() && schema.is_object()
-                    && !schema.as_object().map_or(true, |o| o.is_empty())
+                if !schema.is_null()
+                    && schema.is_object()
+                    && !schema.as_object().is_none_or(|o| o.is_empty())
                 {
                     request = request.with_json_schema(schema.clone());
                 }

@@ -28,9 +28,8 @@ mod schema;
 mod types;
 
 pub use partial::{
-    extract_bool, extract_f32, extract_field, extract_optional, extract_string,
-    extract_string_array, extract_u32, parse_partial, FieldParseError, PartialParseable,
-    SetFieldResult,
+    FieldParseError, PartialParseable, SetFieldResult, extract_bool, extract_f32, extract_field,
+    extract_optional, extract_string, extract_string_array, extract_u32, parse_partial,
 };
 pub use schema::{generate_schema, transform_for_strict};
 pub use types::{FieldError, ParseResult, ParseStatus, RecoveryAction};

@@ -33,7 +33,6 @@ pub enum HintConfidence {
     Definitive,
 }
 
-
 impl HintConfidence {
     /// Returns true if this confidence level is reliable enough for direct use
     pub fn is_reliable(&self) -> bool {
@@ -187,7 +186,9 @@ impl HintCollection {
     }
 
     pub fn hints_needing_validation(&self) -> impl Iterator<Item = &AnalysisHint> {
-        self.hints.iter().filter(|h| h.confidence.needs_validation())
+        self.hints
+            .iter()
+            .filter(|h| h.confidence.needs_validation())
     }
 
     pub fn all(&self) -> &[AnalysisHint] {

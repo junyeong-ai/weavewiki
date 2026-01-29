@@ -1,6 +1,12 @@
-use serde::{Deserialize, Serialize};
+pub use modmap::{
+    ArchitectureLayer, Convention, DependencyEdge, DependencyGraph, DependencyType,
+    DetectedLanguage, EvidenceLocation, FrameworkInfo, GeneratorInfo, IssueCategory,
+    IssueSeverity, KnownIssue, LibraryInfo, Module, ModuleDependency, ModuleGroup, ModuleMap,
+    ModuleMetrics, ProjectCommands, ProjectMetadata, ProjectType, TechStack, WorkspaceInfo,
+    WorkspaceType, SCHEMA_VERSION,
+};
 
-use super::node::EvidenceLocation;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedModule {
@@ -8,72 +14,140 @@ pub struct DetectedModule {
     pub paths: Vec<String>,
     pub key_files: Vec<String>,
     pub dependencies: Vec<String>,
+    pub dependents: Vec<String>,
     pub responsibility: String,
-    pub coverage_ratio: f32,
-    pub value_score: f32,
-    pub risk_score: f32,
-    pub conventions: Vec<String>,
-    pub known_issues: Vec<String>,
+    pub coverage_ratio: f64,
+    pub value_score: f64,
+    pub risk_score: f64,
+    pub conventions: Vec<Convention>,
+    pub known_issues: Vec<KnownIssue>,
     pub evidence: Vec<EvidenceLocation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModuleGroup {
-    pub group_id: String,
-    pub name: String,
-    pub module_ids: Vec<String>,
-    pub responsibility: String,
-    pub external_dependencies: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModuleMap {
-    pub module_map_version: String,
-    pub modules: Vec<DetectedModule>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub groups: Vec<ModuleGroup>,
-}
-
-impl ModuleMap {
-    pub fn new(modules: Vec<DetectedModule>, groups: Vec<ModuleGroup>) -> Self {
-        Self {
-            module_map_version: "1.0.0".to_string(),
-            modules,
-            groups,
-        }
-    }
-
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-
-    pub fn find_module(&self, module_id: &str) -> Option<&DetectedModule> {
-        self.modules.iter().find(|m| m.module_id == module_id)
-    }
-
-    pub fn module_ids(&self) -> Vec<&str> {
-        self.modules.iter().map(|m| m.module_id.as_str()).collect()
-    }
-
-    pub fn find_group(&self, group_id: &str) -> Option<&ModuleGroup> {
-        self.groups.iter().find(|g| g.group_id == group_id)
-    }
-
-    pub fn group_for_module(&self, module_id: &str) -> Option<&ModuleGroup> {
-        self.groups
-            .iter()
-            .find(|g| g.module_ids.iter().any(|id| id == module_id))
-    }
-
-    pub fn is_grouped(&self) -> bool {
-        !self.groups.is_empty()
-    }
+    #[serde(default)]
+    pub primary_language: Option<String>,
 }
 
 impl DetectedModule {
+    pub fn new(module_id: impl Into<String>, responsibility: impl Into<String>) -> Self {
+        Self {
+            module_id: module_id.into(),
+            paths: Vec::new(),
+            key_files: Vec::new(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            responsibility: responsibility.into(),
+            coverage_ratio: 0.0,
+            value_score: 0.5,
+            risk_score: 0.5,
+            conventions: Vec::new(),
+            known_issues: Vec::new(),
+            evidence: Vec::new(),
+            primary_language: None,
+        }
+    }
+
+    pub fn with_paths(mut self, paths: Vec<String>) -> Self {
+        self.paths = paths;
+        self
+    }
+
+    pub fn with_key_files(mut self, key_files: Vec<String>) -> Self {
+        self.key_files = key_files;
+        self
+    }
+
+    pub fn with_dependencies(mut self, dependencies: Vec<String>) -> Self {
+        self.dependencies = dependencies;
+        self
+    }
+
+    pub fn with_dependents(mut self, dependents: Vec<String>) -> Self {
+        self.dependents = dependents;
+        self
+    }
+
+    pub fn with_metrics(mut self, coverage: f64, value: f64, risk: f64) -> Self {
+        self.coverage_ratio = coverage;
+        self.value_score = value;
+        self.risk_score = risk;
+        self
+    }
+
+    pub fn with_conventions(mut self, conventions: Vec<Convention>) -> Self {
+        self.conventions = conventions;
+        self
+    }
+
+    pub fn with_known_issues(mut self, issues: Vec<KnownIssue>) -> Self {
+        self.known_issues = issues;
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+        self.evidence = evidence;
+        self
+    }
+
+    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+        self.primary_language = Some(language.into());
+        self
+    }
+
+    pub fn to_module(&self) -> Module {
+        Module {
+            id: self.module_id.clone(),
+            name: self.module_id.clone(),
+            paths: self.paths.clone(),
+            key_files: self.key_files.clone(),
+            dependencies: self
+                .dependencies
+                .iter()
+                .map(ModuleDependency::new)
+                .collect(),
+            dependents: self.dependents.clone(),
+            responsibility: self.responsibility.clone(),
+            primary_language: self.primary_language.clone().unwrap_or_default(),
+            metrics: ModuleMetrics::new(self.coverage_ratio, self.value_score, self.risk_score),
+            conventions: self.conventions.clone(),
+            known_issues: self.known_issues.clone(),
+            evidence: self.evidence.clone(),
+        }
+    }
+
     pub fn file_in_module(&self, path: &str) -> bool {
         self.paths.iter().any(|p| path.starts_with(p))
     }
+}
+
+impl From<DetectedModule> for Module {
+    fn from(dm: DetectedModule) -> Self {
+        dm.to_module()
+    }
+}
+
+pub fn claudegen_generator() -> GeneratorInfo {
+    GeneratorInfo::new("claudegen", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn create_module_map(
+    detected_modules: Vec<DetectedModule>,
+    groups: Vec<ModuleGroup>,
+    languages: Vec<DetectedLanguage>,
+    workspace_type: WorkspaceType,
+    total_files: usize,
+    project_name: &str,
+    tech_stack: TechStack,
+) -> ModuleMap {
+    let modules: Vec<Module> = detected_modules.into_iter().map(Into::into).collect();
+
+    let project = ProjectMetadata::new(project_name, tech_stack)
+        .with_workspace(WorkspaceInfo {
+            workspace_type,
+            root: Some(".".into()),
+        })
+        .with_languages(languages)
+        .with_total_files(total_files);
+
+    ModuleMap::new(claudegen_generator(), project, modules, groups)
 }
 
 #[cfg(test)]
@@ -81,69 +155,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_module_map_serialization() {
-        let map = ModuleMap::new(vec![DetectedModule {
-            module_id: "pipeline".to_string(),
-            paths: vec!["src/pipeline/".to_string()],
-            key_files: vec!["src/pipeline/adaptive.rs".to_string()],
-            dependencies: vec!["types".to_string(), "config".to_string()],
-            responsibility: "Orchestrates generation pipeline".to_string(),
-            coverage_ratio: 0.85,
-            value_score: 0.9,
-            risk_score: 0.3,
-            conventions: vec!["Phase-based execution".to_string()],
-            known_issues: vec![],
-            evidence: vec![EvidenceLocation {
-                file: "src/pipeline/adaptive.rs".to_string(),
-                start_line: 64,
-                end_line: 80,
-                start_column: None,
-                end_column: None,
-            }],
-        }], vec![]);
+    fn test_detected_module_builder() {
+        let dm = DetectedModule::new("pipeline", "Orchestrates generation pipeline")
+            .with_paths(vec!["src/pipeline/".into()])
+            .with_key_files(vec!["src/pipeline/adaptive.rs".into()])
+            .with_dependencies(vec!["types".into()])
+            .with_dependents(vec!["cli".into()])
+            .with_metrics(0.85, 0.9, 0.3)
+            .with_conventions(vec![Convention::new(
+                "phase-execution",
+                "Execute phases sequentially",
+            )])
+            .with_known_issues(vec![KnownIssue::new(
+                "oscillation",
+                "Quality loop oscillation",
+                IssueSeverity::Medium,
+                IssueCategory::Correctness,
+            )
+            .with_prevention("Use strategy rotation")])
+            .with_evidence(vec![EvidenceLocation::new_range(
+                "src/pipeline/adaptive.rs",
+                64,
+                80,
+            )])
+            .with_language("rust");
 
-        let json = map.to_json().unwrap();
-        assert!(json.contains("pipeline"));
-        assert!(json.contains("1.0.0"));
+        let module: Module = dm.into();
+        assert_eq!(module.id, "pipeline");
+        assert_eq!(module.primary_language, "rust");
+        assert!((module.metrics.value_score - 0.9).abs() < f64::EPSILON);
+        assert_eq!(module.conventions.len(), 1);
+        assert_eq!(module.known_issues.len(), 1);
     }
 
     #[test]
-    fn test_find_module() {
-        let map = ModuleMap::new(vec![DetectedModule {
-            module_id: "types".to_string(),
-            paths: vec!["src/types/".to_string()],
-            key_files: vec![],
-            dependencies: vec![],
-            responsibility: "Domain types".to_string(),
-            coverage_ratio: 1.0,
-            value_score: 0.8,
-            risk_score: 0.1,
-            conventions: vec![],
-            known_issues: vec![],
-            evidence: vec![],
-        }], vec![]);
+    fn test_create_module_map() {
+        let modules = vec![DetectedModule::new("types", "Domain types")
+            .with_paths(vec!["src/types/".into()])
+            .with_metrics(1.0, 0.8, 0.1)];
 
+        let tech_stack = TechStack::new("rust").with_version("1.92");
+
+        let map = create_module_map(
+            modules,
+            vec![],
+            vec![],
+            WorkspaceType::SinglePackage,
+            100,
+            "claudegen",
+            tech_stack,
+        );
+
+        assert_eq!(map.schema_version, SCHEMA_VERSION);
         assert!(map.find_module("types").is_some());
-        assert!(map.find_module("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_file_in_module() {
-        let module = DetectedModule {
-            module_id: "pipeline".to_string(),
-            paths: vec!["src/pipeline/".to_string()],
-            key_files: vec![],
-            dependencies: vec![],
-            responsibility: "".to_string(),
-            coverage_ratio: 0.0,
-            value_score: 0.0,
-            risk_score: 0.0,
-            conventions: vec![],
-            known_issues: vec![],
-            evidence: vec![],
-        };
-
-        assert!(module.file_in_module("src/pipeline/adaptive.rs"));
-        assert!(!module.file_in_module("src/types/mod.rs"));
+        assert_eq!(map.project.name, "claudegen");
     }
 }

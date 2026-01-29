@@ -3,6 +3,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// Re-export EvidenceLocation from modmap for backward compatibility
+pub use modmap::EvidenceLocation;
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Node {
     pub id: String,
@@ -43,7 +46,7 @@ impl Node {
             path,
             name,
             metadata: NodeMetadata::default(),
-            evidence: EvidenceLocation::empty(),
+            evidence: EvidenceLocation::default(),
             tier: InformationTier::Fact,
             confidence: 1.0,
             last_verified: Utc::now(),
@@ -230,27 +233,6 @@ pub enum NodeStatus {
     Stale,
     Conflict,
     Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct EvidenceLocation {
-    pub file: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub start_column: Option<u32>,
-    pub end_column: Option<u32>,
-}
-
-impl EvidenceLocation {
-    pub fn empty() -> Self {
-        Self {
-            file: String::new(),
-            start_line: 0,
-            end_line: 0,
-            start_column: None,
-            end_column: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -1,26 +1,32 @@
 //! Generation Module
 //!
-//! Artifact generation with context preservation.
+//! Artifact generation:
+//! - Rules: Domain knowledge (auto-injected by context)
+//! - Skills: Methodologies (user-invocable)
+//! - Agents: Operational roles
 //!
-//! Key components:
-//! - `ClaudeMdGenerator`: Generates CLAUDE.md from OutputPlan
-//! - `PathRulesGenerator`: Generates path-based rules
-//! - `OrchestrationGenerator`: Generates multi-agent orchestration artifacts
-//! - `ModuleMapGenerator`: Generates module_map.json
-//! - `HookScriptGenerator`: Generates hook scripts
-//! - Validators: Artifact quality validation
+//! Components:
+//! - `RulesGenerator`: Hierarchical rules (project/tech/framework/module/group/domain)
+//! - `FixedSkillsGenerator`: Skills (code-review, implement, plan, debug, refactor)
+//! - `FixedAgentsGenerator`: Agents (reviewer, coder, architect)
+//! - `ClaudeMdGenerator`: CLAUDE.md project file
+//! - `ModuleMapGenerator`: module_map.json
 
+pub mod agents;
 pub mod artifact;
-pub mod hooks;
+pub mod claude_md;
 pub mod module_map_gen;
 pub mod orchestration;
-pub mod path_rules;
+pub mod rules;
+pub mod skills;
 
+pub use agents::FixedAgentsGenerator;
 pub use artifact::{
     ArtifactValidation, ArtifactValidator, BatchArtifactValidation, BatchValidator,
     GeneratedArtifacts, GenerationStats, ValidationIssue,
 };
-pub use hooks::HookScriptGenerator;
+pub use claude_md::{ClaudeMdContext, ClaudeMdGenerator};
 pub use module_map_gen::ModuleMapGenerator;
 pub use orchestration::{OrchestrationArtifacts, OrchestrationGenerator};
-pub use path_rules::{ClaudeMdGenerator, PathRulesGenerator};
+pub use rules::{RuleGenerationContext, RulesGenerator};
+pub use skills::FixedSkillsGenerator;

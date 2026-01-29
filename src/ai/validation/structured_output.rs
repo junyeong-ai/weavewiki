@@ -22,10 +22,7 @@ pub fn parse_structured_output(raw: &str) -> Result<Value> {
 
 /// Deserialize LLM response content into typed struct.
 /// Returns error if parsing fails, allowing caller to decide recovery strategy.
-pub fn deserialize_llm_response<T: DeserializeOwned>(
-    content: &Value,
-    context: &str,
-) -> Result<T> {
+pub fn deserialize_llm_response<T: DeserializeOwned>(content: &Value, context: &str) -> Result<T> {
     let content_str = match content {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -38,9 +35,7 @@ pub fn deserialize_llm_response<T: DeserializeOwned>(
             content_preview = %truncate_preview(&content_str, 200),
             "LLM response parse failed"
         );
-        ClaudegenError::LlmApi(format!(
-            "[{context}] JSON parse failed: {e}"
-        ))
+        ClaudegenError::LlmApi(format!("[{context}] JSON parse failed: {e}"))
     })
 }
 

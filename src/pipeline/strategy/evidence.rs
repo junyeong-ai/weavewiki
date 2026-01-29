@@ -118,8 +118,10 @@ impl EvidenceStrategy {
                         let new_refs = self.count_references(&output.enhanced_content, context);
                         let old_quality =
                             calculate_validated_quality(&skill.body, context.file_registry);
-                        let new_quality =
-                            calculate_validated_quality(&output.enhanced_content, context.file_registry);
+                        let new_quality = calculate_validated_quality(
+                            &output.enhanced_content,
+                            context.file_registry,
+                        );
 
                         // Accept if refs improved without significant quality loss
                         if new_refs > current_refs && new_quality >= old_quality * 0.85 {
@@ -259,8 +261,10 @@ Return JSON with enhanced_content field containing the full enhanced content."#,
 
                 if !output.enhanced_content.trim().is_empty() {
                     let new_refs = self.count_references(&output.enhanced_content, context);
-                    let new_quality =
-                        calculate_validated_quality(&output.enhanced_content, context.file_registry);
+                    let new_quality = calculate_validated_quality(
+                        &output.enhanced_content,
+                        context.file_registry,
+                    );
 
                     if new_refs > old_refs && new_quality >= old_quality * 0.85 {
                         return Ok(Some(output.enhanced_content));
@@ -312,15 +316,26 @@ impl RefinementStrategy for EvidenceStrategy {
                     quality_delta: new_quality - old_quality,
                     changes_made: vec![format!(
                         "Evidence sufficient: {} refs in skill '{}' (quality: {:.0}%)",
-                        total_refs, skill.name, new_quality * 100.0
+                        total_refs,
+                        skill.name,
+                        new_quality * 100.0
                     )],
                 }),
-                EvidenceResult::Partial { added, total, target } => Ok(StrategyResult {
+                EvidenceResult::Partial {
+                    added,
+                    total,
+                    target,
+                } => Ok(StrategyResult {
                     success: added > 0,
                     quality_delta: new_quality - old_quality,
                     changes_made: vec![format!(
                         "Added {} refs to skill '{}' (total: {}, target: {}, quality: {:.0}% -> {:.0}%)",
-                        added, skill.name, total, target, old_quality * 100.0, new_quality * 100.0
+                        added,
+                        skill.name,
+                        total,
+                        target,
+                        old_quality * 100.0,
+                        new_quality * 100.0
                     )],
                 }),
                 EvidenceResult::NoImprovement { reason } => {
@@ -329,16 +344,23 @@ impl RefinementStrategy for EvidenceStrategy {
                 }
                 EvidenceResult::Disabled => {
                     // Single-pass fallback
-                    if let Some(enhanced) = self.enhance_content("skill", &skill.name, &skill.body, context).await? {
+                    if let Some(enhanced) = self
+                        .enhance_content("skill", &skill.name, &skill.body, context)
+                        .await?
+                    {
                         let new_refs = self.count_references(&enhanced, context);
-                        let new_quality = calculate_validated_quality(&enhanced, context.file_registry);
+                        let new_quality =
+                            calculate_validated_quality(&enhanced, context.file_registry);
                         skill.body = enhanced;
                         Ok(StrategyResult {
                             success: true,
                             quality_delta: new_quality - old_quality,
                             changes_made: vec![format!(
                                 "Added {} refs to skill '{}' (quality: {:.0}% -> {:.0}%)",
-                                new_refs - old_refs, skill.name, old_quality * 100.0, new_quality * 100.0
+                                new_refs - old_refs,
+                                skill.name,
+                                old_quality * 100.0,
+                                new_quality * 100.0
                             )],
                         })
                     } else {
@@ -349,7 +371,10 @@ impl RefinementStrategy for EvidenceStrategy {
         }
 
         // Single-pass when feedback loop disabled
-        if let Some(enhanced) = self.enhance_content("skill", &skill.name, &skill.body, context).await? {
+        if let Some(enhanced) = self
+            .enhance_content("skill", &skill.name, &skill.body, context)
+            .await?
+        {
             let new_refs = self.count_references(&enhanced, context);
             let new_quality = calculate_validated_quality(&enhanced, context.file_registry);
             skill.body = enhanced;
@@ -358,7 +383,10 @@ impl RefinementStrategy for EvidenceStrategy {
                 quality_delta: new_quality - old_quality,
                 changes_made: vec![format!(
                     "Added {} refs to skill '{}' (quality: {:.0}% -> {:.0}%)",
-                    new_refs - old_refs, skill.name, old_quality * 100.0, new_quality * 100.0
+                    new_refs - old_refs,
+                    skill.name,
+                    old_quality * 100.0,
+                    new_quality * 100.0
                 )],
             })
         } else {
@@ -374,7 +402,10 @@ impl RefinementStrategy for EvidenceStrategy {
         let old_refs = self.count_references(&agent.prompt, context);
         let old_quality = calculate_validated_quality(&agent.prompt, context.file_registry);
 
-        if let Some(enhanced) = self.enhance_content("agent", &agent.name, &agent.prompt, context).await? {
+        if let Some(enhanced) = self
+            .enhance_content("agent", &agent.name, &agent.prompt, context)
+            .await?
+        {
             let new_refs = self.count_references(&enhanced, context);
             let new_quality = calculate_validated_quality(&enhanced, context.file_registry);
             agent.prompt = enhanced;
@@ -383,7 +414,10 @@ impl RefinementStrategy for EvidenceStrategy {
                 quality_delta: new_quality - old_quality,
                 changes_made: vec![format!(
                     "Added {} refs to agent '{}' (quality: {:.0}% -> {:.0}%)",
-                    new_refs - old_refs, agent.name, old_quality * 100.0, new_quality * 100.0
+                    new_refs - old_refs,
+                    agent.name,
+                    old_quality * 100.0,
+                    new_quality * 100.0
                 )],
             })
         } else {

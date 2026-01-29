@@ -386,24 +386,23 @@ mod tests {
         let validator = ArtifactValidator::new();
 
         // Rule with Tier2 (convention) should pass validation
-        let rule = Rule {
-            name: "test-rule".to_string(),
-            paths: None,
-            content: vec![
-                "# Test Rule".to_string(),
-                "".to_string(),
-                "You must follow this constraint.".to_string(),
-                "Always validate input before processing.".to_string(),
+        let rule = Rule::new(
+            "test-rule",
+            vec![
+                "# Test Rule".into(),
+                "".into(),
+                "You must follow this constraint.".into(),
+                "Always validate input before processing.".into(),
             ],
-            evidence: vec![EvidenceLocation {
-                file: "src/main.rs".to_string(),
-                start_line: 10,
-                end_line: 10,
-                start_column: None,
-                end_column: None,
-            }],
-            tier: crate::types::ContentTier::Tier2Convention,
-        };
+        )
+        .with_evidence(vec![EvidenceLocation {
+            file: "src/main.rs".into(),
+            start_line: 10,
+            end_line: 10,
+            start_column: None,
+            end_column: None,
+        }])
+        .with_tier(crate::types::ContentTier::Tier2Convention);
 
         let result = validator.validate_rule(&rule, None);
         assert!(result.is_valid);
@@ -415,23 +414,22 @@ mod tests {
 
         // Rule with Tier1 (generic) - purely informational, no score penalty
         // LLM classification is advisory; tier doesn't affect validation outcome
-        let rule = Rule {
-            name: "generic-rule".to_string(),
-            paths: None,
-            content: vec![
-                "# Generic Rule".to_string(),
-                "".to_string(),
-                "Use best practices when coding. See @src/main.rs:1 for context.".to_string(),
+        let rule = Rule::new(
+            "generic-rule",
+            vec![
+                "# Generic Rule".into(),
+                "".into(),
+                "Use best practices when coding. See @src/main.rs:1 for context.".into(),
             ],
-            evidence: vec![EvidenceLocation {
-                file: "src/main.rs".to_string(),
-                start_line: 1,
-                end_line: 1,
-                start_column: None,
-                end_column: None,
-            }],
-            tier: crate::types::ContentTier::Tier1Generic,
-        };
+        )
+        .with_evidence(vec![EvidenceLocation {
+            file: "src/main.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            start_column: None,
+            end_column: None,
+        }])
+        .with_tier(crate::types::ContentTier::Tier1Generic);
 
         let result = validator.validate_rule(&rule, None);
         // Tier1 is purely informational - validation passes, score not affected
@@ -499,38 +497,34 @@ mod tests {
         let batch = BatchValidator::new(None);
 
         let rules = vec![
-            Rule {
-                name: "valid-rule".to_string(),
-                paths: None,
-                content: vec![
+            Rule::new(
+                "valid-rule",
+                vec![
                     "You must validate all user input. This is a critical security constraint."
-                        .to_string(),
+                        .into(),
                 ],
-                evidence: vec![EvidenceLocation {
-                    file: "src/validate.rs".to_string(),
-                    start_line: 1,
-                    end_line: 1,
-                    start_column: None,
-                    end_column: None,
-                }],
-                tier: crate::types::ContentTier::Tier2Convention,
-            },
+            )
+            .with_evidence(vec![EvidenceLocation {
+                file: "src/validate.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                start_column: None,
+                end_column: None,
+            }])
+            .with_tier(crate::types::ContentTier::Tier2Convention),
             // Good content and evidence - both should pass (tier is now advisory)
-            Rule {
-                name: "also-valid-rule".to_string(),
-                paths: None,
-                content: vec![
-                    "Always check authentication before processing requests.".to_string(),
-                ],
-                evidence: vec![EvidenceLocation {
-                    file: "src/auth.rs".to_string(),
-                    start_line: 1,
-                    end_line: 1,
-                    start_column: None,
-                    end_column: None,
-                }],
-                tier: crate::types::ContentTier::Tier1Generic, // Tier1 is advisory, not failure
-            },
+            Rule::new(
+                "also-valid-rule",
+                vec!["Always check authentication before processing requests.".into()],
+            )
+            .with_evidence(vec![EvidenceLocation {
+                file: "src/auth.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                start_column: None,
+                end_column: None,
+            }])
+            .with_tier(crate::types::ContentTier::Tier1Generic), // Tier1 is advisory, not failure
         ];
 
         let result = batch.validate_rules(&rules);

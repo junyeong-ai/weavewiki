@@ -17,7 +17,7 @@ pub mod skill;
 pub mod utils;
 pub mod validation;
 
-pub use agent::{Agent, AgentModel, MIN_AGENT_FILE_REFS, PermissionMode};
+pub use agent::{Agent, AgentModel, ConsensusRole, MIN_AGENT_FILE_REFS, PermissionMode};
 // Tool validation moved to crate::utils::tools
 pub use crate::pipeline::insight::ValueScore;
 pub use crate::utils::{VALID_TOOLS, is_valid_tool};
@@ -42,12 +42,14 @@ pub use insight::{
     ArtifactClassification, ContentTier, DomainContext, ModuleContext, TierClassification,
 };
 pub use memory::{DevelopmentCommand, ProjectMemory};
-pub use module_map::{DetectedModule, ModuleGroup, ModuleMap};
+pub use module_map::{
+    DetectedLanguage, DetectedModule, EvidenceLocation, Module, ModuleGroup, ModuleMap,
+    ProjectMetadata, SCHEMA_VERSION, WorkspaceType, create_module_map,
+};
 pub use node::{
-    ApiMetadata, AuthRequirement, ComponentMetadata, EntityMetadata, EvidenceLocation,
-    FieldDefinition, FunctionSignature, HttpMethod, InformationTier, Node, NodeMetadata,
-    NodeStatus, NodeType, Parameter, PropDefinition, RelationDefinition, SchemaReference,
-    StateDefinition, Visibility,
+    ApiMetadata, AuthRequirement, ComponentMetadata, EntityMetadata, FieldDefinition,
+    FunctionSignature, HttpMethod, InformationTier, Node, NodeMetadata, NodeStatus, NodeType,
+    Parameter, PropDefinition, RelationDefinition, SchemaReference, StateDefinition, Visibility,
 };
 pub use plugin::{
     Plugin, PluginManifest, PluginPermissions, PluginValidationResult, RepositoryInfo,

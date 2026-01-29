@@ -53,10 +53,7 @@ pub use few_shot::{
 };
 pub use module_detection::{ModuleDetectionResult, ModuleDetector};
 pub use monorepo_analyzer::{CrossDependency, MonorepoAnalysis, SharedPackage, SubprojectInfo};
-pub use output_router::{
-    AgentsPlan, ClaudeMdPlan, ModuleMapPlan, OrchestrationPlan, OutputPlan,
-    PlannedGroupOrchestrator, RulesPlan, SkillsPlan,
-};
+pub use output_router::{AgentsPlan, ClaudeMdPlan, ModuleMapPlan, OutputPlan, RulesPlan, SkillsPlan};
 pub use project_detection::{
     DetectionSignal, LanguageInfo, ProjectDetection, ProjectDetector, SignalType, WorkspaceConfig,
     WorkspaceMember, WorkspaceType,

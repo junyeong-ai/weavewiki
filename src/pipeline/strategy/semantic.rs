@@ -132,7 +132,8 @@ impl RefinementStrategy for SemanticStrategy {
                     deserialize_llm_response(&response.content, "skill_enhancement")?;
 
                 if !output.enhanced_body.is_empty() {
-                    let new_score = calculate_validated_quality(&output.enhanced_body, context.file_registry);
+                    let new_score =
+                        calculate_validated_quality(&output.enhanced_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
                     if new_score > old_score + acceptance_delta {
@@ -180,7 +181,8 @@ impl RefinementStrategy for SemanticStrategy {
                     deserialize_llm_response(&response.content, "agent_enhancement")?;
 
                 if !output.enhanced_body.is_empty() {
-                    let new_score = calculate_validated_quality(&output.enhanced_body, context.file_registry);
+                    let new_score =
+                        calculate_validated_quality(&output.enhanced_body, context.file_registry);
                     let acceptance_delta = context.quality_acceptance_delta;
 
                     if new_score > old_score + acceptance_delta {

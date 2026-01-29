@@ -442,10 +442,10 @@ mod tests {
         let config = ConfigLoader::load_global_only().unwrap();
 
         // Verify TimeoutConfig default values (high-quality configuration)
-        assert_eq!(config.timeout.quality_loop_timeout_secs, 3600);   // 1 hour
-        assert_eq!(config.timeout.session_timeout_secs, 7200);        // 2 hours
+        assert_eq!(config.timeout.quality_loop_timeout_secs, 3600); // 1 hour
+        assert_eq!(config.timeout.session_timeout_secs, 7200); // 2 hours
         assert_eq!(config.timeout.analysis_phase_timeout_secs, 1800); // 30 minutes
-        assert_eq!(config.timeout.specialist_timeout_secs, 300);      // 5 minutes
+        assert_eq!(config.timeout.specialist_timeout_secs, 300); // 5 minutes
     }
 
     #[test]

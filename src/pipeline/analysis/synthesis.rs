@@ -671,19 +671,14 @@ impl AnalysisSynthesizer {
             0.5
         };
 
-        let architecture = if deep.structure.entry_points.is_empty()
-            && deep.structure.core_modules.is_empty()
-        {
-            0.3
-        } else {
-            base
-        };
+        let architecture =
+            if deep.structure.entry_points.is_empty() && deep.structure.core_modules.is_empty() {
+                0.3
+            } else {
+                base
+            };
 
-        let patterns = if deep.patterns.is_empty() {
-            0.3
-        } else {
-            base
-        };
+        let patterns = if deep.patterns.is_empty() { 0.3 } else { base };
 
         let constraints = if deep.constraints.is_empty() {
             0.3
@@ -691,7 +686,11 @@ impl AnalysisSynthesizer {
             base
         };
 
-        let dependencies = if deep.dependencies.is_empty() { 0.5 } else { 0.7 };
+        let dependencies = if deep.dependencies.is_empty() {
+            0.5
+        } else {
+            0.7
+        };
 
         let coverage = structural
             .map(|s| s.coverage_report.coverage)

@@ -17,6 +17,9 @@ claude-agent = ["dep:claude-agent"]
 # Claude Agent SDK - Direct API access with CLI OAuth support
 claude-agent = { path = "../claude-agent-rs", optional = true, features = ["cli-integration", "jsonl"] }
 
+# Shared schema definitions
+modmap = { path = "../modmap" }
+
 # Ordered map for consistent YAML output
 indexmap = { version = "2.12", features = ["serde"] }
 tokio = { version = "1.49", features = ["full", "process"] }

@@ -221,7 +221,12 @@ mod tests {
     fn test_parse_result_partial() {
         let result = ParseResult::partial(
             "partial data",
-            vec![FieldError::new("field1", "String", None, RecoveryAction::UsedDefault)],
+            vec![FieldError::new(
+                "field1",
+                "String",
+                None,
+                RecoveryAction::UsedDefault,
+            )],
             3,
         );
         assert!(!result.is_complete());
@@ -240,6 +245,9 @@ mod tests {
     #[test]
     fn test_truncate_value() {
         assert_eq!(truncate_value("short", 100), "short");
-        assert_eq!(truncate_value("a".repeat(200).as_str(), 10), "aaaaaaaaaa...");
+        assert_eq!(
+            truncate_value("a".repeat(200).as_str(), 10),
+            "aaaaaaaaaa..."
+        );
     }
 }

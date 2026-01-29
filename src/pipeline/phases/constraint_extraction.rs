@@ -27,6 +27,22 @@ pub struct ExtractedConstraints {
     pub complex_workflows: Vec<ComplexWorkflow>,
     pub implicit_rules: Vec<ImplicitRule>,
     pub gotchas: Vec<Gotcha>,
+    #[serde(default)]
+    pub environment_variables: Vec<EnvironmentVariable>,
+}
+
+/// Environment variable configuration
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentVariable {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default_value: Option<String>,
+    #[serde(default)]
+    pub example: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -151,10 +167,18 @@ impl ConstraintExtractor {
         match self.extract_with_llm(detection, conventions).await {
             Ok(llm_constraints) => {
                 // Merge LLM constraints with synthesis constraints (append, don't replace)
-                constraints.anti_patterns.extend(llm_constraints.anti_patterns);
-                constraints.hidden_dependencies.extend(llm_constraints.hidden_dependencies);
-                constraints.complex_workflows.extend(llm_constraints.complex_workflows);
-                constraints.implicit_rules.extend(llm_constraints.implicit_rules);
+                constraints
+                    .anti_patterns
+                    .extend(llm_constraints.anti_patterns);
+                constraints
+                    .hidden_dependencies
+                    .extend(llm_constraints.hidden_dependencies);
+                constraints
+                    .complex_workflows
+                    .extend(llm_constraints.complex_workflows);
+                constraints
+                    .implicit_rules
+                    .extend(llm_constraints.implicit_rules);
                 constraints.gotchas.extend(llm_constraints.gotchas);
             }
             Err(e) => {
@@ -352,6 +376,7 @@ impl ConstraintExtractor {
             complex_workflows,
             implicit_rules: Vec::new(),
             gotchas,
+            environment_variables: Vec::new(),
         }
     }
 
@@ -526,7 +551,6 @@ IMPORTANT:
         }
         Ok(())
     }
-
 }
 
 pub async fn run(
@@ -583,7 +607,7 @@ fn is_test_file(path: &str) -> bool {
         || lower.ends_with("_spec.rb")
         || lower.contains("/test_")  // Python test files
         || lower.ends_with("test.java")  // Java test files
-        || lower.ends_with("test.kt")    // Kotlin test files
+        || lower.ends_with("test.kt") // Kotlin test files
 }
 
 // =============================================================================

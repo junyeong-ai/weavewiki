@@ -11,14 +11,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::ai::response::generate_schema;
 use crate::ai::LlmProvider;
+use crate::ai::response::generate_schema;
 use crate::config::ProjectType;
 use crate::pipeline::analysis::{
     AggregatedAnalysis, AsyncStyle as AggAsyncStyle, ErrorStyle as AggErrorStyle, NamingCase,
 };
-use crate::types::hint::{AnalysisHint, HintCategory, HintCollection};
 use crate::types::Result;
+use crate::types::hint::{AnalysisHint, HintCategory, HintCollection};
 
 use super::few_shot::build_inference_prompt;
 use super::project_detection::ProjectDetection;
@@ -238,9 +238,15 @@ impl InferredConventions {
         hints.push(
             AnalysisHint::medium_confidence(
                 HintCategory::ErrorHandling,
-                format!("Error handling appears to use {:?} style", self.error_handling.style),
+                format!(
+                    "Error handling appears to use {:?} style",
+                    self.error_handling.style
+                ),
             )
-            .with_evidence([format!("Propagation: {}", self.error_handling.propagation_pattern)]),
+            .with_evidence([format!(
+                "Propagation: {}",
+                self.error_handling.propagation_pattern
+            )]),
         );
 
         // Async pattern hint (medium confidence - based on keyword patterns)
@@ -446,7 +452,6 @@ pub enum PatternCategory {
     Testing,
     Other,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternEvidence {
@@ -789,7 +794,8 @@ impl ConventionInferenceEngine {
                 || content.contains("catch ")
                 || content.contains("except ")  // Python
                 || content.contains("raise ")   // Python
-                || content.contains("try:")     // Python
+                || content.contains("try:")
+            // Python
             {
                 exception_count += 1;
             }
@@ -819,7 +825,8 @@ impl ConventionInferenceEngine {
                 || content.contains("suspend fun")     // Kotlin
                 || content.contains("CompletableFuture") // Java
                 || content.contains("async Task")      // C#
-                || content.contains("@Async")          // Spring
+                || content.contains("@Async")
+            // Spring
             {
                 async_count += 1;
             }
@@ -878,12 +885,16 @@ impl ConventionInferenceEngine {
                 break;
             }
             // JS/TS (Jest, Vitest, Mocha)
-            if content.contains("describe(") || content.contains("it(") || content.contains("test(") {
+            if content.contains("describe(") || content.contains("it(") || content.contains("test(")
+            {
                 framework = Some("Jest/Vitest/Mocha".to_string());
                 break;
             }
             // Python
-            if content.contains("def test_") || content.contains("@pytest") || content.contains("unittest.TestCase") {
+            if content.contains("def test_")
+                || content.contains("@pytest")
+                || content.contains("unittest.TestCase")
+            {
                 framework = Some("pytest/unittest".to_string());
                 break;
             }
@@ -923,7 +934,8 @@ impl ConventionInferenceEngine {
         structure: &str,
         samples: &[(String, String)],
     ) -> Result<InferredConventions> {
-        let prompt = build_inference_prompt(project_type, structure, samples, self.prompt_file_limit);
+        let prompt =
+            build_inference_prompt(project_type, structure, samples, self.prompt_file_limit);
 
         let schema = generate_schema::<ConventionInferenceOutput>();
 

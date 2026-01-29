@@ -424,16 +424,16 @@ pub struct ConvergenceConfig {
 impl Default for ConvergenceConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 100,          // High quality: allow thorough iteration
+            max_iterations: 100, // High quality: allow thorough iteration
             consecutive_passes: 2,
-            max_oscillations: 5,          // More patience for complex projects
-            early_exit_threshold: 0.95,   // Only early exit at very high quality
-            stagnation_patience: 10,      // More patience before giving up
-            min_improvement: 0.005,       // Detect smaller improvements
+            max_oscillations: 5,        // More patience for complex projects
+            early_exit_threshold: 0.95, // Only early exit at very high quality
+            stagnation_patience: 10,    // More patience before giving up
+            min_improvement: 0.005,     // Detect smaller improvements
             require_formal_pass: true,
             require_cross_artifact_pass: true,
-            quality_floor: 0.75,          // High quality floor
-            target_quality: 0.90,         // High quality target
+            quality_floor: 0.75,  // High quality floor
+            target_quality: 0.90, // High quality target
             early_exit_bypasses_dimensions: false,
         }
     }
@@ -597,9 +597,9 @@ impl Default for LlmConfig {
             default_model: "claude-sonnet-4-5-20250929".into(),
             performance_model: Some("claude-opus-4-5-20251101".into()), // Opus for complex tasks
             fast_model: Some("claude-haiku-4-5-20251001".into()),       // Haiku for simple tasks
-            timeout_secs: 600,            // Generous timeout for complex responses
+            timeout_secs: 600, // Generous timeout for complex responses
             temperature: 0.0,
-            max_tokens: 8192,             // Allow longer responses
+            max_tokens: 8192, // Allow longer responses
             provider: "claude-agent".into(),
             context: ContextWindowConfig::default(),
         }
@@ -748,8 +748,8 @@ impl Default for AnalysisConfig {
                 ".claudegen/**".into(),
             ],
             max_file_size: 10 * 1024 * 1024, // 10MB for larger files
-            max_file_samples: 200,            // More samples for thorough analysis
-            max_key_paths: 20,                // More key paths
+            max_file_samples: 200,           // More samples for thorough analysis
+            max_key_paths: 20,               // More key paths
         }
     }
 }
@@ -1157,7 +1157,7 @@ pub struct BudgetConfig {
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            total_tokens: 10_000_000,  // Generous budget for thorough analysis
+            total_tokens: 10_000_000, // Generous budget for thorough analysis
             allocation: BudgetAllocation::default(),
         }
     }
@@ -1618,31 +1618,31 @@ impl Default for RefinementConfig {
     fn default() -> Self {
         Self {
             enabled_strategies: RefinementStrategyType::all(),
-            max_attempts_per_strategy: 5,    // More attempts for thorough refinement
+            max_attempts_per_strategy: 5, // More attempts for thorough refinement
             strategy_rotation_enabled: true,
-            timeout_secs: 1800,              // 30 minutes per refinement phase
+            timeout_secs: 1800, // 30 minutes per refinement phase
             adaptive_iteration: AdaptiveIterationConfig::default(),
-            stagnation_patience: 10,         // More patience before giving up
-            stagnation_threshold: 0.005,     // Detect smaller improvements
-            require_all_dimensions: true,    // Require all quality dimensions
-            issues_per_iteration: 10,        // Address more issues per iteration
-            strategy_retry_limit: 5,         // More retries per strategy
+            stagnation_patience: 10,      // More patience before giving up
+            stagnation_threshold: 0.005,  // Detect smaller improvements
+            require_all_dimensions: true, // Require all quality dimensions
+            issues_per_iteration: 10,     // Address more issues per iteration
+            strategy_retry_limit: 5,      // More retries per strategy
             oscillation_strict_passes: 3,
             oscillation_lenient_passes: 2,
-            oscillation_stability_variance: 0.02,  // Tighter stability
-            oscillation_variance_window: 5,        // Larger window for detection
+            oscillation_stability_variance: 0.02, // Tighter stability
+            oscillation_variance_window: 5,       // Larger window for detection
             enable_rollback: true,
-            rollback_threshold: 0.15,        // More tolerance before rollback
-            max_rollbacks: 5,                // More rollback opportunities
+            rollback_threshold: 0.15, // More tolerance before rollback
+            max_rollbacks: 5,         // More rollback opportunities
             post_convergence_verification: true,
-            post_convergence_passes: 3,      // More verification passes
+            post_convergence_passes: 3, // More verification passes
             max_convergence_detections: 5,
             dimension_thresholds: DimensionThresholds::default(),
-            min_improvement_per_iteration: 0.005,  // Detect smaller improvements
+            min_improvement_per_iteration: 0.005, // Detect smaller improvements
             detect_oscillation: true,
             oscillation_window: 5,
             oscillation_min_amplitude: 0.02,
-            quality_acceptance_delta: 0.03,  // Tighter acceptance
+            quality_acceptance_delta: 0.03, // Tighter acceptance
             self_critique: SelfCritiqueConfig::default(),
             evidence_feedback: EvidenceFeedbackConfig::default(),
         }
@@ -2101,8 +2101,6 @@ pub struct MultiAgentConfig {
     pub max_lines_per_file_constraints: usize,
     /// Minimum detected modules to trigger multi-agent orchestration
     pub min_modules: usize,
-    /// Generate hook scripts for module scope validation
-    pub generate_hooks: bool,
     /// Generate module_map.json
     pub generate_module_map: bool,
     /// Minimum modules to trigger hierarchical grouping with sub-orchestrators
@@ -2132,7 +2130,6 @@ impl Default for MultiAgentConfig {
             max_files_for_constraints: 20,
             max_lines_per_file_constraints: 150,
             min_modules: 2,
-            generate_hooks: true,
             generate_module_map: true,
             min_modules_for_grouping: 6,
         }
@@ -2404,8 +2401,8 @@ impl Default for DeepAnalysisConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_depth: 5,                    // Deeper analysis for complex projects
-            max_iterations: 30,              // More iterations for thorough analysis
+            max_depth: 5,       // Deeper analysis for complex projects
+            max_iterations: 30, // More iterations for thorough analysis
             follow_imports: true,
             analyze_dependencies: true,
             min_confidence: 0.75,            // Higher confidence threshold
@@ -2711,12 +2708,12 @@ pub struct TimeoutConfig {
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
-            session_timeout_secs: 7200,           // 2 hours - generous for large projects
-            quality_loop_timeout_secs: 3600,      // 1 hour - allow thorough quality iteration
-            analysis_phase_timeout_secs: 1800,    // 30 minutes - large monorepos need time
-            generation_phase_timeout_secs: 900,   // 15 minutes - complex generation
-            specialist_timeout_secs: 300,         // 5 minutes - specialist tasks
-            llm_call_timeout_secs: 600,           // 10 minutes - long LLM responses
+            session_timeout_secs: 7200,        // 2 hours - generous for large projects
+            quality_loop_timeout_secs: 3600,   // 1 hour - allow thorough quality iteration
+            analysis_phase_timeout_secs: 1800, // 30 minutes - large monorepos need time
+            generation_phase_timeout_secs: 900, // 15 minutes - complex generation
+            specialist_timeout_secs: 300,      // 5 minutes - specialist tasks
+            llm_call_timeout_secs: 600,        // 10 minutes - long LLM responses
         }
     }
 }
@@ -2759,14 +2756,14 @@ impl Default for DistributedAnalysisConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_parallel_agents: 8,          // More parallelism for large projects
-            max_tokens_per_chunk: 80_000,    // Larger chunks for better context
-            chunk_overlap_lines: 100,        // More overlap for continuity
-            min_files_for_distributed: 30,   // Start distributed earlier
-            max_file_content_chars: 20_000,  // More content per file
-            max_common_import_patterns: 20,  // Track more patterns
-            max_dependency_display: 50,      // Show more dependencies
-            file_read_timeout_secs: 60,      // More time for large files
+            max_parallel_agents: 8, // More parallelism for large projects
+            max_tokens_per_chunk: 80_000, // Larger chunks for better context
+            chunk_overlap_lines: 100, // More overlap for continuity
+            min_files_for_distributed: 30, // Start distributed earlier
+            max_file_content_chars: 20_000, // More content per file
+            max_common_import_patterns: 20, // Track more patterns
+            max_dependency_display: 50, // Show more dependencies
+            file_read_timeout_secs: 60, // More time for large files
         }
     }
 }

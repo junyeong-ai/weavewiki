@@ -5,7 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default, JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    JsonSchema,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {

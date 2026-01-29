@@ -3,15 +3,17 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::ai::LlmProvider;
 use crate::ai::response::generate_schema;
 use crate::ai::validation::deserialize_llm_response;
-use crate::ai::LlmProvider;
 use crate::pipeline::analysis::SynthesizedInsights;
 use crate::pipeline::context::VerifiedFileRegistry;
-use crate::types::domain::DomainAnalysisResult;
-use crate::types::module_map::{DetectedModule, ModuleGroup};
-use crate::types::node::EvidenceLocation;
 use crate::types::Result;
+use crate::types::domain::DomainAnalysisResult;
+use crate::types::module_map::{
+    Convention, DetectedModule, IssueCategory, IssueSeverity, KnownIssue, ModuleGroup,
+};
+use crate::types::node::EvidenceLocation;
 
 use super::constraint_extraction::ExtractedConstraints;
 use super::convention_inference::InferredConventions;
@@ -46,8 +48,8 @@ struct LlmDetectedModule {
     responsibility: String,
     conventions: Vec<String>,
     known_issues: Vec<String>,
-    value_score: f32,
-    risk_score: f32,
+    value_score: f64,
+    risk_score: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -157,7 +159,8 @@ impl ModuleDetector {
         if !constraints.hidden_dependencies.is_empty() || !constraints.gotchas.is_empty() {
             context_sections.push_str("\n## Known Constraints\n");
             for dep in &constraints.hidden_dependencies {
-                context_sections.push_str(&format!("- Hidden dep: {} → {}\n", dep.source, dep.target));
+                context_sections
+                    .push_str(&format!("- Hidden dep: {} → {}\n", dep.source, dep.target));
             }
             for gotcha in &constraints.gotchas {
                 context_sections.push_str(&format!("- Gotcha: {}\n", gotcha.title));
@@ -266,14 +269,13 @@ impl ModuleDetector {
                     return None;
                 }
 
-                // Calculate coverage from verified files
                 let files_in_module: Vec<String> = verified_paths
                     .iter()
                     .flat_map(|p| file_registry.files_in_directory(p.trim_end_matches('/')))
                     .collect();
                 let total_files = file_registry.file_count();
                 let coverage_ratio = if total_files > 0 {
-                    files_in_module.len() as f32 / total_files as f32
+                    files_in_module.len() as f64 / total_files as f64
                 } else {
                     0.0
                 };
@@ -293,18 +295,43 @@ impl ModuleDetector {
                     })
                     .collect();
 
+                let module_id = llm_module.module_id;
+
+                let conventions: Vec<Convention> = llm_module
+                    .conventions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, desc)| Convention::new(format!("{}-conv-{}", module_id, i + 1), desc))
+                    .collect();
+
+                let known_issues: Vec<KnownIssue> = llm_module
+                    .known_issues
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, desc)| {
+                        KnownIssue::new(
+                            format!("{}-issue-{}", module_id, i + 1),
+                            desc,
+                            IssueSeverity::Medium,
+                            IssueCategory::Maintainability,
+                        )
+                    })
+                    .collect();
+
                 Some(DetectedModule {
-                    module_id: llm_module.module_id,
+                    module_id,
                     paths: verified_paths,
                     key_files: verified_key_files,
                     dependencies: llm_module.dependencies,
+                    dependents: Vec::new(),
                     responsibility: llm_module.responsibility,
                     coverage_ratio,
                     value_score: llm_module.value_score.clamp(0.0, 1.0),
                     risk_score: llm_module.risk_score.clamp(0.0, 1.0),
-                    conventions: llm_module.conventions,
-                    known_issues: llm_module.known_issues,
+                    conventions,
+                    known_issues,
                     evidence,
+                    primary_language: None,
                 })
             })
             .collect()
@@ -316,7 +343,7 @@ impl ModuleDetector {
     }
 
     fn resolve_path_overlaps(&self, modules: &mut Vec<DetectedModule>) {
-        let mut best_score: std::collections::HashMap<String, f32> =
+        let mut best_score: std::collections::HashMap<String, f64> =
             std::collections::HashMap::new();
 
         for module in modules.iter() {
@@ -334,7 +361,7 @@ impl ModuleDetector {
                 let normalized = path.trim_end_matches('/').to_string();
                 best_score
                     .get(&normalized)
-                    .map(|score| (*score - module.value_score).abs() < f32::EPSILON)
+                    .map(|score| (*score - module.value_score).abs() < f64::EPSILON)
                     .unwrap_or(true)
             });
         }
@@ -346,9 +373,7 @@ impl ModuleDetector {
         let valid_ids: std::collections::HashSet<String> =
             modules.iter().map(|m| m.module_id.clone()).collect();
         for module in modules.iter_mut() {
-            module
-                .dependencies
-                .retain(|dep| valid_ids.contains(dep));
+            module.dependencies.retain(|dep| valid_ids.contains(dep));
         }
     }
 
@@ -378,41 +403,40 @@ impl ModuleDetector {
                     assigned.insert(id.clone());
                 }
 
-                let external_dependencies = self.compute_external_deps(&module_ids, modules);
+                let boundary_rules = self.compute_boundary_rules(&module_ids, modules);
 
-                Some(ModuleGroup {
-                    group_id: g.group_id,
-                    name: g.name,
-                    module_ids,
-                    responsibility: g.responsibility,
-                    external_dependencies,
-                })
+                Some(
+                    ModuleGroup::new(g.group_id, g.name, module_ids)
+                        .with_responsibility(g.responsibility)
+                        .with_boundary_rules(boundary_rules),
+                )
             })
             .collect()
     }
 
-    fn compute_external_deps(
+    fn compute_boundary_rules(
         &self,
         group_module_ids: &[String],
         modules: &[DetectedModule],
     ) -> Vec<String> {
         let group_set: std::collections::HashSet<&str> =
             group_module_ids.iter().map(|s| s.as_str()).collect();
-        let mut external = std::collections::HashSet::new();
+        let mut external_deps = std::collections::HashSet::new();
 
         for module in modules {
             if group_set.contains(module.module_id.as_str()) {
                 for dep in &module.dependencies {
                     if !group_set.contains(dep.as_str()) {
-                        external.insert(dep.clone());
+                        external_deps.insert(dep.clone());
                     }
                 }
             }
         }
 
-        let mut result: Vec<String> = external.into_iter().collect();
-        result.sort();
-        result
+        external_deps
+            .into_iter()
+            .map(|dep| format!("External dependency on {dep}"))
+            .collect()
     }
 }
 

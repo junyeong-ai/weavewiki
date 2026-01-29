@@ -354,25 +354,33 @@ impl Plugin {
         self.rules.push(rule);
     }
 
-    /// Get the plugin root directory (plugin-name/)
+    /// Get the plugin root directory (.claude/plugins/{project-name}/)
     ///
-    /// Official Claude Code plugin structure:
+    /// Unified plugin structure for claude-pilot integration:
     /// ```text
-    /// plugin-name/
+    /// .claude/plugins/{project-name}/
     /// ├── .claude-plugin/
     /// │   └── plugin.json
+    /// ├── module_map.json
+    /// ├── rules/
+    /// │   ├── project.md
+    /// │   ├── tech/{lang}.md
+    /// │   ├── frameworks/{fw}.md
+    /// │   ├── modules/{module}.md
+    /// │   ├── groups/{group}.md
+    /// │   └── domains/{domain}.md
     /// ├── skills/
-    /// │   └── skill-name/
-    /// │       └── SKILL.md
-    /// ├── agents/
-    /// │   └── agent-name.md
-    /// ├── commands/
-    /// │   └── command-name.md
-    /// └── hooks/
-    ///     └── hooks.json
+    /// │   └── {skill}/SKILL.md
+    /// └── agents/
+    ///     └── {agent}.md
     /// ```
     pub fn plugin_dir(&self, base: &Path) -> PathBuf {
-        base.join(&self.manifest.name)
+        base.join(".claude").join("plugins").join(&self.manifest.name)
+    }
+
+    /// Get the rules directory path (rules/)
+    pub fn rules_dir(&self, base: &Path) -> PathBuf {
+        self.plugin_dir(base).join("rules")
     }
 
     /// Get full path to plugin.json (.claude-plugin/plugin.json)
@@ -602,31 +610,36 @@ mod tests {
 
     #[test]
     fn test_plugin_paths() {
-        // Plugin output structure: {project-name}-plugin/
+        // Plugin output structure: .claude/plugins/{project-name}/
         let manifest =
-            PluginManifest::with_version_and_description("myproject-plugin", "1.0.0", "Test");
+            PluginManifest::with_version_and_description("myproject", "1.0.0", "Test");
         let plugin = Plugin::new(manifest);
         let base = Path::new("/project");
 
+        // Plugin directory at .claude/plugins/{project}/
+        assert_eq!(
+            plugin.plugin_dir(base),
+            PathBuf::from("/project/.claude/plugins/myproject")
+        );
         // Plugin manifest at .claude-plugin/plugin.json
         assert_eq!(
             plugin.manifest_path(base),
-            PathBuf::from("/project/myproject-plugin/.claude-plugin/plugin.json")
+            PathBuf::from("/project/.claude/plugins/myproject/.claude-plugin/plugin.json")
         );
         // Skills at skills/
         assert_eq!(
             plugin.skills_dir(base),
-            PathBuf::from("/project/myproject-plugin/skills")
+            PathBuf::from("/project/.claude/plugins/myproject/skills")
         );
         // Agents at agents/
         assert_eq!(
             plugin.agents_dir(base),
-            PathBuf::from("/project/myproject-plugin/agents")
+            PathBuf::from("/project/.claude/plugins/myproject/agents")
         );
-        // Commands at commands/
+        // Rules at rules/
         assert_eq!(
-            plugin.commands_dir(base),
-            PathBuf::from("/project/myproject-plugin/commands")
+            plugin.rules_dir(base),
+            PathBuf::from("/project/.claude/plugins/myproject/rules")
         );
     }
 }
