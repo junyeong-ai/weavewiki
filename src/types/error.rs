@@ -384,13 +384,13 @@ impl ValidationError {
     }
 
     /// Add field context
-    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+    pub fn field(mut self, field: impl Into<String>) -> Self {
         self.field = Some(field.into());
         self
     }
 
     /// Add expected/actual values
-    pub fn with_comparison(
+    pub fn comparison(
         mut self,
         expected: impl Into<String>,
         actual: impl Into<String>,

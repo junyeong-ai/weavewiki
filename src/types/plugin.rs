@@ -203,87 +203,87 @@ impl PluginManifest {
     }
 
     /// Set the version
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+    pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
     }
 
     /// Set the description
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+    pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// Set the author
-    pub fn with_author(mut self, author: impl Into<String>) -> Self {
+    pub fn author(mut self, author: impl Into<String>) -> Self {
         self.author = Some(author.into());
         self
     }
 
     /// Set the homepage
-    pub fn with_homepage(mut self, homepage: impl Into<String>) -> Self {
+    pub fn homepage(mut self, homepage: impl Into<String>) -> Self {
         self.homepage = Some(homepage.into());
         self
     }
 
     /// Set repository info
-    pub fn with_repository(mut self, repository: RepositoryInfo) -> Self {
+    pub fn repository(mut self, repository: RepositoryInfo) -> Self {
         self.repository = Some(repository);
         self
     }
 
     /// Set license
-    pub fn with_license(mut self, license: impl Into<String>) -> Self {
+    pub fn license(mut self, license: impl Into<String>) -> Self {
         self.license = Some(license.into());
         self
     }
 
     /// Set keywords
-    pub fn with_keywords(mut self, keywords: Vec<String>) -> Self {
+    pub fn keywords(mut self, keywords: Vec<String>) -> Self {
         self.keywords = Some(keywords);
         self
     }
 
     /// Set MCP servers config path
-    pub fn with_mcp_servers(mut self, path: impl Into<String>) -> Self {
+    pub fn mcp_servers(mut self, path: impl Into<String>) -> Self {
         self.mcp_servers = Some(path.into());
         self
     }
 
     /// Set LSP servers config path
-    pub fn with_lsp_servers(mut self, path: impl Into<String>) -> Self {
+    pub fn lsp_servers(mut self, path: impl Into<String>) -> Self {
         self.lsp_servers = Some(path.into());
         self
     }
 
     /// Set permissions
-    pub fn with_permissions(mut self, permissions: PluginPermissions) -> Self {
+    pub fn permissions(mut self, permissions: PluginPermissions) -> Self {
         self.permissions = Some(permissions);
         self
     }
 
     /// Set hooks
-    pub fn with_hooks(mut self, hooks: HooksConfig) -> Self {
+    pub fn hooks(mut self, hooks: HooksConfig) -> Self {
         self.hooks = Some(hooks);
         self
     }
 
-    pub fn with_schema_version(mut self, version: impl Into<String>) -> Self {
+    pub fn schema_version(mut self, version: impl Into<String>) -> Self {
         self.schema_version = Some(version.into());
         self
     }
 
-    pub fn with_generator(mut self, generator: impl Into<String>) -> Self {
+    pub fn generator(mut self, generator: impl Into<String>) -> Self {
         self.generator = Some(generator.into());
         self
     }
 
-    pub fn with_required_skills(mut self, skills: Vec<String>) -> Self {
+    pub fn required_skills(mut self, skills: Vec<String>) -> Self {
         self.required_skills = Some(skills);
         self
     }
 
-    pub fn with_required_agents(mut self, agents: Vec<String>) -> Self {
+    pub fn required_agents(mut self, agents: Vec<String>) -> Self {
         self.required_agents = Some(agents);
         self
     }

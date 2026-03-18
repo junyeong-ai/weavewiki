@@ -105,12 +105,12 @@ impl ArtifactRef {
         }
     }
 
-    pub fn with_relationship(mut self, relationship: RelationshipType) -> Self {
+    pub fn relationship(mut self, relationship: RelationshipType) -> Self {
         self.relationship = relationship;
         self
     }
 
-    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = summary.into();
         self
     }

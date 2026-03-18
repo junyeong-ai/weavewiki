@@ -127,22 +127,22 @@ impl ModuleContext {
         }
     }
 
-    pub fn with_responsibility(mut self, responsibility: impl Into<String>) -> Self {
+    pub fn responsibility(mut self, responsibility: impl Into<String>) -> Self {
         self.responsibility = responsibility.into();
         self
     }
 
-    pub fn with_constraints(mut self, constraints: Vec<String>) -> Self {
+    pub fn constraints(mut self, constraints: Vec<String>) -> Self {
         self.constraints = constraints;
         self
     }
 
-    pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
+    pub fn dependencies(mut self, deps: Vec<String>) -> Self {
         self.dependencies = deps;
         self
     }
 
-    pub fn with_key_files(mut self, files: Vec<String>) -> Self {
+    pub fn key_files(mut self, files: Vec<String>) -> Self {
         self.key_files = files;
         self
     }
@@ -167,17 +167,17 @@ impl DomainContext {
         }
     }
 
-    pub fn with_business_rules(mut self, rules: Vec<String>) -> Self {
+    pub fn business_rules(mut self, rules: Vec<String>) -> Self {
         self.business_rules = rules;
         self
     }
 
-    pub fn with_terminology(mut self, terms: HashMap<String, String>) -> Self {
+    pub fn terminology(mut self, terms: HashMap<String, String>) -> Self {
         self.terminology = terms;
         self
     }
 
-    pub fn with_compliance(mut self, compliance: Vec<String>) -> Self {
+    pub fn compliance(mut self, compliance: Vec<String>) -> Self {
         self.compliance = compliance;
         self
     }
@@ -198,9 +198,9 @@ mod tests {
     #[test]
     fn test_module_context_builder() {
         let ctx = ModuleContext::new("src/api", "api")
-            .with_responsibility("HTTP request handling")
-            .with_constraints(vec!["Rate limiting required".into()])
-            .with_key_files(vec!["src/api/mod.rs".into()]);
+            .responsibility("HTTP request handling")
+            .constraints(vec!["Rate limiting required".into()])
+            .key_files(vec!["src/api/mod.rs".into()]);
 
         assert_eq!(ctx.name, "api");
         assert!(!ctx.constraints.is_empty());

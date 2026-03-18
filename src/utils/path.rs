@@ -87,6 +87,16 @@ pub fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
     safe_resolve(root, relative).ok()
 }
 
+/// Strip a root prefix from a path to produce a relative path string.
+///
+/// If `path` is not under `root`, returns the full path as a string.
+pub fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

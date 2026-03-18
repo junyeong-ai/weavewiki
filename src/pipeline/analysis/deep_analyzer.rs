@@ -193,7 +193,7 @@ pub struct LayerBoundary {
     pub evidence: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PatternInstance {
     pub name: String,
     pub category: PatternCategory,
@@ -202,7 +202,7 @@ pub struct PatternInstance {
     pub usage_guidance: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternCategory {
     Architecture,
@@ -218,8 +218,15 @@ pub enum PatternCategory {
     Caching,
     Validation,
     /// Catch-all for custom pattern categories
+    #[default]
     #[serde(other)]
     Other,
+}
+
+impl std::fmt::Display for PatternCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

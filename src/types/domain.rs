@@ -43,17 +43,17 @@ impl DomainPolicy {
         }
     }
 
-    pub fn with_enforcement(mut self, level: EnforcementLevel) -> Self {
+    pub fn enforcement(mut self, level: EnforcementLevel) -> Self {
         self.enforcement = level;
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
         self
     }
 
-    pub fn with_modules(mut self, modules: Vec<String>) -> Self {
+    pub fn modules(mut self, modules: Vec<String>) -> Self {
         self.related_modules = modules;
         self
     }
@@ -163,12 +163,12 @@ impl CoreDomainLogic {
         }
     }
 
-    pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
+    pub fn dependencies(mut self, deps: Vec<String>) -> Self {
         self.dependencies = deps;
         self
     }
 
-    pub fn with_business_impact(mut self, impact: impl Into<String>) -> Self {
+    pub fn business_impact(mut self, impact: impl Into<String>) -> Self {
         self.business_impact = impact.into();
         self
     }
@@ -283,12 +283,12 @@ impl DomainTerm {
         }
     }
 
-    pub fn with_occurrences(mut self, occurrences: Vec<EvidenceLocation>) -> Self {
+    pub fn occurrences(mut self, occurrences: Vec<EvidenceLocation>) -> Self {
         self.occurrences = occurrences;
         self
     }
 
-    pub fn with_synonyms(mut self, synonyms: Vec<String>) -> Self {
+    pub fn synonyms(mut self, synonyms: Vec<String>) -> Self {
         self.synonyms = synonyms;
         self
     }
@@ -351,7 +351,7 @@ impl Abbreviation {
         }
     }
 
-    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+    pub fn context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
         self
     }
@@ -424,17 +424,17 @@ impl BusinessWorkflow {
         self.steps.push(step);
     }
 
-    pub fn with_entry_points(mut self, entry_points: Vec<EvidenceLocation>) -> Self {
+    pub fn entry_points(mut self, entry_points: Vec<EvidenceLocation>) -> Self {
         self.entry_points = entry_points;
         self
     }
 
-    pub fn with_modules(mut self, modules: Vec<String>) -> Self {
+    pub fn modules(mut self, modules: Vec<String>) -> Self {
         self.involved_modules = modules;
         self
     }
 
-    pub fn with_triggers(mut self, triggers: Vec<String>) -> Self {
+    pub fn triggers(mut self, triggers: Vec<String>) -> Self {
         self.triggers = triggers;
         self
     }
@@ -469,12 +469,12 @@ impl WorkflowStep {
         step
     }
 
-    pub fn with_next(mut self, next_steps: Vec<String>) -> Self {
+    pub fn next(mut self, next_steps: Vec<String>) -> Self {
         self.next_steps = next_steps;
         self
     }
 
-    pub fn with_conditions(mut self, conditions: Vec<String>) -> Self {
+    pub fn conditions(mut self, conditions: Vec<String>) -> Self {
         self.conditions = conditions;
         self
     }
@@ -542,7 +542,7 @@ mod tests {
             "All user input must be validated",
             PolicyType::Validation,
         )
-        .with_enforcement(EnforcementLevel::Strict);
+        .enforcement(EnforcementLevel::Strict);
 
         assert_eq!(policy.name, "ValidateUserInput");
         assert_eq!(policy.policy_type, PolicyType::Validation);
@@ -572,8 +572,8 @@ mod tests {
     #[test]
     fn test_workflow_step() {
         let step = WorkflowStep::new(1, "CreateOrder", "Create a new order")
-            .with_next(vec!["ValidateOrder".into(), "RejectOrder".into()])
-            .with_conditions(vec!["User is authenticated".into()]);
+            .next(vec!["ValidateOrder".into(), "RejectOrder".into()])
+            .conditions(vec!["User is authenticated".into()]);
 
         assert_eq!(step.order, 1);
         assert_eq!(step.next_steps.len(), 2);

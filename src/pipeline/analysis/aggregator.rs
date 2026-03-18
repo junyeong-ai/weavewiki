@@ -298,13 +298,16 @@ impl AnalysisAggregator {
             .collect()
     }
 
-    /// Merge patterns from all chunks, deduplicating by name
+    /// Merge patterns from all chunks, deduplicating by normalized name.
+    ///
+    /// Normalizes pattern names so LLM variations like "Builder Pattern",
+    /// "builder-pattern", "Builder Design Pattern" all merge into one entry.
     fn merge_patterns(results: &[ChunkAnalysisResult]) -> Vec<AggregatedPattern> {
         let mut pattern_map: HashMap<String, AggregatedPattern> = HashMap::new();
 
         for result in results {
             for pattern in &result.patterns {
-                let key = pattern.name.clone();
+                let key = normalize_pattern_key(&pattern.name);
                 pattern_map
                     .entry(key)
                     .and_modify(|agg| {
@@ -435,6 +438,15 @@ impl AnalysisAggregator {
     }
 }
 
+fn normalize_pattern_key(name: &str) -> String {
+    name.to_lowercase()
+        .replace(['-', '_'], " ")
+        .replace("design pattern", "")
+        .replace("pattern", "")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::distributed::ChunkConventions;
@@ -485,5 +497,59 @@ mod tests {
             result.conventions.primary_naming,
             Some(NamingCase::SnakeCase)
         );
+    }
+
+    #[test]
+    fn test_normalize_pattern_key() {
+        // All LLM name variations should merge into the same key
+        assert_eq!(normalize_pattern_key("Builder Pattern"), "builder");
+        assert_eq!(normalize_pattern_key("builder-pattern"), "builder");
+        assert_eq!(normalize_pattern_key("builder_pattern"), "builder");
+        assert_eq!(normalize_pattern_key("Builder Design Pattern"), "builder");
+        assert_eq!(normalize_pattern_key("Builder"), "builder");
+        assert_eq!(normalize_pattern_key("BUILDER PATTERN"), "builder");
+    }
+
+    #[test]
+    fn test_pattern_dedup_via_normalization() {
+        use super::super::deep_analyzer::PatternInstance;
+
+        let chunk1 = ChunkAnalysisResult {
+            chunk_id: "chunk-1".to_string(),
+            module_path: "src/api".to_string(),
+            patterns: vec![PatternInstance {
+                name: "Builder Pattern".to_string(),
+                ..Default::default()
+            }],
+            file_count: 3,
+            ..Default::default()
+        };
+        let chunk2 = ChunkAnalysisResult {
+            chunk_id: "chunk-2".to_string(),
+            module_path: "src/core".to_string(),
+            patterns: vec![PatternInstance {
+                name: "builder-pattern".to_string(),
+                ..Default::default()
+            }],
+            file_count: 2,
+            ..Default::default()
+        };
+        let chunk3 = ChunkAnalysisResult {
+            chunk_id: "chunk-3".to_string(),
+            module_path: "src/utils".to_string(),
+            patterns: vec![PatternInstance {
+                name: "Builder Design Pattern".to_string(),
+                ..Default::default()
+            }],
+            file_count: 4,
+            ..Default::default()
+        };
+
+        let result = AnalysisAggregator::aggregate(vec![chunk1, chunk2, chunk3], 9, 900);
+
+        // All three should merge into a single pattern
+        assert_eq!(result.patterns.len(), 1);
+        assert_eq!(result.patterns[0].occurrence_count, 3);
+        assert_eq!(result.patterns[0].modules.len(), 3);
     }
 }

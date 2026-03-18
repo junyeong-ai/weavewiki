@@ -18,6 +18,7 @@ pub mod module_detection;
 pub mod monorepo_analyzer;
 pub mod output_router;
 pub mod project_detection;
+pub mod service_detection;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputStrategy {

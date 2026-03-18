@@ -1,7 +1,7 @@
 //! Domain Rule Generator
 //!
-//! Generates domain-specific rules (priority 60).
-//! Triggered by keywords (e.g., "auth", "async", "error").
+//! Generates domain-specific rules (priority 60) from project evidence.
+//! Only emits rules when concrete evidence exists in RuleGenerationContext.
 
 use super::RuleGenerationContext;
 use crate::types::Rule;
@@ -9,7 +9,6 @@ use crate::utils::capitalize_first;
 
 pub struct DomainRuleGenerator;
 
-/// Domain definitions with their triggers and content generators
 struct DomainDef {
     name: &'static str,
     triggers: &'static [&'static str],
@@ -76,19 +75,16 @@ impl DomainRuleGenerator {
         ));
         content.push(String::new());
 
+        // Add evidence-based content from conventions
         match domain.name {
-            "security" => Self::generate_security_content(ctx, &mut content),
-            "error-handling" => Self::generate_error_handling_content(ctx, &mut content),
-            "concurrency" => Self::generate_concurrency_content(ctx, &mut content),
-            "testing" => Self::generate_testing_content(ctx, &mut content),
-            "performance" => Self::generate_performance_content(ctx, &mut content),
-            "api" => Self::generate_api_content(ctx, &mut content),
-            "data" => Self::generate_data_content(ctx, &mut content),
-            "logging" => Self::generate_logging_content(ctx, &mut content),
+            "security" => Self::add_security_evidence(ctx, &mut content),
+            "error-handling" => Self::add_error_handling_evidence(ctx, &mut content),
+            "concurrency" => Self::add_concurrency_evidence(ctx, &mut content),
+            "testing" => Self::add_testing_evidence(ctx, &mut content),
             _ => {}
         }
 
-        // Get domain-related gotchas
+        // Add domain-related gotchas from constraints
         let domain_gotchas: Vec<_> = ctx
             .constraints
             .gotchas
@@ -112,7 +108,7 @@ impl DomainRuleGenerator {
             }
         }
 
-        // Get domain-related anti-patterns
+        // Add domain-related anti-patterns from constraints
         let domain_anti_patterns: Vec<_> = ctx
             .constraints
             .anti_patterns
@@ -136,7 +132,7 @@ impl DomainRuleGenerator {
             }
         }
 
-        // Skip domains with minimal content (only header)
+        // Skip domains with no evidence (only header)
         if content.len() <= 2 {
             return None;
         }
@@ -145,16 +141,7 @@ impl DomainRuleGenerator {
         Some(Rule::domain(domain.name, triggers, content))
     }
 
-    fn generate_security_content(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Principles".into());
-        content.push(String::new());
-        content.push("1. Never trust user input".into());
-        content.push("2. Use secure defaults".into());
-        content.push("3. Fail securely".into());
-        content.push("4. Minimize attack surface".into());
-        content.push(String::new());
-
-        // Add project-specific security patterns from constraints
+    fn add_security_evidence(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
         let security_deps: Vec<_> = ctx
             .constraints
             .hidden_dependencies
@@ -169,13 +156,13 @@ impl DomainRuleGenerator {
             content.push("## Security Dependencies".into());
             content.push(String::new());
             for dep in security_deps {
-                content.push(format!("- {} → {}: {}", dep.source, dep.target, dep.description));
+                content.push(format!("- {} -> {}: {}", dep.source, dep.target, dep.description));
             }
             content.push(String::new());
         }
     }
 
-    fn generate_error_handling_content(
+    fn add_error_handling_evidence(
         ctx: &RuleGenerationContext<'_>,
         content: &mut Vec<String>,
     ) {
@@ -210,7 +197,7 @@ impl DomainRuleGenerator {
         }
     }
 
-    fn generate_concurrency_content(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
+    fn add_concurrency_evidence(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
         use crate::pipeline::phases::convention_inference::AsyncStyle;
         let async_pattern = &ctx.conventions.async_pattern;
 
@@ -232,16 +219,9 @@ impl DomainRuleGenerator {
             }
             content.push(String::new());
         }
-
-        content.push("## Best Practices".into());
-        content.push(String::new());
-        content.push("- Avoid blocking in async contexts".into());
-        content.push("- Use structured concurrency".into());
-        content.push("- Prefer message passing over shared state".into());
-        content.push(String::new());
     }
 
-    fn generate_testing_content(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
+    fn add_testing_evidence(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
         let testing = &ctx.conventions.testing;
 
         if let Some(framework) = &testing.framework {
@@ -263,118 +243,14 @@ impl DomainRuleGenerator {
             content.push(String::new());
         }
     }
-
-    fn generate_performance_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Principles".into());
-        content.push(String::new());
-        content.push("1. Measure before optimizing".into());
-        content.push("2. Optimize hot paths only".into());
-        content.push("3. Consider cache locality".into());
-        content.push("4. Avoid premature optimization".into());
-        content.push(String::new());
-    }
-
-    fn generate_api_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Request Handling".into());
-        content.push(String::new());
-        content.push("1. **Validate input** - Never trust client data".into());
-        content.push("2. **Use typed extractors** - Leverage framework type safety".into());
-        content.push("3. **Return appropriate status codes** - 2xx success, 4xx client error, 5xx server error".into());
-        content.push(String::new());
-
-        content.push("## Response Format".into());
-        content.push(String::new());
-        content.push("- Use consistent response structure".into());
-        content.push("- Include error details in error responses".into());
-        content.push("- Set appropriate Content-Type headers".into());
-        content.push(String::new());
-
-        content.push("## Error Responses".into());
-        content.push(String::new());
-        content.push("```json".into());
-        content.push(r#"{"error": {"code": "ERROR_CODE", "message": "Human readable message"}}"#.into());
-        content.push("```".into());
-        content.push(String::new());
-
-        content.push("## Best Practices".into());
-        content.push(String::new());
-        content.push("- Document endpoints with OpenAPI/Swagger".into());
-        content.push("- Version APIs when breaking changes needed".into());
-        content.push("- Use pagination for list endpoints".into());
-        content.push("- Implement rate limiting".into());
-        content.push(String::new());
-    }
-
-    fn generate_data_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Query Patterns".into());
-        content.push(String::new());
-        content.push("1. **Use parameterized queries** - Prevent SQL injection".into());
-        content.push("2. **Minimize N+1 queries** - Use joins or batch loading".into());
-        content.push("3. **Index appropriately** - Index frequently queried columns".into());
-        content.push(String::new());
-
-        content.push("## Transaction Handling".into());
-        content.push(String::new());
-        content.push("- Keep transactions short".into());
-        content.push("- Use appropriate isolation levels".into());
-        content.push("- Handle rollback scenarios".into());
-        content.push(String::new());
-
-        content.push("## Data Validation".into());
-        content.push(String::new());
-        content.push("- Validate at domain boundary".into());
-        content.push("- Use database constraints as safety net".into());
-        content.push("- Define allowed value ranges".into());
-        content.push(String::new());
-
-        content.push("## Migration Patterns".into());
-        content.push(String::new());
-        content.push("- Migrations must be reversible".into());
-        content.push("- Test migrations on copy of production data".into());
-        content.push("- Avoid destructive changes (prefer additive)".into());
-        content.push(String::new());
-    }
-
-    fn generate_logging_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Log Levels".into());
-        content.push(String::new());
-        content.push("| Level | When to Use |".into());
-        content.push("|-------|-------------|".into());
-        content.push("| ERROR | Unrecoverable failures requiring attention |".into());
-        content.push("| WARN | Recoverable issues, degraded functionality |".into());
-        content.push("| INFO | Significant business events, state changes |".into());
-        content.push("| DEBUG | Detailed diagnostic information |".into());
-        content.push("| TRACE | Very detailed debugging (performance impact) |".into());
-        content.push(String::new());
-
-        content.push("## What to Log".into());
-        content.push(String::new());
-        content.push("**DO log:**".into());
-        content.push("- Request/response boundaries".into());
-        content.push("- Business event outcomes".into());
-        content.push("- Error conditions with context".into());
-        content.push("- Performance-relevant operations".into());
-        content.push(String::new());
-
-        content.push("**DON'T log:**".into());
-        content.push("- Passwords, tokens, API keys".into());
-        content.push("- PII (personal identifiable information)".into());
-        content.push("- Full request/response bodies in production".into());
-        content.push(String::new());
-
-        content.push("## Structured Logging".into());
-        content.push(String::new());
-        content.push("- Use key=value or JSON format".into());
-        content.push("- Include correlation/request IDs".into());
-        content.push("- Add relevant context fields".into());
-        content.push(String::new());
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::phases::constraint_extraction::ExtractedConstraints;
+    use crate::pipeline::phases::constraint_extraction::{
+        AntiPattern, ExtractedConstraints, Gotcha,
+    };
     use crate::pipeline::phases::convention_inference::{
         ArchitectureConvention, AsyncPattern, AsyncStyle, ErrorHandlingPattern, ErrorStyle,
         FileOrganization, InferredConventions, NamingConventions, TestingConvention,
@@ -382,8 +258,25 @@ mod tests {
     use crate::pipeline::phases::project_detection::ProjectDetection;
     use crate::types::module_map::TechStack;
 
+    fn make_ctx<'a>(
+        detection: &'a ProjectDetection,
+        conventions: &'a InferredConventions,
+        constraints: &'a ExtractedConstraints,
+        tech_stack: &'a TechStack,
+    ) -> RuleGenerationContext<'a> {
+        RuleGenerationContext {
+            detection,
+            conventions,
+            constraints,
+            tech_stack,
+            modules: &[],
+            groups: &[],
+            project_name: "test-project",
+        }
+    }
+
     #[test]
-    fn test_domain_rule_generation() {
+    fn test_error_handling_evidence() {
         let detection = ProjectDetection::default();
         let conventions = InferredConventions {
             architecture: ArchitectureConvention::default(),
@@ -397,6 +290,34 @@ mod tests {
                 propagation_pattern: "Use ? operator".into(),
                 recovery_strategy: "Log and return default".into(),
             },
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints::default();
+        let tech_stack = TechStack::new("rust");
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = DomainRuleGenerator::generate(&ctx);
+
+        let error_rule = rules.iter().find(|r| r.name == "error-handling");
+        assert!(error_rule.is_some());
+        let error_rule = error_rule.unwrap();
+        assert_eq!(error_rule.priority, 60);
+        assert!(error_rule.triggers.as_ref().unwrap().contains(&"error".into()));
+        assert!(error_rule.content.iter().any(|c| c.contains("ResultType")));
+        assert!(error_rule.content.iter().any(|c| c.contains("AppError")));
+        assert!(error_rule.content.iter().any(|c| c.contains("? operator")));
+    }
+
+    #[test]
+    fn test_concurrency_evidence() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
             async_pattern: AsyncPattern {
                 style: AsyncStyle::AsyncAwait,
                 async_count: 20,
@@ -404,6 +325,32 @@ mod tests {
                 runtime: Some("tokio".into()),
                 concurrency_patterns: vec!["spawn".into()],
             },
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints::default();
+        let tech_stack = TechStack::new("rust");
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = DomainRuleGenerator::generate(&ctx);
+
+        let concurrency_rule = rules.iter().find(|r| r.name == "concurrency");
+        assert!(concurrency_rule.is_some());
+        let concurrency_rule = concurrency_rule.unwrap();
+        assert!(concurrency_rule.content.iter().any(|c| c.contains("AsyncAwait")));
+        assert!(concurrency_rule.content.iter().any(|c| c.contains("spawn")));
+        assert!(concurrency_rule.content.iter().any(|c| c.contains("tokio")));
+    }
+
+    #[test]
+    fn test_testing_evidence() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
             patterns: Vec::new(),
             testing: TestingConvention {
                 framework: Some("built-in".into()),
@@ -414,60 +361,106 @@ mod tests {
         };
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
-        let modules = vec![];
-        let groups = vec![];
 
-        let ctx = RuleGenerationContext {
-            detection: &detection,
-            conventions: &conventions,
-            constraints: &constraints,
-            tech_stack: &tech_stack,
-            modules: &modules,
-            groups: &groups,
-            project_name: "test-project",
-        };
-
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
         let rules = DomainRuleGenerator::generate(&ctx);
 
-        // Should generate rules for domains with content
-        assert!(!rules.is_empty());
+        let testing_rule = rules.iter().find(|r| r.name == "testing");
+        assert!(testing_rule.is_some());
+        let testing_rule = testing_rule.unwrap();
+        assert!(testing_rule.content.iter().any(|c| c.contains("built-in")));
+        assert!(testing_rule.content.iter().any(|c| c.contains("test_*")));
+    }
 
-        // Check error-handling rule
-        let error_rule = rules.iter().find(|r| r.name == "error-handling");
-        assert!(error_rule.is_some());
-        let error_rule = error_rule.unwrap();
-        assert_eq!(error_rule.priority, 60);
-        assert!(error_rule.triggers.as_ref().unwrap().contains(&"error".into()));
+    #[test]
+    fn test_no_evidence_no_rules_for_api() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints::default();
+        let tech_stack = TechStack::new("rust");
 
-        // Check concurrency rule
-        let concurrency_rule = rules.iter().find(|r| r.name == "concurrency");
-        assert!(concurrency_rule.is_some());
-        assert!(concurrency_rule
-            .unwrap()
-            .triggers
-            .as_ref()
-            .unwrap()
-            .contains(&"async".into()));
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = DomainRuleGenerator::generate(&ctx);
 
-        // Check API rule
-        let api_rule = rules.iter().find(|r| r.name == "api");
-        assert!(api_rule.is_some());
-        let api_rule = api_rule.unwrap();
-        assert!(api_rule.triggers.as_ref().unwrap().contains(&"endpoint".into()));
-        assert!(api_rule.content.iter().any(|c| c.contains("Validate input")));
+        // Domains with no evidence from conventions produce no rules
+        assert!(rules.iter().find(|r| r.name == "api").is_none());
+        assert!(rules.iter().find(|r| r.name == "data").is_none());
+        assert!(rules.iter().find(|r| r.name == "logging").is_none());
+        assert!(rules.iter().find(|r| r.name == "performance").is_none());
+    }
 
-        // Check data rule
+    #[test]
+    fn test_gotcha_evidence_creates_rule() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints {
+            gotchas: vec![Gotcha {
+                title: "Database connection leak".into(),
+                description: "Connections not returned to pool in error path".into(),
+                when: "Using raw database queries".into(),
+                solution: "Use connection guard pattern".into(),
+                related_files: vec![],
+            }],
+            ..Default::default()
+        };
+        let tech_stack = TechStack::new("rust");
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = DomainRuleGenerator::generate(&ctx);
+
+        // The "data" domain triggers on "database", and the gotcha contains "database"
         let data_rule = rules.iter().find(|r| r.name == "data");
-        assert!(data_rule.is_some());
-        let data_rule = data_rule.unwrap();
-        assert!(data_rule.triggers.as_ref().unwrap().contains(&"database".into()));
-        assert!(data_rule.content.iter().any(|c| c.contains("parameterized queries")));
+        assert!(data_rule.is_some(), "Gotcha evidence should create a data domain rule");
+        assert!(data_rule.unwrap().content.iter().any(|c| c.contains("connection leak")));
+    }
 
-        // Check logging rule
-        let logging_rule = rules.iter().find(|r| r.name == "logging");
-        assert!(logging_rule.is_some());
-        let logging_rule = logging_rule.unwrap();
-        assert!(logging_rule.triggers.as_ref().unwrap().contains(&"trace".into()));
-        assert!(logging_rule.content.iter().any(|c| c.contains("Log Levels")));
+    #[test]
+    fn test_anti_pattern_evidence_creates_rule() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints {
+            anti_patterns: vec![AntiPattern {
+                name: "Hardcoded API keys".into(),
+                description: "API keys embedded in route handlers".into(),
+                why_bad: "Security risk".into(),
+                correct_approach: "Use environment variables".into(),
+                evidence: vec![],
+                severity: crate::types::Severity::Critical,
+            }],
+            ..Default::default()
+        };
+        let tech_stack = TechStack::new("rust");
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = DomainRuleGenerator::generate(&ctx);
+
+        // "api" domain triggers on "API", and the anti-pattern contains "API"
+        let api_rule = rules.iter().find(|r| r.name == "api");
+        assert!(api_rule.is_some(), "Anti-pattern evidence should create an api domain rule");
+        assert!(api_rule.unwrap().content.iter().any(|c| c.contains("Hardcoded API keys")));
     }
 }

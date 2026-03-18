@@ -11,12 +11,15 @@
 
 pub mod aggregator;
 pub mod architectural_analyzer;
+pub mod ast_chunking;
 pub mod ast_enrichment;
 pub mod cross_synthesis;
 pub mod deep_analyzer;
 pub mod distributed;
 pub mod domain_analyzer;
+pub mod reference_pool;
 pub mod synthesis;
+pub mod types;
 
 // Distributed Analysis (100% coverage)
 pub use distributed::{
@@ -64,3 +67,9 @@ pub use ast_enrichment::{
     AstEnricher, AstFacts, AstStats, AstValidation, AstValidator, FunctionFact, ImportFact,
     ParseFailure, ReferenceCheck, TraitFact, TypeFact, TypeKind, Visibility as AstVisibility,
 };
+
+// Module Summaries
+pub use types::ModuleSummary;
+
+// Reference Pool
+pub use reference_pool::VerifiedReferencePool;

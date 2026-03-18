@@ -50,6 +50,10 @@ pub struct Config {
     pub cross_artifact: CrossArtifactConfig,
     pub timeout: TimeoutConfig,
     pub distributed_analysis: DistributedAnalysisConfig,
+    pub discovery: DiscoveryConfig,
+    pub disclosure: DisclosureConfig,
+    pub skill_mapping: SkillMappingConfig,
+    pub feedback_weights: FeedbackWeightsConfig,
 }
 
 impl Default for Config {
@@ -84,6 +88,10 @@ impl Default for Config {
             cross_artifact: CrossArtifactConfig::default(),
             timeout: TimeoutConfig::default(),
             distributed_analysis: DistributedAnalysisConfig::default(),
+            discovery: DiscoveryConfig::default(),
+            disclosure: DisclosureConfig::default(),
+            skill_mapping: SkillMappingConfig::default(),
+            feedback_weights: FeedbackWeightsConfig::default(),
         }
     }
 }
@@ -177,14 +185,17 @@ pub struct GenerationConfig {
     pub artifacts: Vec<ArtifactType>,
     pub limits: ArtifactLimits,
     /// Minimum value score threshold for generating rules.
-    ///
-    /// Rules with scores below this threshold are skipped during generation.
-    /// This is an ADVISORY gate - rules with lower scores may still have value
-    /// in specific contexts (e.g., critical security constraints).
-    ///
-    /// Set to 0.0 to disable filtering and let LLM decide all rule values.
-    /// Default: 0.3
     pub min_rule_value_score: f32,
+    /// Enable module-level agent generation
+    pub module_agents: bool,
+    /// Minimum value score to create a module agent
+    pub module_agent_threshold: f32,
+    /// Minimum module coverage ratio to create a module agent
+    pub module_agent_min_coverage: f32,
+    /// Enable domain-expert agent generation
+    pub domain_experts: bool,
+    /// Skills generation configuration
+    pub skills: SkillsGenerationConfig,
 }
 
 impl Default for GenerationConfig {
@@ -199,6 +210,43 @@ impl Default for GenerationConfig {
             ],
             limits: ArtifactLimits::default(),
             min_rule_value_score: 0.3,
+            module_agents: true,
+            module_agent_threshold: 0.7,
+            module_agent_min_coverage: 0.02,
+            domain_experts: true,
+            skills: SkillsGenerationConfig::default(),
+        }
+    }
+}
+
+/// Per-skill generation toggle
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillGeneration {
+    /// Generate if evidence supports it
+    #[default]
+    Auto,
+    /// Always generate
+    Enabled,
+    /// Never generate
+    Disabled,
+}
+
+/// Skills generation configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsGenerationConfig {
+    pub test: SkillGeneration,
+    pub document: SkillGeneration,
+    pub security_audit: SkillGeneration,
+}
+
+impl Default for SkillsGenerationConfig {
+    fn default() -> Self {
+        Self {
+            test: SkillGeneration::Auto,
+            document: SkillGeneration::Auto,
+            security_audit: SkillGeneration::Auto,
         }
     }
 }
@@ -1562,6 +1610,8 @@ pub struct RefinementConfig {
     pub self_critique: SelfCritiqueConfig,
     /// Evidence feedback loop configuration
     pub evidence_feedback: EvidenceFeedbackConfig,
+    /// Checkpoint every N iterations (0 = disabled)
+    pub checkpoint_every_iterations: usize,
 }
 
 /// Configuration for self-critique inner loop within refinement
@@ -1645,6 +1695,7 @@ impl Default for RefinementConfig {
             quality_acceptance_delta: 0.03, // Tighter acceptance
             self_critique: SelfCritiqueConfig::default(),
             evidence_feedback: EvidenceFeedbackConfig::default(),
+            checkpoint_every_iterations: crate::constants::refinement::DEFAULT_CHECKPOINT_EVERY_ITERATIONS,
         }
     }
 }
@@ -1738,6 +1789,7 @@ pub struct QualityConfig {
     pub min_file_refs: usize,
     pub max_tier1_ratio: f32,
     pub reference_only_mode: bool,
+    pub min_verification_ratio: f32,
     pub scoring: TierScoringWeights,
     pub skill: SkillQualityConfig,
     pub agent: AgentQualityConfig,
@@ -1753,6 +1805,7 @@ impl Default for QualityConfig {
             min_file_refs: 3,
             max_tier1_ratio: 0.1,
             reference_only_mode: false,
+            min_verification_ratio: 0.5,
             scoring: TierScoringWeights::default(),
             skill: SkillQualityConfig::default(),
             agent: AgentQualityConfig::default(),
@@ -2771,6 +2824,201 @@ impl Default for DistributedAnalysisConfig {
 impl Config {
     pub fn distributed_analysis(&self) -> &DistributedAnalysisConfig {
         &self.distributed_analysis
+    }
+}
+
+// =============================================================================
+// DISCOVERY CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    pub agent_discovery: bool,
+    pub skill_discovery: bool,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            agent_discovery: true,
+            skill_discovery: true,
+        }
+    }
+}
+
+// =============================================================================
+// DISCLOSURE CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisclosureConfig {
+    pub critical_keywords: Vec<String>,
+    pub high_keywords: Vec<String>,
+    pub reference_keywords: Vec<String>,
+    pub example_keywords: Vec<String>,
+    pub consideration_threshold: usize,
+    pub min_section_size: usize,
+}
+
+impl Default for DisclosureConfig {
+    fn default() -> Self {
+        Self {
+            critical_keywords: vec![
+                "critical".into(), "overview".into(), "process".into(),
+                "must".into(), "never".into(), "required".into(),
+                "danger".into(), "input".into(), "output".into(),
+                "expected".into(), "spec".into(),
+            ],
+            high_keywords: vec![
+                "constraint".into(), "pattern".into(), "domain".into(),
+                "warning".into(), "gotcha".into(), "important".into(),
+                "convention".into(), "architecture".into(), "design".into(),
+            ],
+            reference_keywords: vec![
+                "reference".into(), "see also".into(), "appendix".into(),
+                "implementation detail".into(), "key file".into(),
+            ],
+            example_keywords: vec![
+                "example".into(), "sample".into(), "usage".into(),
+            ],
+            consideration_threshold: 500,
+            min_section_size: 50,
+        }
+    }
+}
+
+// =============================================================================
+// SKILL MAPPING CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillMappingConfig {
+    pub tag_skill_map: Vec<TagSkillEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagSkillEntry {
+    pub tags: Vec<String>,
+    pub skills: Vec<String>,
+}
+
+impl Default for SkillMappingConfig {
+    fn default() -> Self {
+        Self {
+            tag_skill_map: vec![
+                TagSkillEntry {
+                    tags: vec![
+                        "auth".into(), "security".into(), "crypto".into(),
+                        "jwt".into(), "token".into(), "oauth".into(),
+                        "permission".into(), "encrypt".into(),
+                    ],
+                    skills: vec!["security-audit".into()],
+                },
+                TagSkillEntry {
+                    tags: vec!["api".into(), "endpoint".into(), "route".into(), "handler".into()],
+                    skills: vec!["code-review".into()],
+                },
+                TagSkillEntry {
+                    tags: vec!["test".into(), "spec".into(), "fixture".into()],
+                    skills: vec!["test".into()],
+                },
+                TagSkillEntry {
+                    tags: vec!["doc".into(), "readme".into(), "guide".into()],
+                    skills: vec!["document".into()],
+                },
+            ],
+        }
+    }
+}
+
+// =============================================================================
+// FEEDBACK WEIGHTS CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeedbackWeightsConfig {
+    pub quality: f32,
+    pub structural: f32,
+    pub evidence: f32,
+}
+
+impl Default for FeedbackWeightsConfig {
+    fn default() -> Self {
+        Self {
+            quality: 0.4,
+            structural: 0.3,
+            evidence: 0.3,
+        }
+    }
+}
+
+// =============================================================================
+// CROSS-REFERENCE CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CrossReferenceConfig {
+    pub default_refs: Vec<String>,
+    pub skill_rule_mappings: Vec<SkillRuleMapping>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillRuleMapping {
+    pub skill: String,
+    pub rules: Vec<String>,
+    pub skill_pattern: String,
+    pub rule_paths: Vec<String>,
+}
+
+// =============================================================================
+// DYNAMIC CONTEXT CONFIG
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DynamicContextConfig {
+    pub command_patterns: Vec<CommandPattern>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandPattern {
+    pub skill_keywords: Vec<String>,
+    pub language_filter: Option<String>,
+    pub commands: Vec<String>,
+}
+
+impl Default for DynamicContextConfig {
+    fn default() -> Self {
+        Self {
+            command_patterns: vec![
+                CommandPattern {
+                    skill_keywords: vec![
+                        "git".into(), "commit".into(), "review".into(),
+                        "merge".into(), "branch".into(),
+                    ],
+                    language_filter: None,
+                    commands: vec![
+                        "!git status --short".into(),
+                        "!git log --oneline -5".into(),
+                    ],
+                },
+                CommandPattern {
+                    skill_keywords: vec!["build".into(), "compile".into(), "check".into()],
+                    language_filter: Some("rust".into()),
+                    commands: vec!["!cargo check --message-format=short".into()],
+                },
+                CommandPattern {
+                    skill_keywords: vec!["build".into(), "compile".into(), "check".into()],
+                    language_filter: Some("typescript".into()),
+                    commands: vec!["!npx tsc --noEmit 2>&1 | head -20".into()],
+                },
+            ],
+        }
     }
 }
 

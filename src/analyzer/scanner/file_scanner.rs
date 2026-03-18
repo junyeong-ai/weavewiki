@@ -176,17 +176,17 @@ impl FileScanner {
         }
     }
 
-    pub fn with_include(mut self, patterns: &[String]) -> Self {
+    pub fn include(mut self, patterns: &[String]) -> Self {
         self.include = CompiledPatternSet::compile(patterns);
         self
     }
 
-    pub fn with_exclude(mut self, patterns: &[String]) -> Self {
+    pub fn exclude(mut self, patterns: &[String]) -> Self {
         self.exclude = CompiledPatternSet::compile(patterns);
         self
     }
 
-    pub fn with_max_file_size(mut self, size: u64) -> Self {
+    pub fn max_file_size(mut self, size: u64) -> Self {
         self.max_file_size = size;
         self
     }

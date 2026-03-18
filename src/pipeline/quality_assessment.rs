@@ -298,12 +298,12 @@ impl QualityAssessor {
         }
     }
 
-    pub fn with_quality_floor(mut self, floor: f32) -> Self {
+    pub fn quality_floor(mut self, floor: f32) -> Self {
         self.quality_floor = floor;
         self
     }
 
-    pub fn with_early_exit(mut self, threshold: f32, bypasses_dimensions: bool) -> Self {
+    pub fn early_exit(mut self, threshold: f32, bypasses_dimensions: bool) -> Self {
         self.early_exit_threshold = threshold;
         self.early_exit_bypasses_dimensions = bypasses_dimensions;
         self
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn test_early_exit_convergence() {
         // Explicit early_exit_bypasses_dimensions=true to test early exit path
-        let checker = QualityAssessor::new(0.85, true).with_early_exit(0.90, true);
+        let checker = QualityAssessor::new(0.85, true).early_exit(0.90, true);
         let dims = make_dimensions(true, true);
         let result = checker.check(0.90, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::EarlyExit));
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn test_all_dimensions_convergence() {
-        let checker = QualityAssessor::new(0.85, true).with_early_exit(1.0, false);
+        let checker = QualityAssessor::new(0.85, true).early_exit(1.0, false);
         let dims = make_dimensions(true, true);
         let result = checker.check(0.88, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::QualityTargetMet));
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_quality_target_convergence() {
-        let checker = QualityAssessor::new(0.85, false).with_early_exit(1.0, false);
+        let checker = QualityAssessor::new(0.85, false).early_exit(1.0, false);
         let dims = make_dimensions(true, false);
         let result = checker.check(0.88, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::QualityTargetMet));
@@ -525,8 +525,8 @@ mod tests {
     #[test]
     fn test_quality_floor_convergence() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.65)
-            .with_early_exit(1.0, false);
+            .quality_floor(0.65)
+            .early_exit(1.0, false);
         let dims = make_dimensions(true, false);
         let result = checker.check(0.70, &dims, false, 1);
         assert_eq!(result, Some(AssessmentPath::QualityFloorMet));
@@ -535,8 +535,8 @@ mod tests {
     #[test]
     fn test_no_issues_convergence_requires_quality() {
         let checker = QualityAssessor::new(0.85, true)
-            .with_quality_floor(0.65)
-            .with_early_exit(1.0, false);
+            .quality_floor(0.65)
+            .early_exit(1.0, false);
         let dims = make_dimensions(true, false);
         let result = checker.check(0.60, &dims, false, 0);
         assert_eq!(result, None);
@@ -547,8 +547,8 @@ mod tests {
     #[test]
     fn test_minimum_viable_path() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.65)
-            .with_early_exit(1.0, false);
+            .quality_floor(0.65)
+            .early_exit(1.0, false);
         let mut dims = make_dimensions(true, false);
         dims.evidence_quality.passed = false;
         let result = checker.check(0.70, &dims, false, 1);
@@ -558,8 +558,8 @@ mod tests {
     #[test]
     fn test_aggregated_feedback_convergence() {
         let checker = QualityAssessor::new(0.85, false)
-            .with_quality_floor(0.65)
-            .with_early_exit(1.0, false);
+            .quality_floor(0.65)
+            .early_exit(1.0, false);
         let dims = make_dimensions(true, false);
         let result = checker.check(0.70, &dims, true, 1);
         assert_eq!(result, Some(AssessmentPath::QualityFloorMet));

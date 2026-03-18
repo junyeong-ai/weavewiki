@@ -1,4 +1,6 @@
 pub mod agent;
+pub mod artifact_category;
+pub mod artifacts;
 pub mod claim;
 pub mod domain;
 pub mod edge;
@@ -11,6 +13,7 @@ pub mod memory;
 pub mod module_map;
 pub mod node;
 pub mod plugin;
+pub mod quality;
 pub mod rule;
 pub mod severity;
 pub mod skill;
@@ -62,6 +65,9 @@ pub use utils::{
     json_string_or, log_filter_error, log_filter_warn, yaml_value,
 };
 pub use validation::{DiagnosticLevel, ValidationIssue, ValidationResult};
+pub use artifacts::ClaudeMdContent;
+pub use artifact_category::ArtifactCategory;
+pub use quality::ArtifactQuality;
 
 use std::fmt;
 

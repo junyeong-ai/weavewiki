@@ -84,6 +84,19 @@ pub enum HiddenDepType {
     DataFormat,
 }
 
+impl std::fmt::Display for HiddenDepType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ImplicitOrdering => write!(f, "implicit_ordering"),
+            Self::SharedState => write!(f, "shared_state"),
+            Self::ConfigDependency => write!(f, "config_dependency"),
+            Self::RuntimeDependency => write!(f, "runtime_dependency"),
+            Self::BuildTimeDependency => write!(f, "build_time_dependency"),
+            Self::DataFormat => write!(f, "data_format"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ComplexWorkflow {
     pub name: String,

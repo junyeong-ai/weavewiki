@@ -179,7 +179,12 @@ impl ClaudegenContext {
     pub fn merge_from(&mut self, other: &ClaudegenContext) {
         self.tier3_constraints
             .extend(other.tier3_constraints.clone());
+        self.tier3_constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        self.tier3_constraints.dedup_by(|a, b| a.name == b.name);
+
         self.key_abstractions.extend(other.key_abstractions.clone());
+        self.key_abstractions.sort_by(|a, b| a.name.cmp(&b.name));
+        self.key_abstractions.dedup_by(|a, b| a.name == b.name);
 
         if other.analysis_results.detection.is_some() && self.analysis_results.detection.is_none() {
             self.analysis_results.detection = other.analysis_results.detection.clone();
@@ -643,6 +648,85 @@ impl VerifiedFileRegistry {
         }
 
         output
+    }
+
+    /// Register a file for testing purposes (test-only helper).
+    ///
+    /// Adds a file to the registry with a default line count of 100.
+    #[cfg(test)]
+    pub fn register_test_file(&mut self, path: &str) {
+        self.register_test_file_with_lines(path, 100);
+    }
+
+    /// Register a file for testing with a specific line count (test-only helper).
+    #[cfg(test)]
+    pub fn register_test_file_with_lines(&mut self, path: &str, lines: usize) {
+        self.verified_files.insert(path.to_string());
+        self.file_to_line_count.insert(path.to_string(), lines);
+        self.file_metadata
+            .insert(path.to_string(), FileMetadata::new(path.to_string(), lines));
+
+        // Register parent directories
+        let path_buf = std::path::Path::new(path);
+        let mut current = path_buf.parent();
+        while let Some(parent) = current {
+            let dir_str = parent.to_string_lossy().to_string();
+            if dir_str.is_empty() {
+                break;
+            }
+            self.directories.insert(dir_str);
+            current = parent.parent();
+        }
+    }
+
+    /// Check if a README file exists at the project root.
+    pub fn has_readme(&self) -> bool {
+        self.verified_files.iter().any(|f| {
+            let lower = f.to_lowercase();
+            lower == "readme.md" || lower == "readme" || lower == "readme.txt" || lower == "readme.rst"
+        })
+    }
+
+    /// Check if a docs/ directory exists.
+    pub fn has_docs_directory(&self) -> bool {
+        self.directories.iter().any(|d| {
+            let lower = d.to_lowercase();
+            lower == "docs" || lower == "doc" || lower == "documentation"
+        })
+    }
+
+    /// Return files that appear to be test files.
+    pub fn test_files(&self) -> Vec<&String> {
+        self.verified_files
+            .iter()
+            .filter(|f| {
+                let lower = f.to_lowercase();
+                lower.contains("test") || lower.contains("spec") || lower.contains("_test.")
+                    || lower.starts_with("tests/") || lower.starts_with("test/")
+            })
+            .collect()
+    }
+}
+
+/// Extension trait for file existence and line count queries on the registry.
+pub trait FileRegistryExt {
+    fn file_exists(&self, path: &str) -> bool;
+    fn get_line_count(&self, path: &str) -> Result<usize>;
+}
+
+impl FileRegistryExt for VerifiedFileRegistry {
+    fn file_exists(&self, path: &str) -> bool {
+        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
+        self.contains(clean_path)
+            || self.contains(&format!("./{}", clean_path))
+            || self.contains(&format!("src/{}", clean_path))
+    }
+
+    fn get_line_count(&self, path: &str) -> Result<usize> {
+        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
+        self.line_count(clean_path).ok_or_else(|| {
+            crate::types::ClaudegenError::Config(format!("File not found: {}", path))
+        })
     }
 }
 

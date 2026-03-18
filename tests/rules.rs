@@ -249,8 +249,8 @@ mod module_rules {
         let tech_stack = TechStack::new("rust");
         let modules = vec![
             DetectedModule::new("auth", "Authentication module")
-                .with_paths(vec!["src/auth/".into()])
-                .with_conventions(vec![Convention::new("secure-defaults", "Use secure defaults")]),
+                .paths(vec!["src/auth/".into()])
+                .conventions(vec![Convention::new("secure-defaults", "Use secure defaults")]),
         ];
         let groups = vec![];
 
@@ -281,8 +281,8 @@ mod module_rules {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication module")
-            .with_paths(vec!["src/auth/".into()])
-            .with_conventions(vec![Convention::new("secure-defaults", "Use secure defaults")])];
+            .paths(vec!["src/auth/".into()])
+            .conventions(vec![Convention::new("secure-defaults", "Use secure defaults")])];
         let groups = vec![];
 
         let ctx = create_test_context(
@@ -311,8 +311,8 @@ mod group_rules {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![
-            DetectedModule::new("auth", "Authentication").with_paths(vec!["src/auth/".into()]),
-            DetectedModule::new("user", "User management").with_paths(vec!["src/user/".into()]),
+            DetectedModule::new("auth", "Authentication").paths(vec!["src/auth/".into()]),
+            DetectedModule::new("user", "User management").paths(vec!["src/user/".into()]),
         ];
         let groups = vec![ModuleGroup::new(
             "identity",
@@ -348,8 +348,8 @@ mod group_rules {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![
-            DetectedModule::new("auth", "Authentication").with_paths(vec!["src/auth/".into()]),
-            DetectedModule::new("user", "User management").with_paths(vec!["src/user/".into()]),
+            DetectedModule::new("auth", "Authentication").paths(vec!["src/auth/".into()]),
+            DetectedModule::new("user", "User management").paths(vec!["src/user/".into()]),
         ];
         let groups = vec![ModuleGroup::new(
             "identity",
@@ -429,7 +429,7 @@ mod domain_rules {
     }
 
     #[test]
-    fn security_rule_has_security_triggers() {
+    fn no_security_rule_without_evidence() {
         let detection = ProjectDetection::default();
         let conventions = default_conventions();
         let constraints = ExtractedConstraints::default();
@@ -447,12 +447,51 @@ mod domain_rules {
         );
 
         let rules = DomainRuleGenerator::generate(&ctx);
-        let security = rules.iter().find(|r| r.name == "security");
+        assert!(
+            rules.iter().find(|r| r.name == "security").is_none(),
+            "Security rule should not be generated without evidence"
+        );
+    }
 
-        if let Some(security) = security {
-            let triggers = security.triggers.as_ref().unwrap();
-            assert!(triggers.iter().any(|t| t.contains("auth") || t.contains("security")));
-        }
+    #[test]
+    fn security_rule_has_security_triggers() {
+        use claudegen::pipeline::phases::constraint_extraction::{AntiPattern, Gotcha};
+
+        let detection = ProjectDetection::default();
+        let conventions = default_conventions();
+        let constraints = ExtractedConstraints {
+            gotchas: vec![Gotcha {
+                title: "Auth token leak".into(),
+                description: "Tokens not rotated in auth middleware".into(),
+                when: "Using custom auth flow".into(),
+                solution: "Use token rotation middleware".into(),
+                related_files: vec![],
+            }],
+            ..Default::default()
+        };
+        let tech_stack = TechStack::new("rust");
+        let modules = vec![];
+        let groups = vec![];
+
+        let ctx = create_test_context(
+            &detection,
+            &conventions,
+            &constraints,
+            &tech_stack,
+            &modules,
+            &groups,
+        );
+
+        let rules = DomainRuleGenerator::generate(&ctx);
+        let security = rules
+            .iter()
+            .find(|r| r.name == "security")
+            .expect("Security rule must be generated when security evidence exists");
+        let triggers = security.triggers.as_ref().unwrap();
+        assert!(
+            triggers.iter().any(|t| t.contains("auth") || t.contains("security")),
+            "Security rule triggers must include auth or security keywords"
+        );
     }
 }
 
@@ -474,7 +513,7 @@ mod full_generation {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication module")
-            .with_paths(vec!["src/auth/".into()])];
+            .paths(vec!["src/auth/".into()])];
         let groups = vec![];
 
         let ctx = create_test_context(
@@ -544,7 +583,7 @@ mod full_generation {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication module")
-            .with_paths(vec!["src/auth/".into()])];
+            .paths(vec!["src/auth/".into()])];
         let groups = vec![];
 
         let ctx = create_test_context(
@@ -584,7 +623,7 @@ mod full_generation {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication module")
-            .with_paths(vec!["src/auth/".into()])];
+            .paths(vec!["src/auth/".into()])];
         let groups = vec![];
 
         let ctx = create_test_context(
@@ -627,8 +666,8 @@ mod full_generation {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication")
-            .with_paths(vec!["src/auth/".into()])
-            .with_conventions(vec![Convention::new("secure", "Be secure")])];
+            .paths(vec!["src/auth/".into()])
+            .conventions(vec![Convention::new("secure", "Be secure")])];
         let groups = vec![ModuleGroup::new(
             "backend",
             "Backend",
@@ -678,6 +717,21 @@ mod full_generation {
                 RuleCategory::Domain => assert!(
                     path.starts_with("domains/"),
                     "Domain rule should be in domains/: {}",
+                    path
+                ),
+                RuleCategory::CrossCutting => assert!(
+                    path.starts_with("cross-cutting/"),
+                    "CrossCutting rule should be in cross-cutting/: {}",
+                    path
+                ),
+                RuleCategory::Service => assert!(
+                    path.starts_with("services/"),
+                    "Service rule should be in services/: {}",
+                    path
+                ),
+                RuleCategory::Custom => assert!(
+                    path.starts_with("custom/"),
+                    "Custom rule should be in custom/: {}",
                     path
                 ),
             }

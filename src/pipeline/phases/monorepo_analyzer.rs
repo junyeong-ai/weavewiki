@@ -73,6 +73,12 @@ pub enum CrossDepType {
     External,
 }
 
+impl std::fmt::Display for CrossDepType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RulesGroup {
     pub name: String,

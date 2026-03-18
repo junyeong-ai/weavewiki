@@ -2,9 +2,11 @@
 //!
 //! Pure utility functions that can be used by both types and pipeline modules.
 
+pub mod hash;
 pub mod path;
 pub mod patterns;
 pub mod tools;
+pub mod validation;
 
 pub use path::{PathResolution, safe_join, safe_resolve};
 pub use patterns::*;
@@ -36,4 +38,15 @@ pub fn capitalize_first(s: &str) -> String {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
     }
+}
+
+/// Normalize a concern name from kebab-case or snake_case to title case.
+///
+/// Examples: "hidden-dependency" -> "Hidden Dependency", "concurrency_trap" -> "Concurrency Trap"
+pub fn normalize_concern_name(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|s| !s.is_empty())
+        .map(capitalize_first)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

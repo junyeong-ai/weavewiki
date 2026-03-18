@@ -84,6 +84,12 @@ pub enum TypeKind {
     Module,    // Namespace/module
 }
 
+impl std::fmt::Display for TypeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl AstFacts {
     /// Check if a function exists at the claimed location
     pub fn validate_function_reference(&self, name: &str, file: &str, line: u32) -> AstValidation {

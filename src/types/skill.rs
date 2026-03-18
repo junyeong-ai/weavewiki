@@ -200,52 +200,52 @@ impl Skill {
         self.quality = Self::calculate_quality(&self.body);
     }
 
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+    pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
         self
     }
 
-    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+    pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.allowed_tools = Some(tools);
         self
     }
 
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+    pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    pub fn with_user_invocable(mut self, invocable: bool) -> Self {
+    pub fn user_invocable(mut self, invocable: bool) -> Self {
         self.user_invocable = Some(invocable);
         self
     }
 
-    pub fn with_argument_hint(mut self, hint: impl Into<String>) -> Self {
+    pub fn argument_hint(mut self, hint: impl Into<String>) -> Self {
         self.argument_hint = Some(hint.into());
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
         self
     }
 
-    pub fn with_context(mut self, context: ContextMode) -> Self {
+    pub fn context(mut self, context: ContextMode) -> Self {
         self.context = Some(context);
         self
     }
 
-    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+    pub fn agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
         self
     }
 
-    pub fn with_disable_model_invocation(mut self, disable: bool) -> Self {
+    pub fn disable_model_invocation(mut self, disable: bool) -> Self {
         self.disable_model_invocation = Some(disable);
         self
     }
 
-    pub fn with_hooks(mut self, hooks: ToolHooks) -> Self {
+    pub fn hooks(mut self, hooks: ToolHooks) -> Self {
         self.hooks = Some(hooks);
         self
     }
@@ -284,6 +284,10 @@ impl Skill {
             format!("name: \"{}\"\n", self.name.replace('"', "\\\""))
         });
         format!("---\n{}---\n\n{}", yaml, self.body)
+    }
+
+    pub fn artifact_category(&self) -> crate::types::ArtifactCategory {
+        crate::types::ArtifactCategory::for_skill()
     }
 
     pub fn validate(&self) -> Vec<ValidationIssue> {
@@ -344,8 +348,8 @@ mod tests {
             "This skill should be used when building Rust projects.",
             "# Rust Build\n\nBuild commands...",
         )
-        .with_tools(vec!["Bash".to_string(), "Read".to_string()])
-        .with_user_invocable(true);
+        .tools(vec!["Bash".to_string(), "Read".to_string()])
+        .user_invocable(true);
 
         let md = skill.to_markdown();
         assert!(md.contains("name: rust-build"));
@@ -364,7 +368,7 @@ mod tests {
     #[test]
     fn test_skill_with_argument_hint() {
         let skill =
-            Skill::new("my-skill", "desc", "body").with_argument_hint("[file-path] [options]");
+            Skill::new("my-skill", "desc", "body").argument_hint("[file-path] [options]");
 
         let md = skill.to_markdown();
         assert!(md.contains("argument-hint:"));
@@ -374,7 +378,7 @@ mod tests {
     #[test]
     fn test_skill_tool_validation() {
         let skill =
-            Skill::new("test-skill", "Use this skill when testing", "body").with_tools(vec![
+            Skill::new("test-skill", "Use this skill when testing", "body").tools(vec![
                 "Read".to_string(),
                 "InvalidTool".to_string(),
                 "Grep".to_string(),

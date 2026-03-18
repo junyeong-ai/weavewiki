@@ -52,7 +52,7 @@ impl AnalysisChunk {
         }
     }
 
-    pub fn with_metrics(mut self, total_lines: usize, estimated_tokens: usize) -> Self {
+    pub fn metrics(mut self, total_lines: usize, estimated_tokens: usize) -> Self {
         self.total_lines = total_lines;
         self.estimated_tokens = estimated_tokens;
         self
@@ -94,6 +94,12 @@ pub enum NamingCase {
     ScreamingSnakeCase,
 }
 
+impl std::fmt::Display for NamingCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorStyle {
@@ -102,6 +108,12 @@ pub enum ErrorStyle {
     NullCheck,
     EarlyReturn,
     MonadicChain,
+}
+
+impl std::fmt::Display for ErrorStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -163,7 +175,7 @@ impl ChunkingStrategy {
                         module.to_string(),
                         current_files.clone(),
                     )
-                    .with_metrics(current_lines, current_tokens),
+                    .metrics(current_lines, current_tokens),
                 );
                 current_files.clear();
                 current_tokens = 0;
@@ -183,11 +195,136 @@ impl ChunkingStrategy {
                     module.to_string(),
                     current_files,
                 )
-                .with_metrics(current_lines, current_tokens),
+                .metrics(current_lines, current_tokens),
             );
         }
 
         chunks
+    }
+
+    /// Extract exported symbol names from file content.
+    ///
+    /// Language-aware extraction using file extension:
+    /// - Rust: `pub fn/struct/enum/trait/mod/type/const`
+    /// - Python: top-level `def`/`class`
+    /// - TypeScript/JavaScript: `export` declarations
+    /// - Go: capitalized `func`/`type`/`var`/`const`
+    /// - Java/Kotlin/Scala: `public class/interface/enum/record`
+    pub fn extract_exported_symbols(content: &str, file_path: &Path) -> Vec<String> {
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mut symbols = Vec::new();
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            match ext {
+                "rs" => {
+                    if let Some(rest) = trimmed.strip_prefix("pub ") {
+                        if let Some(sym) = Self::parse_rust_declaration(rest) {
+                            symbols.push(sym);
+                        }
+                    } else if trimmed.starts_with("pub(")
+                        && let Some(after_vis) = trimmed.find(") ")
+                    {
+                        let rest = &trimmed[after_vis + 2..];
+                        if let Some(sym) = Self::parse_rust_declaration(rest) {
+                            symbols.push(sym);
+                        }
+                    }
+                }
+                "py" => {
+                    let keyword_rest = line.strip_prefix("async def ")
+                        .or_else(|| line.strip_prefix("def "))
+                        .or_else(|| line.strip_prefix("class "));
+                    if let Some(keyword_rest) = keyword_rest
+                        && let Some(name) = keyword_rest.split(|c: char| !c.is_alphanumeric() && c != '_').next()
+                        && !name.is_empty()
+                    {
+                        symbols.push(name.to_string());
+                    }
+                }
+                "ts" | "tsx" | "js" | "jsx" => {
+                    if trimmed.starts_with("export ") {
+                        let rest = trimmed.strip_prefix("export ").unwrap_or("");
+                        let rest = rest.strip_prefix("default ").unwrap_or(rest);
+                        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+                        for keyword in [
+                            "function ", "class ", "const ", "let ", "interface ", "type ",
+                            "enum ",
+                        ] {
+                            if let Some(after) = rest.strip_prefix(keyword)
+                                && let Some(name) = after
+                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                    .next()
+                                && !name.is_empty()
+                            {
+                                symbols.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+                "go" => {
+                    for keyword in ["func ", "type ", "var ", "const "] {
+                        if let Some(stripped) = trimmed.strip_prefix(keyword)
+                            && let Some(name) = stripped
+                                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                .next()
+                            && name.starts_with(|c: char| c.is_uppercase())
+                        {
+                            symbols.push(name.to_string());
+                        }
+                    }
+                }
+                "java" | "kt" | "scala" => {
+                    if trimmed.starts_with("public ") {
+                        for keyword in ["class ", "interface ", "enum ", "record "] {
+                            if let Some(pos) = trimmed.find(keyword) {
+                                let after = &trimmed[pos + keyword.len()..];
+                                if let Some(name) = after
+                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                    .next()
+                                    && !name.is_empty()
+                                {
+                                    symbols.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        symbols
+    }
+
+    /// Parse a Rust declaration after the `pub ` prefix and return a compact
+    /// symbol signature like `pub fn foo()` or `pub struct Bar`.
+    fn parse_rust_declaration(rest: &str) -> Option<String> {
+        let keywords = [
+            ("fn ", "pub fn "),
+            ("struct ", "pub struct "),
+            ("trait ", "pub trait "),
+            ("enum ", "pub enum "),
+            ("type ", "pub type "),
+            ("mod ", "pub mod "),
+            ("const ", "pub const "),
+            ("async fn ", "pub async fn "),
+        ];
+
+        for (keyword, prefix) in &keywords {
+            if let Some(after_kw) = rest.strip_prefix(keyword) {
+                let ident: String = after_kw
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !ident.is_empty() {
+                    let suffix = if keyword.contains("fn ") { "()" } else { "" };
+                    return Some(format!("{}{}{}", prefix, ident, suffix));
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -459,7 +596,7 @@ mod tests {
             "src/pipeline".to_string(),
             vec!["src/pipeline/mod.rs".to_string()],
         )
-        .with_metrics(100, 1500);
+        .metrics(100, 1500);
 
         assert_eq!(chunk.chunk_id, "chunk-1");
         assert_eq!(chunk.total_lines, 100);
@@ -472,5 +609,202 @@ mod tests {
         assert!(result.patterns.is_empty());
         assert!(result.constraints.is_empty());
         assert_eq!(result.confidence, 0.0);
+    }
+
+    // =========================================================================
+    // extract_exported_symbols tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_exported_symbols_rust() {
+        let content = r#"
+pub fn process_data() -> Result<()> {
+    unimplemented!()
+}
+
+pub struct Config {
+    pub name: String,
+}
+
+pub(crate) enum Mode {
+    Fast,
+    Slow,
+}
+
+fn private_helper() {}
+
+pub trait Provider {
+    fn name(&self) -> &str;
+}
+
+pub async fn run_server() {}
+
+pub type Alias = Vec<String>;
+
+pub const MAX: usize = 100;
+
+pub mod utils;
+"#;
+        let path = Path::new("src/lib.rs");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"pub fn process_data()".to_string()));
+        assert!(symbols.contains(&"pub struct Config".to_string()));
+        assert!(symbols.contains(&"pub trait Provider".to_string()));
+        assert!(symbols.contains(&"pub async fn run_server()".to_string()));
+        assert!(symbols.contains(&"pub type Alias".to_string()));
+        assert!(symbols.contains(&"pub const MAX".to_string()));
+        assert!(symbols.contains(&"pub mod utils".to_string()));
+        // pub(crate) should also be captured
+        assert!(symbols.contains(&"pub enum Mode".to_string()));
+        // private function should NOT be captured
+        assert!(!symbols.iter().any(|s| s.contains("private_helper")));
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_python() {
+        let content = r#"def hello():
+    pass
+
+class MyClass:
+    def method(self):
+        pass
+
+async def fetch_data():
+    pass
+
+    def indented_func():
+        pass
+"#;
+        let path = Path::new("app.py");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"hello".to_string()));
+        assert!(symbols.contains(&"MyClass".to_string()));
+        assert!(symbols.contains(&"fetch_data".to_string()));
+        // Indented definitions should NOT be captured (methods, nested)
+        assert!(!symbols.contains(&"indented_func".to_string()));
+        assert!(!symbols.contains(&"method".to_string()));
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_typescript() {
+        let content = r#"
+export function processData(input: string): void {}
+export class UserService {}
+export const MAX_RETRIES = 3;
+export let counter = 0;
+export interface Config {}
+export type Result<T> = T | Error;
+export enum Status { Active, Inactive }
+export default class MainApp {}
+export async function fetchUser() {}
+function privateHelper() {}
+"#;
+        let path = Path::new("service.ts");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"processData".to_string()));
+        assert!(symbols.contains(&"UserService".to_string()));
+        assert!(symbols.contains(&"MAX_RETRIES".to_string()));
+        assert!(symbols.contains(&"counter".to_string()));
+        assert!(symbols.contains(&"Config".to_string()));
+        assert!(symbols.contains(&"Status".to_string()));
+        assert!(symbols.contains(&"MainApp".to_string()));
+        assert!(symbols.contains(&"fetchUser".to_string()));
+        // Non-exported should NOT be captured
+        assert!(!symbols.contains(&"privateHelper".to_string()));
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_go() {
+        let content = r#"
+func ProcessData(input string) error {
+    return nil
+}
+
+func helper() {}
+
+type Config struct {
+    Name string
+}
+
+type internal struct {}
+
+var MaxRetries = 3
+
+const DefaultTimeout = 30
+
+var localCache = make(map[string]string)
+"#;
+        let path = Path::new("service.go");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"ProcessData".to_string()));
+        assert!(symbols.contains(&"Config".to_string()));
+        assert!(symbols.contains(&"MaxRetries".to_string()));
+        assert!(symbols.contains(&"DefaultTimeout".to_string()));
+        // Lowercase (unexported in Go) should NOT be captured
+        assert!(!symbols.contains(&"helper".to_string()));
+        assert!(!symbols.contains(&"internal".to_string()));
+        assert!(!symbols.contains(&"localCache".to_string()));
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_java() {
+        let content = r#"
+public class UserService {
+    public void process() {}
+}
+
+public interface Repository {
+    void save();
+}
+
+public enum Status {
+    ACTIVE, INACTIVE
+}
+
+public record UserDto(String name, int age) {}
+
+class InternalHelper {}
+"#;
+        let path = Path::new("UserService.java");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"UserService".to_string()));
+        assert!(symbols.contains(&"Repository".to_string()));
+        assert!(symbols.contains(&"Status".to_string()));
+        assert!(symbols.contains(&"UserDto".to_string()));
+        // Non-public should NOT be captured
+        assert!(!symbols.contains(&"InternalHelper".to_string()));
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_unknown_extension() {
+        let content = "some random content\nwith multiple lines";
+        let path = Path::new("readme.txt");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+        assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_empty_content() {
+        let path = Path::new("empty.rs");
+        let symbols = ChunkingStrategy::extract_exported_symbols("", path);
+        assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn test_extract_exported_symbols_jsx() {
+        let content = r#"
+export function App() { return <div />; }
+export const Header = () => <header />;
+"#;
+        let path = Path::new("App.jsx");
+        let symbols = ChunkingStrategy::extract_exported_symbols(content, path);
+
+        assert!(symbols.contains(&"App".to_string()));
+        assert!(symbols.contains(&"Header".to_string()));
     }
 }

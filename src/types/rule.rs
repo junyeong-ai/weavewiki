@@ -29,6 +29,18 @@ pub enum RuleCategory {
     Group,
     /// Domain-specific rules (priority 60, by keyword trigger)
     Domain,
+    /// Cross-cutting concern rules
+    CrossCutting,
+    /// Service-specific rules (priority 65)
+    Service,
+    /// Custom user-defined category
+    Custom,
+}
+
+impl std::fmt::Display for RuleCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl RuleCategory {
@@ -38,8 +50,11 @@ impl RuleCategory {
             Self::Tech => 90,
             Self::Framework => 85,
             Self::Module => 80,
+            Self::CrossCutting => 75,
             Self::Group => 70,
+            Self::Service => 65,
             Self::Domain => 60,
+            Self::Custom => 50,
         }
     }
 
@@ -49,8 +64,11 @@ impl RuleCategory {
             Self::Tech => "tech",
             Self::Framework => "frameworks",
             Self::Module => "modules",
+            Self::CrossCutting => "cross-cutting",
             Self::Group => "groups",
+            Self::Service => "services",
             Self::Domain => "domains",
+            Self::Custom => "custom",
         }
     }
 }
@@ -209,33 +227,33 @@ impl Rule {
         }
     }
 
-    pub fn with_tier(mut self, tier: ContentTier) -> Self {
+    pub fn tier(mut self, tier: ContentTier) -> Self {
         self.tier = tier;
         self
     }
 
-    pub fn with_paths(mut self, paths: Vec<String>) -> Self {
+    pub fn paths(mut self, paths: Vec<String>) -> Self {
         self.paths = Some(paths);
         self
     }
 
-    pub fn with_triggers(mut self, triggers: Vec<String>) -> Self {
+    pub fn triggers(mut self, triggers: Vec<String>) -> Self {
         self.triggers = Some(triggers);
         self
     }
 
-    pub fn with_priority(mut self, priority: u8) -> Self {
+    pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
 
-    pub fn with_category(mut self, category: RuleCategory) -> Self {
+    pub fn category(mut self, category: RuleCategory) -> Self {
         self.priority = category.default_priority();
         self.category = category;
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
         self
     }
@@ -288,6 +306,10 @@ impl Rule {
         } else {
             format!("{}/{}.md", subdir, self.name)
         }
+    }
+
+    pub fn artifact_category(&self) -> crate::types::ArtifactCategory {
+        crate::types::ArtifactCategory::for_rule()
     }
 
     pub fn validate(&self) -> Vec<ValidationIssue> {

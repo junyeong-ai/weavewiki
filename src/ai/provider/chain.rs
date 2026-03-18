@@ -64,17 +64,17 @@ impl ChainedProvider {
         Self::new(provider)
     }
 
-    pub fn with_cost(mut self, cost: f32) -> Self {
+    pub fn cost(mut self, cost: f32) -> Self {
         self.cost_per_1k = cost;
         self
     }
 
-    pub fn with_priority(mut self, priority: u8) -> Self {
+    pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
 
-    pub fn with_max_retries(mut self, retries: u8) -> Self {
+    pub fn max_retries(mut self, retries: u8) -> Self {
         self.max_retries = retries;
         self
     }
@@ -181,8 +181,8 @@ impl ProviderChain {
         for (idx, config) in configs.iter().enumerate() {
             let provider = super::create_provider(config).await?;
             let chained = ChainedProvider::from_shared(provider)
-                .with_priority(idx as u8)
-                .with_cost(estimate_cost(&config.provider));
+                .priority(idx as u8)
+                .cost(estimate_cost(&config.provider));
 
             chain.providers.push(chained);
         }
@@ -564,8 +564,8 @@ impl ProviderChainBuilder {
     pub fn add_provider(mut self, provider: impl LlmProvider + 'static) -> Self {
         let name = provider.name().to_string();
         let chained = ChainedProvider::new(Arc::new(provider))
-            .with_cost(estimate_cost(&name))
-            .with_priority(self.providers.len() as u8);
+            .cost(estimate_cost(&name))
+            .priority(self.providers.len() as u8);
         self.providers.push(chained);
         self
     }
@@ -574,8 +574,8 @@ impl ProviderChainBuilder {
     pub fn add_shared(mut self, provider: SharedProvider) -> Self {
         let name = provider.name().to_string();
         let chained = ChainedProvider::from_shared(provider)
-            .with_cost(estimate_cost(&name))
-            .with_priority(self.providers.len() as u8);
+            .cost(estimate_cost(&name))
+            .priority(self.providers.len() as u8);
         self.providers.push(chained);
         self
     }
@@ -587,13 +587,13 @@ impl ProviderChainBuilder {
     }
 
     /// Set chain configuration
-    pub fn with_config(mut self, config: ChainConfig) -> Self {
+    pub fn config(mut self, config: ChainConfig) -> Self {
         self.config = config;
         self
     }
 
     /// Set circuit breaker configuration
-    pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+    pub fn circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.config.circuit_breaker = config;
         self
     }
@@ -715,7 +715,7 @@ mod tests {
         let chain = ProviderChainBuilder::new()
             .add_provider(always_fail)
             .add_provider(MockProvider::new("fallback", false))
-            .with_config(ChainConfig {
+            .config(ChainConfig {
                 max_total_attempts: 10,
                 circuit_breaker: CircuitBreakerConfig {
                     failure_threshold: 5,

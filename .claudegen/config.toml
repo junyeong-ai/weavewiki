@@ -1,0 +1,19 @@
+# claudegen Project Configuration
+# Project-specific settings that override global defaults.
+
+version = "2.0"
+
+[project]
+name = "claudegen"
+type = "auto"
+
+# Analysis settings
+[analysis]
+include = ["**/*"]
+exclude = [
+    "node_modules/**",
+    "dist/**",
+    ".git/**",
+    "target/**",
+    "build/**",
+]

@@ -221,14 +221,14 @@ mod tests {
         let tech_stack = TechStack::new("rust");
         let modules = vec![
             DetectedModule::new("auth", "User authentication and authorization")
-                .with_paths(vec!["src/auth/".into()])
-                .with_key_files(vec!["src/auth/mod.rs".into()])
-                .with_dependencies(vec!["types".into()])
-                .with_conventions(vec![Convention::new(
+                .paths(vec!["src/auth/".into()])
+                .key_files(vec!["src/auth/mod.rs".into()])
+                .dependencies(vec!["types".into()])
+                .conventions(vec![Convention::new(
                     "secure-defaults",
                     "Always use secure defaults for auth settings",
                 )])
-                .with_known_issues(vec![KnownIssue::new(
+                .known_issues(vec![KnownIssue::new(
                     "session-timeout",
                     "Sessions may not timeout properly under load",
                     IssueSeverity::Medium,
@@ -273,7 +273,7 @@ mod tests {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![
-            DetectedModule::new("empty", "Empty module").with_paths(vec!["src/empty/".into()])
+            DetectedModule::new("empty", "Empty module").paths(vec!["src/empty/".into()])
         ];
         let groups = vec![];
 
@@ -295,23 +295,23 @@ mod tests {
     fn test_api_module_detection() {
         // Test module with "handler" in name
         let handler_module = DetectedModule::new("handlers", "HTTP handlers")
-            .with_paths(vec!["src/handlers/".into()]);
+            .paths(vec!["src/handlers/".into()]);
         assert!(ModuleRuleGenerator::is_api_module(&handler_module));
 
         // Test module with "api" in path
         let api_module = DetectedModule::new("v1", "API version 1")
-            .with_paths(vec!["src/api/v1/".into()]);
+            .paths(vec!["src/api/v1/".into()]);
         assert!(ModuleRuleGenerator::is_api_module(&api_module));
 
         // Test module with "controller" in key_files
         let controller_module = DetectedModule::new("users", "User management")
-            .with_paths(vec!["src/users/".into()])
-            .with_key_files(vec!["src/users/user_controller.rs".into()]);
+            .paths(vec!["src/users/".into()])
+            .key_files(vec!["src/users/user_controller.rs".into()]);
         assert!(ModuleRuleGenerator::is_api_module(&controller_module));
 
         // Test non-API module
         let internal_module = DetectedModule::new("utils", "Utility functions")
-            .with_paths(vec!["src/utils/".into()]);
+            .paths(vec!["src/utils/".into()]);
         assert!(!ModuleRuleGenerator::is_api_module(&internal_module));
     }
 
@@ -323,8 +323,8 @@ mod tests {
         let tech_stack = TechStack::new("rust");
         let modules = vec![
             DetectedModule::new("handlers", "HTTP request handlers")
-                .with_paths(vec!["src/handlers/".into()])
-                .with_conventions(vec![Convention::new(
+                .paths(vec!["src/handlers/".into()])
+                .conventions(vec![Convention::new(
                     "json-responses",
                     "Always return JSON responses",
                 )])

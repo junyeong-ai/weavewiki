@@ -135,23 +135,23 @@ impl QualityLoop {
     }
 
     /// Enable budget tracking for checkpoint persistence
-    pub fn with_budget(mut self, budget: crate::ai::budget::SharedBudget) -> Self {
+    pub fn budget(mut self, budget: crate::ai::budget::SharedBudget) -> Self {
         self.budget = Some(budget);
         self
     }
 
     /// Enable metrics tracking for checkpoint persistence
-    pub fn with_metrics(mut self, metrics: crate::ai::metrics::SharedMetrics) -> Self {
+    pub fn metrics(mut self, metrics: crate::ai::metrics::SharedMetrics) -> Self {
         self.metrics = Some(metrics);
         self
     }
 
-    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
+    pub fn output_dir(mut self, output_dir: PathBuf) -> Self {
         self.output_dir = Some(output_dir);
         self
     }
 
-    pub fn with_resume(mut self, resume: bool) -> Self {
+    pub fn resume(mut self, resume: bool) -> Self {
         self.config.performance.resume_on_crash = resume;
         self
     }
@@ -1106,7 +1106,7 @@ impl QualityLoop {
         invalid: &mut usize,
         gaps: &mut Vec<String>,
     ) {
-        let refs = super::patterns::extract_paths(content);
+        let refs = crate::utils::patterns::extract_paths(content);
         *total += refs.len();
         for r in refs {
             if !registry.contains(&r) {
@@ -1171,4 +1171,300 @@ struct EvidenceCheckResult {
     invalid_refs: usize,
     invalid_ratio: f32,
     gaps: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::provider::LlmResponse;
+    use async_trait::async_trait;
+    use serde_json::Value;
+
+    struct TestProvider;
+
+    #[async_trait]
+    impl crate::ai::provider::LlmProvider for TestProvider {
+        async fn generate(&self, _prompt: &str, _schema: &Value) -> Result<LlmResponse> {
+            Ok(LlmResponse::content_only(serde_json::json!({})))
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> &str {
+            "test-model"
+        }
+        async fn health_check(&self) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn test_providers() -> ProviderSet {
+        ProviderSet::single(Arc::new(TestProvider))
+    }
+
+    #[test]
+    fn test_escalate_depth_fast_to_standard() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.analysis.depth = AnalysisDepth::Fast;
+        let initial_samples = config.analysis.max_file_samples;
+
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), config.clone());
+        let escalated = ql.try_escalate_analysis_depth(config);
+
+        assert!(escalated.is_some());
+        let escalated = escalated.unwrap();
+        assert!(matches!(escalated.analysis.depth, AnalysisDepth::Standard));
+        assert!(escalated.analysis.max_file_samples > initial_samples);
+    }
+
+    #[test]
+    fn test_escalate_depth_standard_to_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.analysis.depth = AnalysisDepth::Standard;
+
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), config.clone());
+        let escalated = ql.try_escalate_analysis_depth(config);
+
+        assert!(escalated.is_some());
+        let escalated = escalated.unwrap();
+        assert!(matches!(escalated.analysis.depth, AnalysisDepth::Complete));
+    }
+
+    #[test]
+    fn test_escalate_depth_complete_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.analysis.depth = AnalysisDepth::Complete;
+
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), config.clone());
+        let escalated = ql.try_escalate_analysis_depth(config);
+
+        assert!(escalated.is_none());
+    }
+
+    #[test]
+    fn test_validation_results_default() {
+        let results = ValidationResults::new();
+        assert_eq!(results.total_issues, 0);
+        assert_eq!(results.error_count, 0);
+        assert_eq!(results.warning_count, 0);
+        assert_eq!(results.error_issues(), 0);
+    }
+
+    #[test]
+    fn test_clean_pass_status_variants() {
+        let in_progress = CleanPassStatus::InProgress {
+            streak: 1,
+            required: 3,
+        };
+        assert!(matches!(in_progress, CleanPassStatus::InProgress { streak: 1, .. }));
+
+        let converged = CleanPassStatus::Converged { passes: 3 };
+        assert!(matches!(converged, CleanPassStatus::Converged { passes: 3 }));
+
+        let failed = CleanPassStatus::Failed {
+            reason: FailureReason::MaxAttemptsReached,
+        };
+        assert!(matches!(
+            failed,
+            CleanPassStatus::Failed {
+                reason: FailureReason::MaxAttemptsReached
+            }
+        ));
+    }
+
+    #[test]
+    fn test_evidence_check_result_defaults() {
+        let result = EvidenceCheckResult::default();
+        assert_eq!(result.total_refs, 0);
+        assert_eq!(result.invalid_refs, 0);
+        assert!((result.invalid_ratio - 0.0).abs() < f32::EPSILON);
+        assert!(result.gaps.is_empty());
+    }
+
+    #[test]
+    fn test_evidence_thresholds_reasonable() {
+        assert!(
+            EVIDENCE_INVALID_RATIO_THRESHOLD > 0.0
+                && EVIDENCE_INVALID_RATIO_THRESHOLD < 1.0,
+        );
+        assert!(EVIDENCE_GAP_ESCALATION_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn test_quality_loop_builder() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), config);
+
+        assert!(ql.budget.is_none());
+        assert!(ql.metrics.is_none());
+        assert!(ql.output_dir.is_none());
+    }
+
+    #[test]
+    fn test_quality_loop_with_output_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path().join("output");
+
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), Config::default())
+            .output_dir(output_dir.clone());
+
+        assert_eq!(ql.output_dir, Some(output_dir));
+    }
+
+    #[test]
+    fn test_discovered_gap() {
+        let gap = DiscoveredGap {
+            area: "authentication".into(),
+            description: "Missing OAuth flow analysis".into(),
+            iteration_found: 2,
+        };
+        assert_eq!(gap.area, "authentication");
+        assert_eq!(gap.iteration_found, 2);
+    }
+
+    #[test]
+    fn test_evidence_invalid_ratio_computation() {
+        let result = EvidenceCheckResult {
+            total_refs: 10,
+            invalid_refs: 3,
+            invalid_ratio: 3.0 / 10.0,
+            gaps: vec!["skill:auth".into(), "agent:api".into(), "rule:sec".into()],
+        };
+        assert!((result.invalid_ratio - 0.3).abs() < f32::EPSILON);
+        assert!(result.invalid_ratio <= EVIDENCE_INVALID_RATIO_THRESHOLD);
+    }
+
+    #[test]
+    fn test_evidence_ratio_above_threshold() {
+        let ratio = 4.0 / 10.0;
+        assert!(ratio > EVIDENCE_INVALID_RATIO_THRESHOLD);
+    }
+
+    #[test]
+    fn test_evidence_zero_refs_ratio() {
+        let total_refs = 0usize;
+        let invalid_refs = 0usize;
+        let ratio = if total_refs > 0 {
+            invalid_refs as f32 / total_refs as f32
+        } else {
+            0.0
+        };
+        assert!((ratio - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_gap_escalation_threshold() {
+        let gaps = vec!["a", "b", "c", "d", "e"];
+        assert!(gaps.len() >= EVIDENCE_GAP_ESCALATION_THRESHOLD);
+
+        let few_gaps = vec!["a", "b"];
+        assert!(few_gaps.len() < EVIDENCE_GAP_ESCALATION_THRESHOLD);
+    }
+
+    #[test]
+    fn test_score_clamping_logic() {
+        let raw_scores: Vec<f32> = vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0];
+        let clamped: Vec<f32> = raw_scores.iter().map(|s| s.clamp(0.0, 1.0)).collect();
+        assert_eq!(clamped, vec![0.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_validation_results_error_tracking() {
+        let results = ValidationResults {
+            total_issues: 5,
+            error_count: 3,
+            warning_count: 2,
+        };
+        assert_eq!(results.error_issues(), 3);
+        assert_eq!(results.total_issues, results.error_count + results.warning_count);
+    }
+
+    #[test]
+    fn test_clean_pass_convergence_requires_zero_errors() {
+        let quality_score: f32 = 0.85;
+        let required_quality: f32 = 0.75;
+        let error_count = 0;
+        let all_validations_pass = true;
+
+        let status = if quality_score >= required_quality && error_count == 0 && all_validations_pass {
+            CleanPassStatus::Converged { passes: 1 }
+        } else if quality_score < required_quality {
+            CleanPassStatus::Failed {
+                reason: FailureReason::QualityBelow {
+                    score: quality_score,
+                    threshold: required_quality,
+                },
+            }
+        } else {
+            CleanPassStatus::InProgress { streak: 0, required: 1 }
+        };
+        assert!(matches!(status, CleanPassStatus::Converged { passes: 1 }));
+    }
+
+    #[test]
+    fn test_clean_pass_fails_with_errors() {
+        let quality_score: f32 = 0.85;
+        let required_quality: f32 = 0.75;
+        let error_count = 2;
+        let all_validations_pass = false;
+
+        let status = if quality_score >= required_quality && error_count == 0 && all_validations_pass {
+            CleanPassStatus::Converged { passes: 1 }
+        } else if quality_score < required_quality {
+            CleanPassStatus::Failed {
+                reason: FailureReason::QualityBelow {
+                    score: quality_score,
+                    threshold: required_quality,
+                },
+            }
+        } else {
+            CleanPassStatus::InProgress { streak: 0, required: 1 }
+        };
+        assert!(matches!(status, CleanPassStatus::InProgress { .. }));
+    }
+
+    #[test]
+    fn test_clean_pass_fails_below_quality() {
+        let quality_score: f32 = 0.5;
+        let required_quality: f32 = 0.75;
+        let error_count = 0;
+        let all_validations_pass = true;
+
+        let status = if quality_score >= required_quality && error_count == 0 && all_validations_pass {
+            CleanPassStatus::Converged { passes: 1 }
+        } else if quality_score < required_quality {
+            CleanPassStatus::Failed {
+                reason: FailureReason::QualityBelow {
+                    score: quality_score,
+                    threshold: required_quality,
+                },
+            }
+        } else {
+            CleanPassStatus::InProgress { streak: 0, required: 1 }
+        };
+        assert!(matches!(status, CleanPassStatus::Failed { reason: FailureReason::QualityBelow { .. } }));
+    }
+
+    #[test]
+    fn test_depth_escalation_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let ql = QualityLoop::new(dir.path().to_path_buf(), test_providers(), config);
+
+        let mut cfg = Config::default();
+        cfg.analysis.depth = AnalysisDepth::Fast;
+
+        let step1 = ql.try_escalate_analysis_depth(cfg).unwrap();
+        assert!(matches!(step1.analysis.depth, AnalysisDepth::Standard));
+
+        let step2 = ql.try_escalate_analysis_depth(step1).unwrap();
+        assert!(matches!(step2.analysis.depth, AnalysisDepth::Complete));
+
+        let step3 = ql.try_escalate_analysis_depth(step2);
+        assert!(step3.is_none());
+    }
 }

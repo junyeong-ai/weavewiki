@@ -92,7 +92,7 @@ impl ProjectDetection {
                     HintCategory::ProjectType,
                     format!("{}: {:.1}% of codebase", lang.language, lang.percentage),
                 )
-                .with_evidence([format!("{} files", lang.file_count)]),
+                .evidence([format!("{} files", lang.file_count)]),
             );
         }
 
@@ -110,7 +110,7 @@ impl ProjectDetection {
                         HintCategory::ProjectType,
                         format!("{:?} suggested by {}", signal.suggests, signal.source),
                     )
-                    .with_evidence(["Dependency detected in manifest, usage not verified"])
+                    .evidence(["Dependency detected in manifest, usage not verified"])
                 }
                 // Directory structure is medium confidence (naming != purpose)
                 SignalType::DirectoryStructure => AnalysisHint::medium_confidence(
@@ -120,7 +120,7 @@ impl ProjectDetection {
                         signal.suggests, signal.source
                     ),
                 )
-                .with_evidence(["Directory exists, actual purpose needs verification"]),
+                .evidence(["Directory exists, actual purpose needs verification"]),
                 // Tool config is high confidence
                 SignalType::ToolConfig => AnalysisHint::high_confidence(
                     HintCategory::ProjectType,
@@ -139,7 +139,7 @@ impl ProjectDetection {
                     HintCategory::ProjectType,
                     format!("{:?} with {} members", ws.workspace_type, ws.members.len()),
                 )
-                .with_evidence(ws.members.iter().map(|m| m.path.clone())),
+                .evidence(ws.members.iter().map(|m| m.path.clone())),
             );
         }
 
@@ -193,6 +193,12 @@ pub enum WorkspaceType {
     MavenMultiModule,
     GoWorkspace,
     Unknown,
+}
+
+impl std::fmt::Display for WorkspaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

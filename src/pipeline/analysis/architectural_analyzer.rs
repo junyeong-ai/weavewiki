@@ -39,17 +39,17 @@ impl ArchitecturalAnalysis {
         Self::default()
     }
 
-    pub fn with_modules(mut self, modules: Vec<CoreModule>) -> Self {
+    pub fn modules(mut self, modules: Vec<CoreModule>) -> Self {
         self.modules = modules;
         self
     }
 
-    pub fn with_entry_points(mut self, entry_points: Vec<EntryPoint>) -> Self {
+    pub fn entry_points(mut self, entry_points: Vec<EntryPoint>) -> Self {
         self.entry_points = entry_points;
         self
     }
 
-    pub fn with_layers(mut self, layers: Vec<String>) -> Self {
+    pub fn layers(mut self, layers: Vec<String>) -> Self {
         self.layers = layers;
         self
     }

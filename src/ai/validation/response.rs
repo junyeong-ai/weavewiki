@@ -124,13 +124,13 @@ impl ResponseValidator {
             Some(Value::String(s)) if !s.is_empty() => {}
             Some(Value::String(_)) => {
                 result.add(
-                    ValidationIssue::error("FILE001", "Empty file path").with_location(&location),
+                    ValidationIssue::error("FILE001", "Empty file path").location(&location),
                 );
             }
             _ => {
                 result.add(
                     ValidationIssue::error("FILE002", "Missing or invalid 'path'")
-                        .with_location(&location),
+                        .location(&location),
                 );
             }
         }
@@ -150,7 +150,7 @@ impl ResponseValidator {
             _ => {
                 result.add(
                     ValidationIssue::error("FILE003", "Missing or invalid 'sections' array")
-                        .with_location(format!("files[{idx}].sections")),
+                        .location(format!("files[{idx}].sections")),
                 );
             }
         }
@@ -165,7 +165,7 @@ impl ResponseValidator {
                         "Invalid complexity '{complexity}', expected: low, medium, high, critical"
                     ),
                 )
-                .with_location(format!("files[{idx}].complexity")),
+                .location(format!("files[{idx}].complexity")),
             );
         }
 
@@ -178,7 +178,7 @@ impl ResponseValidator {
                     "FILE005",
                     format!("Confidence {c} out of range [0.0, 1.0]"),
                 )
-                .with_location(format!("files[{idx}].confidence")),
+                .location(format!("files[{idx}].confidence")),
             );
         }
 
@@ -190,7 +190,7 @@ impl ResponseValidator {
         {
             result.add(
                 ValidationIssue::info("FILE006", "Missing purpose_summary")
-                    .with_location(format!("files[{idx}]")),
+                    .location(format!("files[{idx}]")),
             );
         }
 
@@ -202,7 +202,7 @@ impl ResponseValidator {
         {
             result.add(
                 ValidationIssue::info("FILE007", "No key_insights provided")
-                    .with_location(format!("files[{idx}]")),
+                    .location(format!("files[{idx}]")),
             );
         }
 
@@ -214,7 +214,7 @@ impl ResponseValidator {
         {
             result.add(
                 ValidationIssue::info("FILE008", "No hidden_assumptions identified")
-                    .with_location(format!("files[{idx}]")),
+                    .location(format!("files[{idx}]")),
             );
         }
 
@@ -226,7 +226,7 @@ impl ResponseValidator {
         {
             result.add(
                 ValidationIssue::info("FILE009", "No modification_risks identified")
-                    .with_location(format!("files[{idx}]")),
+                    .location(format!("files[{idx}]")),
             );
         }
 
@@ -250,14 +250,14 @@ impl ResponseValidator {
         {
             result.add(
                 ValidationIssue::warning("SEC001", "Missing or empty section_name")
-                    .with_location(&location),
+                    .location(&location),
             );
         }
 
         if section.get("content").is_none() {
             result.add(
                 ValidationIssue::warning("SEC002", "Missing content field")
-                    .with_location(&location),
+                    .location(&location),
             );
         }
 
@@ -268,7 +268,7 @@ impl ResponseValidator {
                         "SEC003",
                         "Empty evidence_lines - sections should cite line numbers",
                     )
-                    .with_location(&location),
+                    .location(&location),
                 );
             }
             Some(Value::Array(lines)) => {
@@ -280,7 +280,7 @@ impl ResponseValidator {
                                     "SEC004",
                                     "Line number 0 is invalid (lines start at 1)",
                                 )
-                                .with_location(format!("{location}:evidence_lines[{line_idx}]")),
+                                .location(format!("{location}:evidence_lines[{line_idx}]")),
                             );
                         }
                         None if !line.is_u64() => {
@@ -289,7 +289,7 @@ impl ResponseValidator {
                                     "SEC005",
                                     format!("Invalid line number: {line:?}"),
                                 )
-                                .with_location(format!("{location}:evidence_lines[{line_idx}]")),
+                                .location(format!("{location}:evidence_lines[{line_idx}]")),
                             );
                         }
                         _ => {}
@@ -302,7 +302,7 @@ impl ResponseValidator {
                         "SEC006",
                         "Missing evidence_lines - all claims need evidence",
                     )
-                    .with_location(&location),
+                    .location(&location),
                 );
             }
         }
@@ -317,7 +317,7 @@ impl ResponseValidator {
                         "Non-standard importance '{importance}', expected: critical, high, medium, low"
                     ),
                 )
-                .with_location(&location),
+                .location(&location),
             );
         }
     }

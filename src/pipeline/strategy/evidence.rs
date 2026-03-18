@@ -66,7 +66,7 @@ impl EvidenceStrategy {
         }
     }
 
-    pub fn with_feedback_config(mut self, config: EvidenceFeedbackConfig) -> Self {
+    pub fn feedback_config(mut self, config: EvidenceFeedbackConfig) -> Self {
         self.config = config;
         self
     }
@@ -342,31 +342,7 @@ impl RefinementStrategy for EvidenceStrategy {
                     tracing::debug!(skill = %skill.name, reason = %reason, "No improvement");
                     Ok(StrategyResult::default())
                 }
-                EvidenceResult::Disabled => {
-                    // Single-pass fallback
-                    if let Some(enhanced) = self
-                        .enhance_content("skill", &skill.name, &skill.body, context)
-                        .await?
-                    {
-                        let new_refs = self.count_references(&enhanced, context);
-                        let new_quality =
-                            calculate_validated_quality(&enhanced, context.file_registry);
-                        skill.body = enhanced;
-                        Ok(StrategyResult {
-                            success: true,
-                            quality_delta: new_quality - old_quality,
-                            changes_made: vec![format!(
-                                "Added {} refs to skill '{}' (quality: {:.0}% -> {:.0}%)",
-                                new_refs - old_refs,
-                                skill.name,
-                                old_quality * 100.0,
-                                new_quality * 100.0
-                            )],
-                        })
-                    } else {
-                        Ok(StrategyResult::default())
-                    }
-                }
+                EvidenceResult::Disabled => unreachable!("feedback loop is enabled"),
             };
         }
 

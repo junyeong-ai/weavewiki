@@ -45,49 +45,49 @@ impl DetectedModule {
         }
     }
 
-    pub fn with_paths(mut self, paths: Vec<String>) -> Self {
+    pub fn paths(mut self, paths: Vec<String>) -> Self {
         self.paths = paths;
         self
     }
 
-    pub fn with_key_files(mut self, key_files: Vec<String>) -> Self {
+    pub fn key_files(mut self, key_files: Vec<String>) -> Self {
         self.key_files = key_files;
         self
     }
 
-    pub fn with_dependencies(mut self, dependencies: Vec<String>) -> Self {
+    pub fn dependencies(mut self, dependencies: Vec<String>) -> Self {
         self.dependencies = dependencies;
         self
     }
 
-    pub fn with_dependents(mut self, dependents: Vec<String>) -> Self {
+    pub fn dependents(mut self, dependents: Vec<String>) -> Self {
         self.dependents = dependents;
         self
     }
 
-    pub fn with_metrics(mut self, coverage: f64, value: f64, risk: f64) -> Self {
+    pub fn metrics(mut self, coverage: f64, value: f64, risk: f64) -> Self {
         self.coverage_ratio = coverage;
         self.value_score = value;
         self.risk_score = risk;
         self
     }
 
-    pub fn with_conventions(mut self, conventions: Vec<Convention>) -> Self {
+    pub fn conventions(mut self, conventions: Vec<Convention>) -> Self {
         self.conventions = conventions;
         self
     }
 
-    pub fn with_known_issues(mut self, issues: Vec<KnownIssue>) -> Self {
+    pub fn known_issues(mut self, issues: Vec<KnownIssue>) -> Self {
         self.known_issues = issues;
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
         self
     }
 
-    pub fn with_language(mut self, language: impl Into<String>) -> Self {
+    pub fn language(mut self, language: impl Into<String>) -> Self {
         self.primary_language = Some(language.into());
         self
     }
@@ -124,6 +124,34 @@ impl From<DetectedModule> for Module {
     }
 }
 
+/// High-level domain grouping of related module groups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Domain {
+    pub name: String,
+    pub id: String,
+    pub responsibility: String,
+    pub group_ids: Vec<String>,
+    pub owner: String,
+    pub interfaces: Vec<String>,
+    pub boundary_rules: Vec<String>,
+}
+
+impl Domain {
+    pub fn new(name: impl Into<String>, responsibility: impl Into<String>) -> Self {
+        let name_str: String = name.into();
+        let id = crate::utils::to_kebab_case(&name_str);
+        Self {
+            name: name_str,
+            id,
+            responsibility: responsibility.into(),
+            group_ids: Vec::new(),
+            owner: String::new(),
+            interfaces: Vec::new(),
+            boundary_rules: Vec::new(),
+        }
+    }
+}
+
 pub fn claudegen_generator() -> GeneratorInfo {
     GeneratorInfo::new("claudegen", env!("CARGO_PKG_VERSION"))
 }
@@ -157,28 +185,28 @@ mod tests {
     #[test]
     fn test_detected_module_builder() {
         let dm = DetectedModule::new("pipeline", "Orchestrates generation pipeline")
-            .with_paths(vec!["src/pipeline/".into()])
-            .with_key_files(vec!["src/pipeline/adaptive.rs".into()])
-            .with_dependencies(vec!["types".into()])
-            .with_dependents(vec!["cli".into()])
-            .with_metrics(0.85, 0.9, 0.3)
-            .with_conventions(vec![Convention::new(
+            .paths(vec!["src/pipeline/".into()])
+            .key_files(vec!["src/pipeline/adaptive.rs".into()])
+            .dependencies(vec!["types".into()])
+            .dependents(vec!["cli".into()])
+            .metrics(0.85, 0.9, 0.3)
+            .conventions(vec![Convention::new(
                 "phase-execution",
                 "Execute phases sequentially",
             )])
-            .with_known_issues(vec![KnownIssue::new(
+            .known_issues(vec![KnownIssue::new(
                 "oscillation",
                 "Quality loop oscillation",
                 IssueSeverity::Medium,
                 IssueCategory::Correctness,
             )
             .with_prevention("Use strategy rotation")])
-            .with_evidence(vec![EvidenceLocation::new_range(
+            .evidence(vec![EvidenceLocation::new_range(
                 "src/pipeline/adaptive.rs",
                 64,
                 80,
             )])
-            .with_language("rust");
+            .language("rust");
 
         let module: Module = dm.into();
         assert_eq!(module.id, "pipeline");
@@ -191,8 +219,8 @@ mod tests {
     #[test]
     fn test_create_module_map() {
         let modules = vec![DetectedModule::new("types", "Domain types")
-            .with_paths(vec!["src/types/".into()])
-            .with_metrics(1.0, 0.8, 0.1)];
+            .paths(vec!["src/types/".into()])
+            .metrics(1.0, 0.8, 0.1)];
 
         let tech_stack = TechStack::new("rust").with_version("1.92");
 

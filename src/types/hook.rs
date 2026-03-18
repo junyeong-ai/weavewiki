@@ -51,7 +51,7 @@ impl Hook {
         }
     }
 
-    pub fn with_once(mut self) -> Self {
+    pub fn once(mut self) -> Self {
         if let Some(cmd) = self.hooks.first_mut() {
             cmd.once = Some(true);
         }

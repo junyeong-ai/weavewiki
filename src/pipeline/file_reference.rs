@@ -110,6 +110,19 @@ pub fn count_references_with_ranges(content: &str) -> usize {
         .count()
 }
 
+/// Check if a file reference is valid against the registry.
+pub fn is_valid_file_ref(path: &str, line_start: Option<u32>, registry: &VerifiedFileRegistry) -> bool {
+    if !registry.contains(path) {
+        return false;
+    }
+    if let Some(line) = line_start
+        && let Some(max_lines) = registry.line_count(path)
+    {
+        return (line as usize) <= max_lines;
+    }
+    true
+}
+
 /// Validation result for a file reference
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceValidation {

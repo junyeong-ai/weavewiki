@@ -108,7 +108,7 @@ impl FeedbackAggregator {
         }
     }
 
-    pub fn with_weights(mut self, quality: f32, structural: f32, evidence: f32) -> Self {
+    pub fn weights(mut self, quality: f32, structural: f32, evidence: f32) -> Self {
         let total = quality + structural + evidence;
         self.quality_weight = quality / total;
         self.structural_weight = structural / total;
@@ -116,7 +116,7 @@ impl FeedbackAggregator {
         self
     }
 
-    pub fn with_dimension_threshold(mut self, threshold: f32) -> Self {
+    pub fn dimension_threshold(mut self, threshold: f32) -> Self {
         self.dimension_pass_threshold = threshold;
         self
     }
@@ -328,6 +328,7 @@ mod tests {
             tier: ContentTier::Tier3Constraint,
             issues: Vec::new(),
             suggestions: Vec::new(),
+            value_assessment: None,
         };
 
         let feedback = aggregator.aggregate(&judgment, None, None);

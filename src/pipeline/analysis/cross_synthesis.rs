@@ -63,6 +63,12 @@ pub enum HiddenDependencyType {
     Unknown,
 }
 
+impl std::fmt::Display for HiddenDependencyType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 /// Constraint that spans multiple modules
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossModuleConstraint {
@@ -88,6 +94,12 @@ pub enum CrossConstraintType {
     Unknown,
 }
 
+impl std::fmt::Display for CrossConstraintType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 /// Architecture pattern violation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitectureViolation {
@@ -107,6 +119,12 @@ pub enum ViolationType {
     WrongDirection,
     MissingAbstraction,
     LeakyAbstraction,
+}
+
+impl std::fmt::Display for ViolationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Policy implementation violation
@@ -158,6 +176,22 @@ pub enum Tier3Category {
     StateInvariant,
     SecurityBoundary,
     PerformanceTrap,
+}
+
+impl std::fmt::Display for Tier3Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// Discovered insight from cross-analysis (used in generation prompts)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredInsight {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+    pub evidence: Vec<EvidenceLocation>,
+    pub prevention_guidance: String,
 }
 
 /// Tier2 insight (project convention)

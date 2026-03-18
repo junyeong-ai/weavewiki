@@ -28,6 +28,8 @@ pub struct ProjectMemory {
     /// Critical constraints and gotchas (Tier 3 insights)
     #[serde(default)]
     pub gotchas: Vec<String>,
+    /// Navigation map for module-to-artifact mapping
+    pub navigation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +49,7 @@ impl ProjectMemory {
             imports: Vec::new(),
             domain_knowledge: None,
             gotchas: Vec::new(),
+            navigation: None,
         }
     }
 

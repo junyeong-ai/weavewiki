@@ -55,31 +55,31 @@ impl Node {
     }
 
     /// Sets the metadata for this node
-    pub fn with_metadata(mut self, metadata: NodeMetadata) -> Self {
+    pub fn metadata(mut self, metadata: NodeMetadata) -> Self {
         self.metadata = metadata;
         self
     }
 
     /// Sets the evidence location for this node
-    pub fn with_evidence(mut self, evidence: EvidenceLocation) -> Self {
+    pub fn evidence(mut self, evidence: EvidenceLocation) -> Self {
         self.evidence = evidence;
         self
     }
 
     /// Sets the information tier for this node
-    pub fn with_tier(mut self, tier: InformationTier) -> Self {
+    pub fn tier(mut self, tier: InformationTier) -> Self {
         self.tier = tier;
         self
     }
 
     /// Sets the confidence score for this node
-    pub fn with_confidence(mut self, confidence: f32) -> Self {
+    pub fn confidence(mut self, confidence: f32) -> Self {
         self.confidence = confidence;
         self
     }
 
     /// Sets the status for this node
-    pub fn with_status(mut self, status: NodeStatus) -> Self {
+    pub fn status(mut self, status: NodeStatus) -> Self {
         self.status = status;
         self
     }

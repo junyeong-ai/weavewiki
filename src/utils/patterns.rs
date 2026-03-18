@@ -45,6 +45,30 @@ pub struct FileRef {
 }
 
 impl FileRef {
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            line_start: None,
+            line_end: None,
+        }
+    }
+
+    pub fn with_line(path: String, line: u32) -> Self {
+        Self {
+            path,
+            line_start: Some(line),
+            line_end: None,
+        }
+    }
+
+    pub fn with_range(path: String, start: u32, end: u32) -> Self {
+        Self {
+            path,
+            line_start: Some(start),
+            line_end: Some(end),
+        }
+    }
+
     pub fn has_line_info(&self) -> bool {
         self.line_start.is_some()
     }

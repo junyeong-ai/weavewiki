@@ -186,39 +186,39 @@ impl IterationRecord {
         }
     }
 
-    pub fn with_revision(mut self, iteration: usize, reason: &str) -> Self {
+    pub fn revision(mut self, iteration: usize, reason: &str) -> Self {
         self.is_revision = true;
         self.revises_iteration = Some(iteration);
         self.revision_reason = Some(reason.to_string());
         self
     }
 
-    pub fn with_rationale(mut self, rationale: &str) -> Self {
+    pub fn rationale(mut self, rationale: &str) -> Self {
         self.decision_rationale = rationale.to_string();
         self
     }
 
-    pub fn with_quality_after(mut self, quality: f32) -> Self {
+    pub fn quality_after(mut self, quality: f32) -> Self {
         self.quality_after = quality;
         self
     }
 
-    pub fn with_uncertainty(mut self, uncertainty: f32) -> Self {
+    pub fn uncertainty(mut self, uncertainty: f32) -> Self {
         self.uncertainty = uncertainty;
         self
     }
 
-    pub fn with_strategies(mut self, strategies: Vec<String>) -> Self {
+    pub fn strategies(mut self, strategies: Vec<String>) -> Self {
         self.strategies_used = strategies;
         self
     }
 
-    pub fn with_changes(mut self, changes: Vec<String>) -> Self {
+    pub fn changes(mut self, changes: Vec<String>) -> Self {
         self.changes_made = changes;
         self
     }
 
-    pub fn with_issues(mut self, issues: Vec<String>) -> Self {
+    pub fn issues(mut self, issues: Vec<String>) -> Self {
         self.issues_addressed = issues;
         self
     }
@@ -314,9 +314,9 @@ mod tests {
     #[test]
     fn test_iteration_record() {
         let record = IterationRecord::new(1, 0.5)
-            .with_quality_after(0.7)
-            .with_rationale("Improve actionability")
-            .with_strategies(vec!["SemanticStrategy".into()])
+            .quality_after(0.7)
+            .rationale("Improve actionability")
+            .strategies(vec!["SemanticStrategy".into()])
             .needs_continuation(true);
 
         assert!((record.improvement() - 0.2).abs() < 0.001);
@@ -327,8 +327,8 @@ mod tests {
     #[test]
     fn test_revision_tracking() {
         let record = IterationRecord::new(3, 0.6)
-            .with_revision(1, "Previous strategy failed")
-            .with_quality_after(0.75);
+            .revision(1, "Previous strategy failed")
+            .quality_after(0.75);
 
         assert!(record.is_revision);
         assert_eq!(record.revises_iteration, Some(1));

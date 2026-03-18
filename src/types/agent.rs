@@ -119,7 +119,7 @@ impl AgentExample {
         }
     }
 
-    pub fn with_commentary(mut self, commentary: &str) -> Self {
+    pub fn commentary(mut self, commentary: &str) -> Self {
         self.commentary = Some(commentary.to_string());
         self
     }
@@ -244,12 +244,12 @@ impl ConsensusRole {
         }
     }
 
-    pub fn with_veto(mut self) -> Self {
+    pub fn veto(mut self) -> Self {
         self.can_veto = true;
         self
     }
 
-    pub fn with_threshold(mut self, threshold: f64) -> Self {
+    pub fn threshold(mut self, threshold: f64) -> Self {
         self.vote_threshold = threshold;
         self
     }
@@ -311,52 +311,52 @@ impl Agent {
         self.quality = Self::calculate_quality(&self.prompt);
     }
 
-    pub fn with_color(mut self, color: AgentColor) -> Self {
+    pub fn color(mut self, color: AgentColor) -> Self {
         self.color = Some(color);
         self
     }
 
-    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+    pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.tools = Some(tools);
         self
     }
 
-    pub fn with_model(mut self, model: AgentModel) -> Self {
+    pub fn model(mut self, model: AgentModel) -> Self {
         self.model = Some(model);
         self
     }
 
-    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+    pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = Some(mode);
         self
     }
 
-    pub fn with_example(mut self, example: AgentExample) -> Self {
+    pub fn example(mut self, example: AgentExample) -> Self {
         self.examples.push(example);
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<EvidenceLocation>) -> Self {
         self.evidence = evidence;
         self
     }
 
-    pub fn with_disallowed_tools(mut self, tools: Vec<String>) -> Self {
+    pub fn disallowed_tools(mut self, tools: Vec<String>) -> Self {
         self.disallowed_tools = Some(tools);
         self
     }
 
-    pub fn with_skills(mut self, skills: Vec<String>) -> Self {
+    pub fn skills(mut self, skills: Vec<String>) -> Self {
         self.skills = Some(skills);
         self
     }
 
-    pub fn with_consensus(mut self, consensus: ConsensusRole) -> Self {
+    pub fn consensus(mut self, consensus: ConsensusRole) -> Self {
         self.consensus = Some(consensus);
         self
     }
 
-    pub fn with_hooks(mut self, hooks: ToolHooks) -> Self {
+    pub fn hooks(mut self, hooks: ToolHooks) -> Self {
         self.hooks = Some(hooks);
         self
     }
@@ -410,6 +410,10 @@ impl Agent {
             format!("name: \"{}\"\n", self.name.replace('"', "\\\""))
         });
         format!("---\n{}---\n\n{}", yaml, self.build_prompt_with_examples())
+    }
+
+    pub fn artifact_category(&self) -> crate::types::ArtifactCategory {
+        crate::types::ArtifactCategory::for_agent(&self.name)
     }
 
     pub fn validate(&self) -> Vec<ValidationIssue> {
@@ -492,9 +496,9 @@ mod tests {
             "Use this agent for code review.",
             "You are a code reviewer.",
         )
-        .with_color(AgentColor::Blue)
-        .with_model(AgentModel::Sonnet)
-        .with_tools(vec!["Read".to_string(), "Grep".to_string()]);
+        .color(AgentColor::Blue)
+        .model(AgentModel::Sonnet)
+        .tools(vec!["Read".to_string(), "Grep".to_string()]);
 
         let md = agent.to_markdown();
         assert!(md.contains("name:"), "missing name field");
@@ -518,7 +522,7 @@ mod tests {
     #[test]
     fn test_agent_examples_in_prompt_body() {
         let agent = Agent::new("test-agent", "Test description", "Test prompt")
-            .with_example(AgentExample::new("ctx", "user msg", "assistant msg"));
+            .example(AgentExample::new("ctx", "user msg", "assistant msg"));
 
         let md = agent.to_markdown();
         assert!(md.contains("Test description"), "missing description");

@@ -159,8 +159,8 @@ mod tests {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![
-            DetectedModule::new("auth", "Authentication").with_paths(vec!["src/auth/".into()]),
-            DetectedModule::new("users", "User management").with_paths(vec!["src/users/".into()]),
+            DetectedModule::new("auth", "Authentication").paths(vec!["src/auth/".into()]),
+            DetectedModule::new("users", "User management").paths(vec!["src/users/".into()]),
         ];
         let groups = vec![ModuleGroup::new(
             "identity",

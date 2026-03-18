@@ -341,6 +341,7 @@ mod tests {
             imports: Vec::new(),
             domain_knowledge: None,
             gotchas: Vec::new(),
+            navigation: None,
         };
 
         let result = PlanConsistencyResult::check(&[], &[], &claude_md);

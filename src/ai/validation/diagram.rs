@@ -52,7 +52,7 @@ impl DiagramValidation {
         }
     }
 
-    pub fn with_warnings(mut self, warnings: Vec<DiagramWarning>) -> Self {
+    pub fn warnings(mut self, warnings: Vec<DiagramWarning>) -> Self {
         self.warnings = warnings;
         self
     }
@@ -75,7 +75,7 @@ impl DiagramError {
         }
     }
 
-    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+    pub fn suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
         self
     }
@@ -220,7 +220,7 @@ impl DiagramValidator {
             if open_brackets != close_brackets {
                 errors.push(
                     DiagramError::new(line_num, "Unclosed bracket")
-                        .with_suggestion("Check matching [] or ()"),
+                        .suggestion("Check matching [] or ()"),
                 );
             }
 
@@ -229,7 +229,7 @@ impl DiagramValidator {
             if quotes % 2 != 0 {
                 errors.push(
                     DiagramError::new(line_num, "Unclosed quote")
-                        .with_suggestion("Check matching \"\""),
+                        .suggestion("Check matching \"\""),
                 );
             }
 
@@ -285,9 +285,9 @@ impl DiagramValidator {
         }
 
         if errors.is_empty() {
-            DiagramValidation::valid("flowchart").with_warnings(warnings)
+            DiagramValidation::valid("flowchart").warnings(warnings)
         } else {
-            DiagramValidation::invalid("flowchart", errors).with_warnings(warnings)
+            DiagramValidation::invalid("flowchart", errors).warnings(warnings)
         }
     }
 
@@ -318,7 +318,7 @@ impl DiagramValidator {
                 if !line.contains(':') {
                     errors.push(
                         DiagramError::new(line_num, "Message arrow missing ':' and label")
-                            .with_suggestion("Format: A->>B: Message"),
+                            .suggestion("Format: A->>B: Message"),
                     );
                 }
             }
@@ -331,7 +331,7 @@ impl DiagramValidator {
                 if !remaining.contains("end note") {
                     errors.push(
                         DiagramError::new(line_num, "Unclosed note block")
-                            .with_suggestion("Add 'end note' to close"),
+                            .suggestion("Add 'end note' to close"),
                     );
                 }
             }
@@ -375,7 +375,7 @@ impl DiagramValidator {
                 if line.contains("::") && line.matches("::").count() > 2 {
                     errors.push(
                         DiagramError::new(line_num, "Too many :: separators")
-                            .with_suggestion("Check class method syntax"),
+                            .suggestion("Check class method syntax"),
                     );
                 }
             }
@@ -426,7 +426,7 @@ impl DiagramValidator {
                 {
                     errors.push(
                         DiagramError::new(line_num, "State name should start with letter")
-                            .with_suggestion("Use alphabetic state names"),
+                            .suggestion("Use alphabetic state names"),
                     );
                 }
             }
@@ -435,7 +435,7 @@ impl DiagramValidator {
         if open_states > 0 {
             errors.push(
                 DiagramError::new(0, format!("{open_states} unclosed state blocks"))
-                    .with_suggestion("Add closing braces"),
+                    .suggestion("Add closing braces"),
             );
         }
 
@@ -464,7 +464,7 @@ impl DiagramValidator {
                 if !line.contains(':') {
                     errors.push(
                         DiagramError::new(line_num, "ER relationship missing ':' label")
-                            .with_suggestion("Format: ENTITY1 ||--o{ ENTITY2 : label"),
+                            .suggestion("Format: ENTITY1 ||--o{ ENTITY2 : label"),
                     );
                 }
             }
@@ -520,7 +520,7 @@ impl DiagramValidator {
                 if !line.contains(':') {
                     errors.push(
                         DiagramError::new(line_num, "Task missing ':' separator")
-                            .with_suggestion("Format: Task name : status, date, duration"),
+                            .suggestion("Format: Task name : status, date, duration"),
                     );
                 }
             }
@@ -529,7 +529,7 @@ impl DiagramValidator {
         if !has_title {
             errors.push(
                 DiagramError::new(0, "Gantt chart missing 'title'")
-                    .with_suggestion("Add 'title Chart Title'"),
+                    .suggestion("Add 'title Chart Title'"),
             );
         }
 
@@ -571,7 +571,7 @@ impl DiagramValidator {
                 if !line.contains(':') {
                     errors.push(
                         DiagramError::new(line_num, "Pie slice missing ':' and value")
-                            .with_suggestion("Format: \"Label\" : 42"),
+                            .suggestion("Format: \"Label\" : 42"),
                     );
                 }
             }
@@ -580,7 +580,7 @@ impl DiagramValidator {
         if !has_data {
             errors.push(
                 DiagramError::new(0, "Pie chart has no data slices")
-                    .with_suggestion("Add slices like: \"Label\" : 25"),
+                    .suggestion("Add slices like: \"Label\" : 25"),
             );
         }
 
@@ -602,7 +602,7 @@ impl DiagramValidator {
         if open_braces != close_braces {
             errors.push(
                 DiagramError::new(0, "Mismatched braces")
-                    .with_suggestion(format!("Found {open_braces} '{{' and {close_braces} '}}'")),
+                    .suggestion(format!("Found {open_braces} '{{' and {close_braces} '}}'")),
             );
         }
 
@@ -610,7 +610,7 @@ impl DiagramValidator {
         let close_brackets = content.matches(']').count();
         if open_brackets != close_brackets {
             errors.push(
-                DiagramError::new(0, "Mismatched brackets").with_suggestion(format!(
+                DiagramError::new(0, "Mismatched brackets").suggestion(format!(
                     "Found {open_brackets} '[' and {close_brackets} ']'"
                 )),
             );
@@ -621,7 +621,7 @@ impl DiagramValidator {
         if open_parens != close_parens {
             errors.push(
                 DiagramError::new(0, "Mismatched parentheses")
-                    .with_suggestion(format!("Found {open_parens} '(' and {close_parens} ')'")),
+                    .suggestion(format!("Found {open_parens} '(' and {close_parens} ')'")),
             );
         }
 
@@ -646,9 +646,9 @@ impl DiagramValidator {
         }
 
         if errors.is_empty() {
-            DiagramValidation::valid("unknown").with_warnings(warnings)
+            DiagramValidation::valid("unknown").warnings(warnings)
         } else {
-            DiagramValidation::invalid("unknown", errors).with_warnings(warnings)
+            DiagramValidation::invalid("unknown", errors).warnings(warnings)
         }
     }
 }

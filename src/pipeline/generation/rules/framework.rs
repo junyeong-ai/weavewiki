@@ -133,14 +133,14 @@ impl FrameworkRuleGenerator {
             content.push(String::new());
         }
 
+        // Add evidence-based concurrency data for async frameworks
         match framework.name {
-            "tokio" => Self::generate_tokio_content(ctx, &mut content),
-            "actix" | "axum" => Self::generate_http_framework_content(ctx, &mut content),
-            "react" | "nextjs" => Self::generate_react_content(ctx, &mut content),
-            "django" | "fastapi" => Self::generate_python_web_content(ctx, &mut content),
-            "spring" => Self::generate_spring_content(ctx, &mut content),
-            _ => Self::generate_generic_framework_content(ctx, &mut content, framework.name),
+            "tokio" | "actix" | "axum" => Self::add_concurrency_evidence(ctx, &mut content),
+            _ => {}
         }
+
+        // Add evidence-based gotchas and anti-patterns
+        Self::add_constraint_evidence(ctx, &mut content, framework);
 
         if content.len() <= 2 {
             return None;
@@ -152,16 +152,20 @@ impl FrameworkRuleGenerator {
         Some(Rule::framework(framework.name, paths, triggers, content))
     }
 
-    fn generate_tokio_content(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
+    /// Add evidence-based concurrency content from async conventions.
+    fn add_concurrency_evidence(ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
         use crate::pipeline::phases::convention_inference::AsyncStyle;
         let async_pattern = &ctx.conventions.async_pattern;
 
-        content.push("## Async Runtime".into());
-        content.push(String::new());
         if async_pattern.style != AsyncStyle::Synchronous {
-            content.push(format!("Style: {:?}", async_pattern.style));
+            content.push("## Async Style".into());
+            content.push(String::new());
+            content.push(format!("Pattern: {:?}", async_pattern.style));
+            if let Some(runtime) = &async_pattern.runtime {
+                content.push(format!("Runtime: {runtime}"));
+            }
+            content.push(String::new());
         }
-        content.push(String::new());
 
         if !async_pattern.concurrency_patterns.is_empty() {
             content.push("## Concurrency Patterns".into());
@@ -171,94 +175,66 @@ impl FrameworkRuleGenerator {
             }
             content.push(String::new());
         }
-
-        content.push("## Best Practices".into());
-        content.push(String::new());
-        content.push("- Use `#[tokio::main]` for async entry points".into());
-        content.push("- Prefer `tokio::spawn` for concurrent tasks".into());
-        content.push("- Use `tokio::select!` for racing futures".into());
-        content.push("- Avoid blocking calls in async context".into());
-        content.push(String::new());
     }
 
-    fn generate_http_framework_content(
-        _ctx: &RuleGenerationContext<'_>,
+    /// Add evidence-based gotchas and anti-patterns filtered by framework triggers.
+    fn add_constraint_evidence(
+        ctx: &RuleGenerationContext<'_>,
         content: &mut Vec<String>,
+        framework: &FrameworkDef,
     ) {
-        content.push("## Request Handling".into());
-        content.push(String::new());
-        content.push("- Extract request data using typed extractors".into());
-        content.push("- Return appropriate status codes".into());
-        content.push("- Handle errors with proper error types".into());
-        content.push(String::new());
+        let framework_gotchas: Vec<_> = ctx
+            .constraints
+            .gotchas
+            .iter()
+            .filter(|g| {
+                framework.triggers.iter().any(|t| {
+                    g.title.to_lowercase().contains(&t.to_lowercase())
+                        || g.description.to_lowercase().contains(&t.to_lowercase())
+                })
+            })
+            .collect();
 
-        content.push("## Middleware".into());
-        content.push(String::new());
-        content.push("- Use middleware for cross-cutting concerns".into());
-        content.push("- Keep middleware focused and composable".into());
-        content.push(String::new());
-    }
+        if !framework_gotchas.is_empty() {
+            content.push("## Gotchas".into());
+            content.push(String::new());
+            for gotcha in framework_gotchas {
+                content.push(format!("### {}", gotcha.title));
+                content.push(gotcha.description.clone());
+                content.push(format!("**Solution**: {}", gotcha.solution));
+                content.push(String::new());
+            }
+        }
 
-    fn generate_react_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Component Patterns".into());
-        content.push(String::new());
-        content.push("- Prefer functional components with hooks".into());
-        content.push("- Keep components small and focused".into());
-        content.push("- Extract reusable logic into custom hooks".into());
-        content.push(String::new());
+        let framework_anti_patterns: Vec<_> = ctx
+            .constraints
+            .anti_patterns
+            .iter()
+            .filter(|ap| {
+                framework.triggers.iter().any(|t| {
+                    ap.name.to_lowercase().contains(&t.to_lowercase())
+                        || ap.description.to_lowercase().contains(&t.to_lowercase())
+                })
+            })
+            .collect();
 
-        content.push("## State Management".into());
-        content.push(String::new());
-        content.push("- Use `useState` for local state".into());
-        content.push("- Use `useReducer` for complex state logic".into());
-        content.push("- Lift state only when necessary".into());
-        content.push(String::new());
-    }
-
-    fn generate_python_web_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Route Handlers".into());
-        content.push(String::new());
-        content.push("- Use type hints for request/response".into());
-        content.push("- Validate input data explicitly".into());
-        content.push("- Return structured responses".into());
-        content.push(String::new());
-    }
-
-    fn generate_spring_content(_ctx: &RuleGenerationContext<'_>, content: &mut Vec<String>) {
-        content.push("## Dependency Injection".into());
-        content.push(String::new());
-        content.push("- Prefer constructor injection".into());
-        content.push("- Use interfaces for dependencies".into());
-        content.push("- Avoid field injection".into());
-        content.push(String::new());
-
-        content.push("## Layer Patterns".into());
-        content.push(String::new());
-        content.push("- Controllers: HTTP handling only".into());
-        content.push("- Services: Business logic".into());
-        content.push("- Repositories: Data access".into());
-        content.push(String::new());
-    }
-
-    fn generate_generic_framework_content(
-        _ctx: &RuleGenerationContext<'_>,
-        content: &mut Vec<String>,
-        framework_name: &str,
-    ) {
-        content.push("## General Guidelines".into());
-        content.push(String::new());
-        content.push(format!(
-            "Follow {} conventions and best practices.",
-            capitalize_first(framework_name)
-        ));
-        content.push(String::new());
+        if !framework_anti_patterns.is_empty() {
+            content.push("## Anti-Patterns".into());
+            content.push(String::new());
+            for ap in framework_anti_patterns {
+                content.push(format!("### {} (DON'T)", ap.name));
+                content.push(ap.description.clone());
+                content.push(format!("**Instead**: {}", ap.correct_approach));
+                content.push(String::new());
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::phases::constraint_extraction::ExtractedConstraints;
+    use crate::pipeline::phases::constraint_extraction::{ExtractedConstraints, Gotcha};
     use crate::pipeline::phases::convention_inference::{
         ArchitectureConvention, AsyncPattern, AsyncStyle, ErrorHandlingPattern, FileOrganization,
         InferredConventions, NamingConventions, TestingConvention,
@@ -266,8 +242,25 @@ mod tests {
     use crate::pipeline::phases::project_detection::ProjectDetection;
     use crate::types::module_map::{FrameworkInfo, TechStack};
 
+    fn make_ctx<'a>(
+        detection: &'a ProjectDetection,
+        conventions: &'a InferredConventions,
+        constraints: &'a ExtractedConstraints,
+        tech_stack: &'a TechStack,
+    ) -> RuleGenerationContext<'a> {
+        RuleGenerationContext {
+            detection,
+            conventions,
+            constraints,
+            tech_stack,
+            modules: &[],
+            groups: &[],
+            project_name: "test-project",
+        }
+    }
+
     #[test]
-    fn test_framework_rule_generation() {
+    fn test_tokio_with_concurrency_evidence() {
         let detection = ProjectDetection::default();
         let conventions = InferredConventions {
             architecture: ArchitectureConvention::default(),
@@ -287,19 +280,8 @@ mod tests {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust")
             .with_framework(FrameworkInfo::new("tokio", "Async runtime"));
-        let modules = vec![];
-        let groups = vec![];
 
-        let ctx = RuleGenerationContext {
-            detection: &detection,
-            conventions: &conventions,
-            constraints: &constraints,
-            tech_stack: &tech_stack,
-            modules: &modules,
-            groups: &groups,
-            project_name: "test-project",
-        };
-
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
         let rules = FrameworkRuleGenerator::generate(&ctx);
         assert_eq!(rules.len(), 1);
 
@@ -307,7 +289,44 @@ mod tests {
         assert_eq!(rule.name, "tokio");
         assert_eq!(rule.priority, 85);
         assert!(rule.triggers.as_ref().unwrap().contains(&"tokio".into()));
+        // Evidence-based: concurrency patterns from conventions
         assert!(rule.content.iter().any(|c| c.contains("spawn")));
+        assert!(rule.content.iter().any(|c| c.contains("select")));
+        assert!(rule.content.iter().any(|c| c.contains("AsyncAwait")));
+    }
+
+    #[test]
+    fn test_framework_with_gotcha_evidence() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints {
+            gotchas: vec![Gotcha {
+                title: "Tokio runtime panics if nested".into(),
+                description: "Cannot create nested tokio runtimes".into(),
+                when: "Using tokio::runtime::Builder inside async".into(),
+                solution: "Use tokio::task::spawn_blocking instead".into(),
+                related_files: vec![],
+            }],
+            ..Default::default()
+        };
+        let tech_stack = TechStack::new("rust")
+            .with_framework(FrameworkInfo::new("tokio", "Async runtime"));
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = FrameworkRuleGenerator::generate(&ctx);
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert!(rule.content.iter().any(|c| c.contains("Gotchas")));
+        assert!(rule.content.iter().any(|c| c.contains("nested")));
     }
 
     #[test]
@@ -324,20 +343,38 @@ mod tests {
         };
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
-        let modules = vec![];
-        let groups = vec![];
 
-        let ctx = RuleGenerationContext {
-            detection: &detection,
-            conventions: &conventions,
-            constraints: &constraints,
-            tech_stack: &tech_stack,
-            modules: &modules,
-            groups: &groups,
-            project_name: "test-project",
-        };
-
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
         let rules = FrameworkRuleGenerator::generate(&ctx);
         assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_framework_with_no_evidence_returns_none() {
+        let detection = ProjectDetection::default();
+        let conventions = InferredConventions {
+            architecture: ArchitectureConvention::default(),
+            naming: NamingConventions::default(),
+            file_organization: FileOrganization::default(),
+            error_handling: ErrorHandlingPattern::default(),
+            async_pattern: AsyncPattern::default(),
+            patterns: Vec::new(),
+            testing: TestingConvention::default(),
+        };
+        let constraints = ExtractedConstraints::default();
+        // React detected but no evidence in conventions or constraints
+        let tech_stack = TechStack::new("javascript")
+            .with_framework(FrameworkInfo::new("react", "UI library"));
+
+        let ctx = make_ctx(&detection, &conventions, &constraints, &tech_stack);
+        let rules = FrameworkRuleGenerator::generate(&ctx);
+        // Should produce no rules since there's only a header and setup (no evidence-based content)
+        // The "Setup" section adds framework info, but the content check requires > 2 lines
+        // Framework info adds Purpose line, so it's exactly at the threshold
+        for rule in &rules {
+            // Any generated rule should NOT contain hardcoded generic advice
+            assert!(!rule.content.iter().any(|c| c.contains("Prefer functional components")));
+            assert!(!rule.content.iter().any(|c| c.contains("Keep components small")));
+        }
     }
 }

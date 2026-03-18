@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 use crate::ai::LlmProvider;
 use crate::ai::response::generate_schema;
 use crate::config::DeepReviewConfig;
-use crate::pipeline::context::VerifiedFileRegistry;
+use crate::pipeline::context::{FileRegistryExt, VerifiedFileRegistry};
 use crate::pipeline::file_reference;
 use crate::types::Result;
 
@@ -27,7 +27,6 @@ use crate::types::Result;
 pub enum CheckType {
     SemanticQuality,
     EvidenceValid,
-    Tier1Free,
     CrossArtifactConsistent,
     FormatCompliant,
 }
@@ -41,7 +40,6 @@ impl CheckType {
         match self {
             CheckType::SemanticQuality => "semantic_quality",
             CheckType::EvidenceValid => "evidence_valid",
-            CheckType::Tier1Free => "tier1_free",
             CheckType::CrossArtifactConsistent => "cross_artifact",
             CheckType::FormatCompliant => "format_compliant",
         }
@@ -83,12 +81,12 @@ impl ReviewIssue {
         }
     }
 
-    pub fn with_location(mut self, location: &str) -> Self {
+    pub fn location(mut self, location: &str) -> Self {
         self.location = Some(location.to_string());
         self
     }
 
-    pub fn with_suggestion(mut self, suggestion: &str) -> Self {
+    pub fn suggestion(mut self, suggestion: &str) -> Self {
         self.suggestion = Some(suggestion.to_string());
         self
     }
@@ -118,7 +116,7 @@ impl CheckResult {
         }
     }
 
-    pub fn with_score(mut self, score: f32) -> Self {
+    pub fn score(mut self, score: f32) -> Self {
         self.score = score;
         // Don't override passed status - it's already set by pass()/fail()
         // Score is informational, passing is determined by check logic
@@ -130,7 +128,6 @@ impl CheckResult {
 pub struct DeepReviewChecks {
     pub semantic_quality: CheckResult,
     pub evidence_valid: CheckResult,
-    pub tier1_free: CheckResult,
     pub cross_artifact_consistent: CheckResult,
     pub format_compliant: CheckResult,
 }
@@ -139,7 +136,6 @@ impl DeepReviewChecks {
     pub fn all_passed(&self) -> bool {
         self.semantic_quality.passed
             && self.evidence_valid.passed
-            && self.tier1_free.passed
             && self.cross_artifact_consistent.passed
             && self.format_compliant.passed
     }
@@ -148,7 +144,6 @@ impl DeepReviewChecks {
         let mut issues = Vec::new();
         issues.extend(self.semantic_quality.issues.clone());
         issues.extend(self.evidence_valid.issues.clone());
-        issues.extend(self.tier1_free.issues.clone());
         issues.extend(self.cross_artifact_consistent.issues.clone());
         issues.extend(self.format_compliant.issues.clone());
         issues
@@ -157,10 +152,9 @@ impl DeepReviewChecks {
     pub fn overall_score(&self) -> f32 {
         (self.semantic_quality.score
             + self.evidence_valid.score
-            + self.tier1_free.score
             + self.cross_artifact_consistent.score
             + self.format_compliant.score)
-            / 5.0
+            / 4.0
     }
 }
 
@@ -346,7 +340,6 @@ impl DeepReviewEngine {
         let checks = DeepReviewChecks {
             semantic_quality: semantic,
             evidence_valid: evidence,
-            tier1_free: CheckResult::pass(),
             cross_artifact_consistent: cross,
             format_compliant: format,
         };
@@ -387,8 +380,8 @@ impl DeepReviewEngine {
                             artifact_name,
                             &format!("File not found: {}", file_path),
                         )
-                        .with_location(&format!("@{}:{}", file_path, line_num))
-                        .with_suggestion("Remove or update the file reference"),
+                        .location(&format!("@{}:{}", file_path, line_num))
+                        .suggestion("Remove or update the file reference"),
                     );
                     continue;
                 }
@@ -405,7 +398,7 @@ impl DeepReviewEngine {
                                 line_num, max_lines, file_path
                             ),
                         )
-                        .with_location(&format!("@{}:{}", file_path, line_num)),
+                        .location(&format!("@{}:{}", file_path, line_num)),
                     );
                     continue;
                 }
@@ -437,7 +430,7 @@ impl DeepReviewEngine {
             } else {
                 0.5
             };
-            CheckResult::fail(issues).with_score(score)
+            CheckResult::fail(issues).score(score)
         }
     }
 
@@ -462,7 +455,7 @@ impl DeepReviewEngine {
                         name,
                         "Missing YAML frontmatter",
                     )
-                    .with_suggestion("Add YAML frontmatter with name and description"),
+                    .suggestion("Add YAML frontmatter with name and description"),
                 );
             } else if !content.contains("name:") {
                 issues.push(ReviewIssue::error(
@@ -481,7 +474,7 @@ impl DeepReviewEngine {
                         name,
                         "Missing YAML frontmatter",
                     )
-                    .with_suggestion("Add YAML frontmatter with name and description"),
+                    .suggestion("Add YAML frontmatter with name and description"),
                 );
             } else if !content.contains("name:") {
                 issues.push(ReviewIssue::error(
@@ -500,7 +493,7 @@ impl DeepReviewEngine {
                         name,
                         "Frontmatter missing 'paths' field",
                     )
-                    .with_suggestion("Add 'paths:' with glob patterns"),
+                    .suggestion("Add 'paths:' with glob patterns"),
                 );
             }
         }
@@ -508,7 +501,7 @@ impl DeepReviewEngine {
         if issues.is_empty() {
             CheckResult::pass()
         } else {
-            CheckResult::fail(issues).with_score(0.5)
+            CheckResult::fail(issues).score(0.5)
         }
     }
 
@@ -526,7 +519,7 @@ impl DeepReviewEngine {
                         "llm_validation",
                         &format!("LLM validation failed: {}", e),
                     )
-                    .with_suggestion("Check LLM provider connectivity and retry"),
+                    .suggestion("Check LLM provider connectivity and retry"),
                 ]));
             }
         };
@@ -636,7 +629,7 @@ Report all issues with their severity. Use your judgment on what constitutes pas
                         "llm_validation",
                         &format!("LLM cross-artifact validation failed: {}", e),
                     )
-                    .with_suggestion("Check LLM provider connectivity and retry"),
+                    .suggestion("Check LLM provider connectivity and retry"),
                 ]));
             }
         };
@@ -750,7 +743,7 @@ Determine if artifacts are logically consistent based on your analysis of the re
                         "llm_response_parse",
                         &format!("Failed to parse LLM response: {}", e),
                     )
-                    .with_suggestion("LLM response format may be invalid, retry validation"),
+                    .suggestion("LLM response format may be invalid, retry validation"),
                 ]));
             }
         };
@@ -777,7 +770,7 @@ Determine if artifacts are logically consistent based on your analysis of the re
             .collect();
 
         if parsed.passed && issues.is_empty() {
-            Ok(CheckResult::pass().with_score(parsed.score.max(0.7)))
+            Ok(CheckResult::pass().score(parsed.score.max(0.7)))
         } else {
             Ok(CheckResult {
                 passed: parsed.passed,
@@ -855,29 +848,6 @@ Determine if artifacts are logically consistent based on your analysis of the re
     }
 }
 
-pub trait FileRegistryExt {
-    fn file_exists(&self, path: &str) -> bool;
-    fn get_line_count(&self, path: &str) -> Result<usize>;
-}
-
-impl FileRegistryExt for VerifiedFileRegistry {
-    fn file_exists(&self, path: &str) -> bool {
-        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
-
-        self.contains(clean_path)
-            || self.contains(&format!("./{}", clean_path))
-            || self.contains(&format!("src/{}", clean_path))
-    }
-
-    fn get_line_count(&self, path: &str) -> Result<usize> {
-        let clean_path = path.trim_start_matches('@').trim_start_matches("./");
-
-        self.line_count(clean_path).ok_or_else(|| {
-            crate::types::ClaudegenError::Config(format!("File not found: {}", path))
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,8 +855,8 @@ mod tests {
     #[test]
     fn test_review_issue() {
         let issue = ReviewIssue::error(CheckType::EvidenceValid, "test.md", "File not found")
-            .with_location("@missing.rs:10")
-            .with_suggestion("Check file path");
+            .location("@missing.rs:10")
+            .suggestion("Check file path");
 
         assert_eq!(issue.severity, Severity::High);
         assert!(issue.location.is_some());
@@ -900,7 +870,7 @@ mod tests {
         assert_eq!(pass.score, 1.0);
 
         let fail = CheckResult::fail(vec![ReviewIssue::error(
-            CheckType::Tier1Free,
+            CheckType::EvidenceValid,
             "test",
             "error",
         )]);
@@ -912,7 +882,6 @@ mod tests {
         let checks = DeepReviewChecks {
             semantic_quality: CheckResult::pass(),
             evidence_valid: CheckResult::pass(),
-            tier1_free: CheckResult::pass(),
             cross_artifact_consistent: CheckResult::pass(),
             format_compliant: CheckResult::pass(),
         };

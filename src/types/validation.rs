@@ -66,7 +66,7 @@ impl ValidationIssue {
         }
     }
 
-    pub fn with_location(mut self, location: impl Into<String>) -> Self {
+    pub fn location(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
         self
     }

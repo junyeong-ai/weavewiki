@@ -32,7 +32,7 @@ impl QualityPrompts {
         Self::default()
     }
 
-    pub fn with_max_steps(mut self, max: usize) -> Self {
+    pub fn set_max_steps(mut self, max: usize) -> Self {
         self.max_steps = max;
         self
     }

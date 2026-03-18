@@ -68,7 +68,7 @@ impl ModuleDetector {
         }
     }
 
-    pub fn with_grouping_threshold(mut self, min_modules: usize) -> Self {
+    pub fn grouping_threshold(mut self, min_modules: usize) -> Self {
         self.min_modules_for_grouping = min_modules;
         self
     }

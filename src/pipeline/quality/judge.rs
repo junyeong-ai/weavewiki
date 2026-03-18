@@ -7,7 +7,7 @@ use crate::Result;
 use crate::ai::LlmProvider;
 use crate::ai::response::generate_schema;
 use crate::ai::validation::deserialize_llm_response;
-use crate::types::{Agent, ClaudegenError, ContentTier, Rule, Severity, Skill};
+use crate::types::{Agent, ContentTier, Rule, Severity, Skill};
 
 #[derive(Debug, Clone)]
 pub struct JudgeConfig {
@@ -36,9 +36,19 @@ pub struct TierValidation {
     pub confidence: f32,
 }
 
+/// Project context for enriched quality evaluation
+#[derive(Debug, Clone, Default)]
+pub struct ProjectContext {
+    pub project_name: String,
+    pub primary_language: Option<String>,
+    pub module_names: Vec<String>,
+}
+
 pub struct LlmJudge {
     provider: Arc<dyn LlmProvider>,
     config: JudgeConfig,
+    file_registry: Option<crate::pipeline::context::VerifiedFileRegistry>,
+    project_context: Option<ProjectContext>,
 }
 
 impl LlmJudge {
@@ -46,11 +56,23 @@ impl LlmJudge {
         Self {
             provider,
             config: JudgeConfig::default(),
+            file_registry: None,
+            project_context: None,
         }
     }
 
-    pub fn with_config(mut self, config: JudgeConfig) -> Self {
+    pub fn config(mut self, config: JudgeConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn file_registry(mut self, registry: crate::pipeline::context::VerifiedFileRegistry) -> Self {
+        self.file_registry = Some(registry);
+        self
+    }
+
+    pub fn project_context(mut self, ctx: ProjectContext) -> Self {
+        self.project_context = Some(ctx);
         self
     }
 
@@ -85,7 +107,26 @@ impl LlmJudge {
         let schema = self.schema();
 
         let response = self.provider.generate(&prompt, &schema).await?;
-        self.parse_response(&response.content.to_string())
+        self.parse_response_value(&response.content)
+    }
+
+    /// Evaluate each artifact individually, returning per-artifact results.
+    pub async fn evaluate_all(&self, artifacts: &Artifacts) -> Result<Vec<JudgmentResult>> {
+        let mut results = Vec::with_capacity(
+            artifacts.skills.len() + artifacts.agents.len() + artifacts.rules.len(),
+        );
+
+        for skill in &artifacts.skills {
+            results.push(self.evaluate_skill(skill).await?);
+        }
+        for agent in &artifacts.agents {
+            results.push(self.evaluate_agent(agent).await?);
+        }
+        for rule in &artifacts.rules {
+            results.push(self.evaluate_rule(rule).await?);
+        }
+
+        Ok(results)
     }
 
     pub async fn evaluate_artifacts(&self, artifacts: &Artifacts) -> Result<JudgmentResult> {
@@ -140,6 +181,7 @@ impl LlmJudge {
             tier,
             issues: all_issues,
             suggestions: all_suggestions,
+            value_assessment: None,
         })
     }
 
@@ -183,10 +225,8 @@ impl LlmJudge {
         generate_schema::<JudgmentOutput>()
     }
 
-    fn parse_response(&self, content: &str) -> Result<JudgmentResult> {
-        let value: serde_json::Value = serde_json::from_str(content)
-            .map_err(|e| ClaudegenError::LlmApi(format!("[judge] JSON parse failed: {e}")))?;
-        let output: JudgmentOutput = deserialize_llm_response(&value, "judge")?;
+    fn parse_response_value(&self, value: &serde_json::Value) -> Result<JudgmentResult> {
+        let output: JudgmentOutput = deserialize_llm_response(value, "judge")?;
 
         let tier = match output.tier {
             1 => ContentTier::Tier1Generic,
@@ -230,7 +270,48 @@ impl LlmJudge {
             tier,
             issues,
             suggestions,
+            value_assessment: None,
         })
+    }
+
+    /// Aggregate per-artifact judgment results into a single summary.
+    pub fn aggregate_results(results: &[JudgmentResult]) -> JudgmentResult {
+        if results.is_empty() {
+            return JudgmentResult {
+                overall_score: 0.0,
+                tier: ContentTier::Tier1Generic,
+                issues: Vec::new(),
+                suggestions: Vec::new(),
+                value_assessment: None,
+            };
+        }
+
+        let scores: Vec<f32> = results.iter().map(|r| r.overall_score).collect();
+        let overall_score = scores.iter().sum::<f32>() / scores.len() as f32;
+
+        let tier = results
+            .iter()
+            .map(|r| r.tier)
+            .min_by_key(|t| match t {
+                ContentTier::Tier0Hallucinated => 0,
+                ContentTier::Tier1Generic => 1,
+                ContentTier::Tier2Convention => 2,
+                ContentTier::Tier3Constraint => 3,
+            })
+            .unwrap_or(ContentTier::Tier1Generic);
+
+        let issues: Vec<QualityIssue> =
+            results.iter().flat_map(|r| r.issues.clone()).collect();
+        let suggestions: Vec<Suggestion> =
+            results.iter().flat_map(|r| r.suggestions.clone()).collect();
+
+        JudgmentResult {
+            overall_score,
+            tier,
+            issues,
+            suggestions,
+            value_assessment: None,
+        }
     }
 
     /// LLM-based tier validation
@@ -293,12 +374,32 @@ pub struct Artifacts {
     pub rules: Vec<Rule>,
 }
 
+impl From<&crate::types::artifacts::GeneratedArtifacts> for Artifacts {
+    fn from(ga: &crate::types::artifacts::GeneratedArtifacts) -> Self {
+        Self {
+            skills: ga.skills.clone(),
+            agents: ga.agents.clone(),
+            rules: ga.rules.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct JudgmentResult {
     pub overall_score: f32,
     pub tier: ContentTier,
     pub issues: Vec<QualityIssue>,
     pub suggestions: Vec<Suggestion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_assessment: Option<ValueAssessment>,
+}
+
+/// Per-dimension value scores from LLM judgment.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ValueAssessment {
+    pub actionability: f32,
+    pub domain_specificity: f32,
+    pub information_density: f32,
 }
 
 impl JudgmentResult {
@@ -395,6 +496,7 @@ mod tests {
             tier: ContentTier::Tier2Convention,
             issues: vec![],
             suggestions: vec![],
+            value_assessment: None,
         };
         assert!(result.is_acceptable(0.7));
         assert!(!result.is_acceptable(0.9));
@@ -402,33 +504,32 @@ mod tests {
 
     #[test]
     fn test_tier1_uses_standard_threshold() {
-        // Tier1 is now treated the same as other tiers - LLM judgment is authoritative
-        // High quality Tier1 is acceptable
         let high_quality = JudgmentResult {
             overall_score: 0.95,
             tier: ContentTier::Tier1Generic,
             issues: vec![],
             suggestions: vec![],
+            value_assessment: None,
         };
         assert!(high_quality.is_acceptable(0.5));
 
-        // Tier1 above min_score is acceptable (no special 0.9 threshold)
         let above_threshold = JudgmentResult {
             overall_score: 0.85,
             tier: ContentTier::Tier1Generic,
             issues: vec![],
             suggestions: vec![],
+            value_assessment: None,
         };
-        assert!(above_threshold.is_acceptable(0.5)); // Now passes - LLM determined quality
-        assert!(!above_threshold.is_acceptable(0.9)); // Below 0.9 threshold
+        assert!(above_threshold.is_acceptable(0.5));
+        assert!(!above_threshold.is_acceptable(0.9));
 
-        // Tier0 (hallucinated) is always rejected
         let hallucinated = JudgmentResult {
             overall_score: 0.99,
             tier: ContentTier::Tier0Hallucinated,
             issues: vec![],
             suggestions: vec![],
+            value_assessment: None,
         };
-        assert!(!hallucinated.is_acceptable(0.5)); // Always rejected
+        assert!(!hallucinated.is_acceptable(0.5));
     }
 }

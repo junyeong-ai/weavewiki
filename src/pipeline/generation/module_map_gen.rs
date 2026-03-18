@@ -74,8 +74,8 @@ mod tests {
     #[test]
     fn test_generate_module_map() {
         let modules = vec![DetectedModule::new("test", "Test module")
-            .with_paths(vec!["src/test/".to_string()])
-            .with_metrics(1.0, 0.5, 0.1)];
+            .paths(vec!["src/test/".to_string()])
+            .metrics(1.0, 0.5, 0.1)];
 
         let map = ModuleMapGenerator::generate_simple(&modules, &[], "test-project").unwrap();
         let json = map.to_json().unwrap();

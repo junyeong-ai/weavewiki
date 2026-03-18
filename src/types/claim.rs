@@ -85,17 +85,17 @@ impl ClaimEvidence {
         }
     }
 
-    pub fn with_line(mut self, line: u32) -> Self {
+    pub fn line(mut self, line: u32) -> Self {
         self.line = Some(line);
         self
     }
 
-    pub fn with_snippet(mut self, snippet: impl Into<String>) -> Self {
+    pub fn snippet(mut self, snippet: impl Into<String>) -> Self {
         self.snippet = Some(snippet.into());
         self
     }
 
-    pub fn with_hash(mut self, hash: impl Into<String>) -> Self {
+    pub fn hash(mut self, hash: impl Into<String>) -> Self {
         self.hash = Some(hash.into());
         self
     }
@@ -127,7 +127,7 @@ impl VerificationIssue {
         }
     }
 
-    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+    pub fn suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
         self
     }

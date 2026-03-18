@@ -58,15 +58,15 @@ async fn run_async(options: GenerateOptions) -> Result<()> {
         .with_tracking(budget.clone(), metrics.clone());
 
     let mut quality_loop = QualityLoop::new(project_root.clone(), providers, config.clone())
-        .with_budget(budget.clone())
-        .with_metrics(metrics.clone());
+        .budget(budget.clone())
+        .metrics(metrics.clone());
 
     if let Some(output_dir) = options.output {
-        quality_loop = quality_loop.with_output_dir(output_dir);
+        quality_loop = quality_loop.output_dir(output_dir);
     }
 
     if options.resume {
-        quality_loop = quality_loop.with_resume(true);
+        quality_loop = quality_loop.resume(true);
     }
 
     println!("\nStarting pipeline...\n");

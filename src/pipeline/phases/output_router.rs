@@ -109,6 +109,16 @@ pub enum RuleContentSource {
 pub struct SkillsPlan {
     pub generate_skills: bool,
     pub planned_skills: Vec<PlannedSkill>,
+    pub root_skills: Vec<PlannedSkill>,
+    pub workspace_skills: Vec<WorkspaceSkillPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSkillPlan {
+    pub workspace_name: String,
+    pub workspace_path: String,
+    pub skills: Vec<PlannedSkill>,
+    pub output_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +468,8 @@ impl OutputRouter {
         SkillsPlan {
             generate_skills: !planned_skills.is_empty(),
             planned_skills,
+            root_skills: Vec::new(),
+            workspace_skills: Vec::new(),
         }
     }
 

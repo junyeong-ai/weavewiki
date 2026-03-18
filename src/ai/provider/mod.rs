@@ -540,7 +540,7 @@ fn wrap_with_resilience(
     };
     let chain = ProviderChainBuilder::new()
         .add_shared(provider)
-        .with_config(chain_config)
+        .config(chain_config)
         .build();
     Arc::new(chain)
 }

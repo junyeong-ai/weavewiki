@@ -110,7 +110,7 @@ impl AnalysisHint {
     }
 
     /// Add evidence supporting this hint
-    pub fn with_evidence(mut self, evidence: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn evidence(mut self, evidence: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.evidence = evidence.into_iter().map(Into::into).collect();
         self
     }
@@ -323,7 +323,7 @@ mod tests {
             HintCategory::DirectoryRole,
             "hooks/ suggests React hooks pattern",
         )
-        .with_evidence(["hooks/ directory exists"]);
+        .evidence(["hooks/ directory exists"]);
 
         let formatted = hint.to_prompt_format();
         assert!(formatted.contains("[MEDIUM - verify]"));

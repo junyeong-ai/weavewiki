@@ -384,12 +384,12 @@ impl ConsoleRenderer {
         }
     }
 
-    pub fn with_spinner(mut self, show: bool) -> Self {
+    pub fn spinner(mut self, show: bool) -> Self {
         self.show_spinner = show;
         self
     }
 
-    pub fn with_eta(mut self, show: bool) -> Self {
+    pub fn eta(mut self, show: bool) -> Self {
         self.show_eta = show;
         self
     }

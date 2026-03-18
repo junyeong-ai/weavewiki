@@ -216,7 +216,7 @@ mod inner {
             })
         }
 
-        pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
+        pub fn max_tokens(mut self, max_tokens: usize) -> Self {
             self.max_tokens = max_tokens;
             self
         }

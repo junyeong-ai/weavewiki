@@ -58,6 +58,7 @@ impl From<&super::refinement::DetectedIssue> for IssueKind {
             DI::PlanMismatch => Self::PlanMismatch,
             DI::MissingModule { .. } => Self::MissingModule,
             DI::PartialModuleCoverage { .. } => Self::PartialModuleCoverage,
+            DI::LowVerificationRatio { .. } => Self::WeakEvidence,
             DI::Other { kind, .. } => Self::Other(kind.clone()),
         }
     }
@@ -82,7 +83,7 @@ impl StrategyIssue {
         }
     }
 
-    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+    pub fn suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
         self
     }
@@ -136,25 +137,25 @@ impl<'a> StrategyContext<'a> {
     }
 
     /// Add refinement issues to address
-    pub fn with_issues(mut self, issues: Vec<StrategyIssue>) -> Self {
+    pub fn issues(mut self, issues: Vec<StrategyIssue>) -> Self {
         self.issues = issues;
         self
     }
 
     /// Set pre-computed suggestions
-    pub fn with_suggestions(mut self, suggestions: Vec<String>) -> Self {
+    pub fn suggestions(mut self, suggestions: Vec<String>) -> Self {
         self.suggestions = suggestions;
         self
     }
 
     /// Set validation feedback
-    pub fn with_validation_feedback(mut self, feedback: ValidationFeedback) -> Self {
+    pub fn validation_feedback(mut self, feedback: ValidationFeedback) -> Self {
         self.validation_feedback = Some(feedback);
         self
     }
 
     /// Set quality acceptance delta
-    pub fn with_acceptance_delta(mut self, delta: f32) -> Self {
+    pub fn acceptance_delta(mut self, delta: f32) -> Self {
         self.quality_acceptance_delta = delta;
         self
     }
@@ -307,6 +308,7 @@ pub struct StrategyRotator {
     history: HashMap<(String, IssueKind), Vec<StrategyAttempt>>,
     max_history_per_item: usize,
     escalation_level: usize,
+    content_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +356,7 @@ impl StrategyRotator {
             history: HashMap::new(),
             max_history_per_item: 10,
             escalation_level: 0,
+            content_hashes: Vec::new(),
         }
     }
 
@@ -483,6 +486,22 @@ impl StrategyRotator {
 
     pub fn get_strategy_by_name(&self, name: &str) -> Option<Arc<dyn RefinementStrategy>> {
         self.strategies.iter().find(|s| s.name() == name).cloned()
+    }
+
+    /// Record a content hash and return true if oscillation detected (hash seen before).
+    pub fn record_content_hash(&mut self, hash: String) -> bool {
+        let is_duplicate = self.content_hashes.contains(&hash);
+        self.content_hashes.push(hash);
+        // Bound the hash history
+        if self.content_hashes.len() > 50 {
+            self.content_hashes.remove(0);
+        }
+        is_duplicate
+    }
+
+    /// Check if the escalation level is at maximum.
+    pub fn is_at_max_escalation(&self) -> bool {
+        self.escalation_level >= self.strategies.len().saturating_sub(1)
     }
 }
 

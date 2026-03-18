@@ -3,6 +3,7 @@
 //! Provides LLM integration for intelligent plugin generation.
 
 pub mod budget;
+pub mod context_tracker;
 pub mod metrics;
 pub mod model_capabilities;
 pub mod prompt;

@@ -230,7 +230,7 @@ impl InferredConventions {
                     HintCategory::NamingConvention,
                     format!("File naming uses {:?}", self.naming.file_naming.case),
                 )
-                .with_evidence(self.naming.file_naming.examples.iter().take(3).cloned()),
+                .evidence(self.naming.file_naming.examples.iter().take(3).cloned()),
             );
         }
 
@@ -243,7 +243,7 @@ impl InferredConventions {
                     self.error_handling.style
                 ),
             )
-            .with_evidence([format!(
+            .evidence([format!(
                 "Propagation: {}",
                 self.error_handling.propagation_pattern
             )]),
@@ -256,7 +256,7 @@ impl InferredConventions {
                     HintCategory::AsyncPattern,
                     format!("Async pattern detected: {:?}", self.async_pattern.style),
                 )
-                .with_evidence(
+                .evidence(
                     self.async_pattern
                         .runtime
                         .iter()
@@ -272,7 +272,7 @@ impl InferredConventions {
                     HintCategory::Architecture,
                     format!("Architecture pattern: {}", self.architecture.pattern_name),
                 )
-                .with_evidence([self.architecture.description.clone()]),
+                .evidence([self.architecture.description.clone()]),
             );
         }
 
@@ -291,7 +291,7 @@ impl InferredConventions {
                     HintCategory::TestingFramework,
                     format!("Testing framework: {}", framework),
                 )
-                .with_evidence([format!("Test location: {:?}", self.testing.location)]),
+                .evidence([format!("Test location: {:?}", self.testing.location)]),
             );
         }
 
@@ -314,7 +314,7 @@ pub fn generate_hints_from_aggregated(aggregated: &AggregatedAnalysis) -> HintCo
                 HintCategory::NamingConvention,
                 format!("Primary naming convention: {:?}", case),
             )
-            .with_evidence([format!(
+            .evidence([format!(
                 "Based on {} file samples",
                 aggregated.coverage.total_files
             )]),
@@ -328,7 +328,7 @@ pub fn generate_hints_from_aggregated(aggregated: &AggregatedAnalysis) -> HintCo
                 HintCategory::ErrorHandling,
                 format!("Detected error handling: {:?}", style),
             )
-            .with_evidence(["Based on pattern frequency in code"]),
+            .evidence(["Based on pattern frequency in code"]),
         );
     }
 
@@ -339,7 +339,7 @@ pub fn generate_hints_from_aggregated(aggregated: &AggregatedAnalysis) -> HintCo
                 HintCategory::AsyncPattern,
                 format!("Detected async pattern: {:?}", style),
             )
-            .with_evidence(["Based on async/await keyword frequency"]),
+            .evidence(["Based on async/await keyword frequency"]),
         );
     }
 
@@ -350,7 +350,7 @@ pub fn generate_hints_from_aggregated(aggregated: &AggregatedAnalysis) -> HintCo
                 HintCategory::ModuleRelationship,
                 format!("Hub module: {}", hub),
             )
-            .with_evidence(["High in/out degree in dependency graph"]),
+            .evidence(["High in/out degree in dependency graph"]),
         );
     }
 
@@ -505,6 +505,12 @@ pub enum ErrorStyle {
     Exceptions,
     ErrorCodes,
     Mixed,
+}
+
+impl std::fmt::Display for ErrorStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

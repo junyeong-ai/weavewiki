@@ -61,12 +61,12 @@ impl ArtifactValidator {
         }
     }
 
-    pub fn with_min_tier(mut self, tier: TierClassification) -> Self {
+    pub fn min_tier(mut self, tier: TierClassification) -> Self {
         self.min_tier = tier;
         self
     }
 
-    pub fn with_min_evidence(mut self, count: usize) -> Self {
+    pub fn min_evidence(mut self, count: usize) -> Self {
         self.min_evidence_count = count;
         self
     }
@@ -395,14 +395,14 @@ mod tests {
                 "Always validate input before processing.".into(),
             ],
         )
-        .with_evidence(vec![EvidenceLocation {
+        .evidence(vec![EvidenceLocation {
             file: "src/main.rs".into(),
             start_line: 10,
             end_line: 10,
             start_column: None,
             end_column: None,
         }])
-        .with_tier(crate::types::ContentTier::Tier2Convention);
+        .tier(crate::types::ContentTier::Tier2Convention);
 
         let result = validator.validate_rule(&rule, None);
         assert!(result.is_valid);
@@ -422,14 +422,14 @@ mod tests {
                 "Use best practices when coding. See @src/main.rs:1 for context.".into(),
             ],
         )
-        .with_evidence(vec![EvidenceLocation {
+        .evidence(vec![EvidenceLocation {
             file: "src/main.rs".into(),
             start_line: 1,
             end_line: 1,
             start_column: None,
             end_column: None,
         }])
-        .with_tier(crate::types::ContentTier::Tier1Generic);
+        .tier(crate::types::ContentTier::Tier1Generic);
 
         let result = validator.validate_rule(&rule, None);
         // Tier1 is purely informational - validation passes, score not affected
@@ -504,27 +504,27 @@ mod tests {
                         .into(),
                 ],
             )
-            .with_evidence(vec![EvidenceLocation {
+            .evidence(vec![EvidenceLocation {
                 file: "src/validate.rs".into(),
                 start_line: 1,
                 end_line: 1,
                 start_column: None,
                 end_column: None,
             }])
-            .with_tier(crate::types::ContentTier::Tier2Convention),
+            .tier(crate::types::ContentTier::Tier2Convention),
             // Good content and evidence - both should pass (tier is now advisory)
             Rule::new(
                 "also-valid-rule",
                 vec!["Always check authentication before processing requests.".into()],
             )
-            .with_evidence(vec![EvidenceLocation {
+            .evidence(vec![EvidenceLocation {
                 file: "src/auth.rs".into(),
                 start_line: 1,
                 end_line: 1,
                 start_column: None,
                 end_column: None,
             }])
-            .with_tier(crate::types::ContentTier::Tier1Generic), // Tier1 is advisory, not failure
+            .tier(crate::types::ContentTier::Tier1Generic), // Tier1 is advisory, not failure
         ];
 
         let result = batch.validate_rules(&rules);

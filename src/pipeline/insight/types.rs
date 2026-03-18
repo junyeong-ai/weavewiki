@@ -67,27 +67,27 @@ impl Insight {
         }
     }
 
-    pub fn with_category(mut self, category: InsightCategory) -> Self {
+    pub fn category(mut self, category: InsightCategory) -> Self {
         self.category = category;
         self
     }
 
-    pub fn with_evidence(mut self, evidence: Vec<String>) -> Self {
+    pub fn evidence(mut self, evidence: Vec<String>) -> Self {
         self.evidence = evidence;
         self
     }
 
-    pub fn with_source(mut self, source: InsightSource) -> Self {
+    pub fn source(mut self, source: InsightSource) -> Self {
         self.source = source;
         self
     }
 
-    pub fn with_severity(mut self, severity: impl Into<String>) -> Self {
+    pub fn severity(mut self, severity: impl Into<String>) -> Self {
         self.severity = Some(severity.into());
         self
     }
 
-    pub fn with_prevention(mut self, info: impl Into<String>) -> Self {
+    pub fn prevention(mut self, info: impl Into<String>) -> Self {
         self.prevention_info = Some(info.into());
         self
     }
@@ -116,7 +116,7 @@ impl ExtractedInsight {
         }
     }
 
-    pub fn with_value(mut self, value: ValueScore) -> Self {
+    pub fn value(mut self, value: ValueScore) -> Self {
         self.value = value;
         self
     }

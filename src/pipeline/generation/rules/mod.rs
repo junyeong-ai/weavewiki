@@ -126,8 +126,8 @@ mod tests {
         let constraints = ExtractedConstraints::default();
         let tech_stack = TechStack::new("rust");
         let modules = vec![DetectedModule::new("auth", "Authentication module")
-            .with_paths(vec!["src/auth/".into()])
-            .with_conventions(vec![Convention::new("secure-defaults", "Use secure defaults")])];
+            .paths(vec!["src/auth/".into()])
+            .conventions(vec![Convention::new("secure-defaults", "Use secure defaults")])];
         let groups = vec![];
 
         let ctx = create_test_context(
